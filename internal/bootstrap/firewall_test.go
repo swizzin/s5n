@@ -1,9 +1,7 @@
 package bootstrap
 
-// firewall_test.go is the host's packet filter: what box reads about it, and
-// the two changes it makes on a host where it installed k0s. No e2e can show
-// this -- kind has no firewalld -- so the command sequence is pinned here, and
-// a host with firewalld is what proves it.
+// The host's packet filter: what box reads and the two changes it makes. No e2e can
+// show this -- kind has no firewalld -- so the sequence is pinned here.
 
 import (
 	"context"
@@ -14,11 +12,9 @@ import (
 	"testing"
 )
 
-// fakeFirewallCmd answers firewall-cmd the way firewalld does: --state prints
-// "running" or fails, --query-source answers yes/no (a "no" also fails, as the
-// real command does), and --add-source writes the source into the half of the
-// configuration it names. It records every call, so a test can hold the
-// sequence to what it should be rather than to what box says about it.
+// fakeFirewallCmd answers as firewalld does: --state prints "running" or fails,
+// --query-source answers yes/no (a "no" also fails), --add-source writes the source
+// into the half it names. Every call is recorded, so the sequence is the assertion.
 type fakeFirewallCmd struct {
 	running bool
 	trusted map[string]bool // "permanent|runtime" + "|" + cidr
@@ -108,10 +104,8 @@ func (f runnerFunc) Run(ctx context.Context, path string, args ...string) ([]byt
 	return f(ctx, path, args...)
 }
 
-// TestTrustAddsEachNetworkOnceInBothHalves is the whole rule: the cluster's two
-// networks go into the trusted zone permanently (so a reload or a reboot keeps
-// them) and in the running configuration (so they take effect now), each
-// asked for first and added only when it is missing.
+// The rule: both networks in the trusted zone permanently (so a reload keeps them)
+// and now, each asked for first and added only when missing.
 func TestTrustAddsEachNetworkOnceInBothHalves(t *testing.T) {
 	pod, service := k0sPodCIDR, k0sServiceCIDR
 	cases := []struct {
@@ -143,8 +137,8 @@ func TestTrustAddsEachNetworkOnceInBothHalves(t *testing.T) {
 			},
 		},
 		{
-			// An operator's own --add-source without --permanent: live, and
-			// gone at the next reload. box fills in the half that is missing.
+			// An operator's --add-source without --permanent: live, gone at the next
+			// reload. box fills in the missing half.
 			name:    "only in the running configuration",
 			trusted: []string{"runtime|" + pod, "runtime|" + service},
 			want: []string{
@@ -185,9 +179,8 @@ func TestTrustAddsEachNetworkOnceInBothHalves(t *testing.T) {
 	}
 }
 
-// TestTrustReloadsNothing: a reload re-reads every zone from the permanent
-// configuration and would drop runtime-only changes another tool made, so box
-// writes its own two sources in both halves instead.
+// No reload: it would drop another tool's runtime-only changes, so box writes both
+// halves of its own sources.
 func TestTrustReloadsNothing(t *testing.T) {
 	fake := &fakeFirewallCmd{}
 	if err := (Firewalld{Run: fake}).Trust(context.Background(), []string{k0sPodCIDR}); err != nil {
@@ -200,8 +193,7 @@ func TestTrustReloadsNothing(t *testing.T) {
 	}
 }
 
-// TestTrustReportsARefusedAdd: a firewall-cmd that refuses is named with what
-// it said, because that text is the host's answer to what box asked for.
+// A refused add is named with what firewall-cmd said: the host's answer.
 func TestTrustReportsARefusedAdd(t *testing.T) {
 	add := "firewall-cmd --permanent --zone=trusted --add-source=" + k0sPodCIDR
 	fake := &fakeFirewallCmd{fail: map[string]error{
@@ -216,9 +208,8 @@ func TestTrustReportsARefusedAdd(t *testing.T) {
 	}
 }
 
-// TestK0sNetworksAreTheOnesBoxWrote: the networks the firewall trusts are read
-// back out of the k0s config box installs with, so the cluster and the rule
-// cannot disagree about them.
+// The trusted networks are read back from the config box installs with, so the
+// cluster and the rule cannot disagree.
 func TestK0sNetworksAreTheOnesBoxWrote(t *testing.T) {
 	pod, service, err := k0sNetworks([]byte(k0sNodeConfig(testNodeIP)))
 	if err != nil {
@@ -228,24 +219,21 @@ func TestK0sNetworksAreTheOnesBoxWrote(t *testing.T) {
 		t.Errorf("read %q and %q, want %q and %q", pod, service, k0sPodCIDR, k0sServiceCIDR)
 	}
 
-	// A k0s config without the networks is one box cannot settle: it names the
-	// reason rather than trusting nothing (which would read as "no networks").
+	// A config without the networks is one box cannot settle: it says why rather
+	// than trusting nothing.
 	if _, _, err := k0sNetworks([]byte("apiVersion: k0s.k0sproject.io/v1beta1\nkind: ClusterConfig\nspec:\n  api:\n    address: 192.0.2.10\n")); err == nil {
 		t.Error("a config with no spec.network was accepted")
 	}
-	// A quoted value reads as the network, not as the quotes: k0s accepts
-	// both spellings, and box's own reader must not turn one into a source
-	// firewalld cannot parse.
+	// A quoted value reads as the network: k0s accepts both spellings, and a source
+	// firewalld cannot parse must not come out of one.
 	pod, service, err = k0sNetworks([]byte("spec:\n  network:\n    podCIDR: \"10.244.0.0/16\"\n    serviceCIDR: '10.96.0.0/12'\n"))
 	if err != nil || pod != "10.244.0.0/16" || service != "10.96.0.0/12" {
 		t.Errorf("quoted networks read as %q and %q (%v)", pod, service, err)
 	}
 }
 
-// TestWithFirewallTellsTheOperatorAboutAHostBoxDoesNotOwn: on a cluster box did
-// not install it knows neither network, so the plan carries the two commands
-// and box changes nothing; on the cluster box installed, the networks come from
-// the config box wrote.
+// On a cluster box did not install, the plan carries the two commands and box changes
+// nothing; on one it installed, the networks come from its config.
 func TestWithFirewallTellsTheOperatorAboutAHostBoxDoesNotOwn(t *testing.T) {
 	ctx := context.Background()
 
@@ -266,7 +254,7 @@ func TestWithFirewallTellsTheOperatorAboutAHostBoxDoesNotOwn(t *testing.T) {
 		}
 	}
 
-	// The cluster box installed: its networks are in the k0s config box wrote.
+	// The cluster box installed: its networks are in the config box wrote.
 	file := t.TempDir() + "/k0s.yaml"
 	if err := os.WriteFile(file, []byte(k0sNodeConfig(testNodeIP)), 0o644); err != nil {
 		t.Fatal(err)
@@ -286,8 +274,7 @@ func TestWithFirewallTellsTheOperatorAboutAHostBoxDoesNotOwn(t *testing.T) {
 		t.Errorf("a host with no firewalld got %+v", got.Firewall)
 	}
 
-	// A config box cannot read is the operator's to fix, and the warning names
-	// the file rather than trusting nothing.
+	// An unreadable config is the operator's to fix; the warning names the file.
 	got = (&Decision{Firewall: staticFirewall{running: true}, K0sConfigFile: file + ".gone"}).withFirewall(ctx, managed)
 	if !strings.Contains(got.Firewall.Warning, file+".gone") {
 		t.Errorf("a missing k0s config did not name the file:\n%s", got.Firewall.Warning)

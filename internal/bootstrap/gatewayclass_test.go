@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// classProbe is one cluster's GatewayClasses, with the component outcomes a
-// read-only probe derives from them.
+// classProbe is one cluster's classes, with the outcomes a probe derives from them.
 func classProbe(classes ...GatewayClass) PlatformProbe {
 	probe := PlatformProbe{
 		GatewayAPI:   OutcomePresent,
@@ -28,9 +27,7 @@ func classProbe(classes ...GatewayClass) PlatformProbe {
 }
 
 // classFixture runs Bootstrap against one explicit cluster whose probe returns
-// platform. It records what the decision wrote, so a refusal can be checked to
-// have written nothing. newClassFixture is a k3s cluster, which is where the
-// Traefik refusal has its own fix; newClassFixtureOn is any distribution.
+// platform, recording what it wrote so a refusal is checked to have written nothing.
 type classFixture struct {
 	recs  *fakeRecords
 	probe *fakeProber
@@ -73,8 +70,7 @@ const (
 	traefikController = "traefik.io/gateway-controller"
 )
 
-// One Accepted Envoy class is used, and the Gateway is planned on it: no
-// question is asked and no implementation is installed.
+// One Accepted Envoy class is used: no question, no implementation installed.
 func TestGatewayClassEnvoySingleAcceptedIsUsed(t *testing.T) {
 	f := newClassFixture(classProbe(envoyClass("eg")))
 	res := f.run(t, Options{})
@@ -92,8 +88,7 @@ func TestGatewayClassEnvoySingleAcceptedIsUsed(t *testing.T) {
 	}
 }
 
-// A class box created is accepted on the same rule as any other class: its
-// controller is Envoy Gateway's. The managed-by label no longer skips a check.
+// A class box created is accepted on the same rule: its controller is Envoy's.
 func TestGatewayClassBoxOwnedEnvoyClassIsUsed(t *testing.T) {
 	c := envoyClass("eg")
 	c.ManagedByBox = true
@@ -104,9 +99,8 @@ func TestGatewayClassBoxOwnedEnvoyClassIsUsed(t *testing.T) {
 	}
 }
 
-// A foreign implementation's Accepted class stops bootstrap: box names the
-// class and its controller, says Envoy Gateway is the only implementation it
-// supports, and writes nothing.
+// A foreign Accepted class stops bootstrap, naming the class, its controller and the
+// rule, and writes nothing.
 func TestGatewayClassForeignAcceptedStops(t *testing.T) {
 	f := newClassFixture(classProbe(foreignClass("nginx", nginxController)))
 	res := f.run(t, Options{})
@@ -152,9 +146,8 @@ func TestGatewayClassSeveralForeignAcceptedStops(t *testing.T) {
 	}
 }
 
-// An Accepted Envoy class beside another implementation is box's class: the
-// other implementation existing is not box's business, and no question is
-// asked about it.
+// An Accepted Envoy class beside another implementation is box's class, and no
+// question is asked about the other.
 func TestGatewayClassForeignBesideEnvoyUsesEnvoy(t *testing.T) {
 	f := newClassFixture(classProbe(
 		foreignClass("nginx", nginxController),
@@ -169,9 +162,8 @@ func TestGatewayClassForeignBesideEnvoyUsesEnvoy(t *testing.T) {
 	}
 }
 
-// Two Accepted Envoy classes with nobody to ask is the unattended refusal: it
-// names the setting and the flag, and writes nothing. The foreign class in the
-// list is not offered and not named as a choice.
+// Two Accepted Envoy classes with nobody to ask: the refusal names the setting and
+// the flag, and the foreign class is not offered.
 func TestGatewayClassSeveralEnvoyUnattendedStops(t *testing.T) {
 	f := newClassFixture(classProbe(
 		foreignClass("nginx", nginxController),
@@ -195,8 +187,7 @@ func TestGatewayClassSeveralEnvoyUnattendedStops(t *testing.T) {
 	}
 }
 
-// recordingChooser is the guided answer: it sees the list box would render and
-// returns one of its names.
+// recordingChooser is the guided answer: it sees the list box renders.
 type recordingChooser struct {
 	got    []GatewayClass
 	answer string
@@ -231,9 +222,8 @@ func TestGatewayClassSeveralEnvoyGuidedPicks(t *testing.T) {
 	}
 }
 
-// A configured class wins over the list, and a class that exists but is not
-// Accepted stops with the controller's own reason: box will not attach routes
-// to a class nobody serves.
+// A configured class wins, and one that is not Accepted stops with the controller's
+// own reason.
 func TestGatewayClassConfiguredNotAcceptedStops(t *testing.T) {
 	notAccepted := envoyClass("envoy")
 	notAccepted.Accepted = false
@@ -261,8 +251,7 @@ func TestGatewayClassConfiguredUnknownStops(t *testing.T) {
 	}
 }
 
-// Naming another implementation's class explicitly gets the rule, not a
-// not-found: the class is there, and box does not use it.
+// Naming another implementation's class gets the rule, not a not-found.
 func TestGatewayClassConfiguredForeignStops(t *testing.T) {
 	f := newClassFixture(classProbe(
 		envoyClass("eg"),
@@ -282,8 +271,8 @@ func TestGatewayClassConfiguredForeignStops(t *testing.T) {
 	}
 }
 
-// An Envoy Gateway class exists but is not Accepted: box does not install its
-// own implementation beside one that is merely not ready yet.
+// An Envoy class that is not Accepted: box does not install beside one merely not
+// ready.
 func TestGatewayClassEnvoyNoneAcceptedStopsInsteadOfInstallingEnvoy(t *testing.T) {
 	c := envoyClass("eg")
 	c.Accepted = false
@@ -300,8 +289,7 @@ func TestGatewayClassEnvoyNoneAcceptedStopsInsteadOfInstallingEnvoy(t *testing.T
 	}
 }
 
-// A foreign class that is not Accepted is refused for what it is, not told to
-// wait for an acceptance that would not make box use it.
+// A foreign class that is not Accepted is refused for what it is, not told to wait.
 func TestGatewayClassForeignNoneAcceptedStops(t *testing.T) {
 	c := foreignClass("nginx", nginxController)
 	c.Accepted = false
@@ -321,8 +309,7 @@ func TestGatewayClassForeignNoneAcceptedStops(t *testing.T) {
 	}
 }
 
-// With no GatewayClass at all box installs Envoy Gateway and creates its class:
-// the one case where box owns the implementation.
+// With no class at all box installs Envoy Gateway and creates its class.
 func TestGatewayClassNoneInstallsEnvoy(t *testing.T) {
 	f := newClassFixture(PlatformProbe{
 		GatewayAPI:   OutcomeAbsent,
@@ -342,8 +329,8 @@ func TestGatewayClassNoneInstallsEnvoy(t *testing.T) {
 	}
 }
 
-// k3s ships Traefik as its own Gateway implementation, and no box setting can
-// remove it: the refusal names the k3s server flag that can.
+// k3s's Traefik cannot be removed by a box setting: the refusal names the k3s flag
+// that can.
 func TestGatewayClassK3sTraefikStopsNamingDisableFlag(t *testing.T) {
 	f := newClassFixture(classProbe(foreignClass("traefik", traefikController)))
 	res := f.run(t, Options{})
@@ -360,8 +347,7 @@ func TestGatewayClassK3sTraefikStopsNamingDisableFlag(t *testing.T) {
 	}
 }
 
-// The flag is k3s's, not a general Traefik fix: the same class on another
-// distribution is refused without it.
+// The flag is k3s's: the same class elsewhere is refused without it.
 func TestGatewayClassTraefikOnAnotherDistributionDoesNotNameK3s(t *testing.T) {
 	f := newClassFixtureOn(classProbe(foreignClass("traefik", traefikController)), "v1.31.3")
 	res := f.run(t, Options{})
@@ -373,8 +359,7 @@ func TestGatewayClassTraefikOnAnotherDistributionDoesNotNameK3s(t *testing.T) {
 	}
 }
 
-// A cluster with no Accepted class whose only class is Traefik's is still k3s's
-// problem, so that refusal carries the same fix.
+// A cluster whose only class is Traefik's carries the same fix.
 func TestGatewayClassNoneAcceptedOnK3sNamesDisableFlag(t *testing.T) {
 	c := foreignClass("traefik", traefikController)
 	c.Accepted = false

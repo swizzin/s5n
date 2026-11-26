@@ -2,13 +2,11 @@ package bootstrap
 
 import "fmt"
 
-// supportProblem reports why box refuses to drive this cluster, or "" when the
-// cluster is one v1 supports. v1 runs one seedbox on one node: the data
-// contract is hardlinks on one filesystem, the peers port and the Gateway share
-// that node's one address, and box backs up, inspects and repairs one host. A
-// managed control plane has no node box owns at all, and a cluster of several
-// nodes breaks those guarantees, so both are refused by name rather than
-// accepted and half-configured.
+// supportProblem reports why box refuses this cluster, or "" when it is one box
+// supports. One seedbox on one node is the design: the data contract is hardlinks on
+// one filesystem, the peers port and the Gateway share that node's address, and box
+// backs up, inspects and repairs one host. A managed control plane has no node box
+// owns, and several nodes break those guarantees, so both are refused by name.
 func supportProblem(dist Distribution, nodes int) string {
 	switch dist {
 	case DistEKS, DistGKE:

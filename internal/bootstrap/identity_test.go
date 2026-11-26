@@ -12,9 +12,8 @@ import (
 	"testing"
 )
 
-// testCA is a stand-in CA bundle. Nothing parses it: box hashes the bytes it
-// would trust, and a fixture that looked like a real certificate would suggest
-// the test depends on its contents.
+// testCA is a stand-in bundle: box hashes the bytes it would trust, so nothing parses
+// it.
 var testCA = []byte("-----BEGIN CERTIFICATE-----\nexample cluster CA\n-----END CERTIFICATE-----\n")
 
 func sha256Hex(b []byte) string {
@@ -22,8 +21,8 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// kubeconfigForServer is a one-cluster kubeconfig the way k0s and k3s write it:
-// the CA inline as certificate-authority-data, and a token for the identity.
+// kubeconfigForServer is a k0s-style kubeconfig: the CA inline, a token for the
+// identity.
 func kubeconfigForServer(server string, ca []byte) []byte {
 	return []byte(fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -45,8 +44,7 @@ users:
 `, base64.StdEncoding.EncodeToString(ca), server))
 }
 
-// kubeconfigForCAFile is the same shape with the CA named as a file instead of
-// carried inline.
+// kubeconfigForCAFile names the CA as a file instead of inline.
 func kubeconfigForCAFile(server, caFile string) []byte {
 	return []byte(fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -68,8 +66,8 @@ users:
 `, caFile, server))
 }
 
-// The identity is what a record carries: the server URL client-go resolved, and
-// the sha256 of the CA bundle it would trust, inline or from a file.
+// The identity a record carries: the resolved server URL and the CA's sha256, inline
+// or from a file.
 func TestClusterIdentity(t *testing.T) {
 	const server = "https://192.0.2.10:6443"
 
@@ -115,8 +113,8 @@ func TestClusterIdentity(t *testing.T) {
 	})
 }
 
-// The recorded cluster the identity tests re-run against: k3s's admin
-// kubeconfig path, one server, and a CA bundle whose digest the record holds.
+// The recorded cluster: k3s's admin kubeconfig path, one server, a CA the record
+// holds.
 const (
 	identityKubeconfig = "/etc/rancher/k3s/k3s.yaml"
 	identityServer     = "https://192.0.2.10:6443"
@@ -130,15 +128,14 @@ type identityRun struct {
 	trace *[]string
 }
 
-// runRecordedIdentity stages a re-run of a record carrying id and a kubeconfig
-// whose current context reaches identityServer with testCA.
+// runRecordedIdentity stages a re-run of a record and a kubeconfig reaching
+// identityServer with testCA.
 func runRecordedIdentity(t *testing.T, id clusterIdentity) identityRun {
 	t.Helper()
 	return runRecordedIdentityKubeconfig(t, id, kubeconfigForServer(identityServer, testCA))
 }
 
-// runRecordedIdentityKubeconfig is runRecordedIdentity with the kubeconfig the
-// recorded path now holds given explicitly.
+// runRecordedIdentityKubeconfig is the same with the kubeconfig given explicitly.
 func runRecordedIdentityKubeconfig(t *testing.T, id clusterIdentity, kc []byte) identityRun {
 	t.Helper()
 	rec := externalRecord(identityKubeconfig)
@@ -163,8 +160,8 @@ func runRecordedIdentityKubeconfig(t *testing.T, id clusterIdentity, kc []byte) 
 	return identityRun{res: res, recs: recs, inst: inst, probe: probe, trace: trace}
 }
 
-// refusedBeforeProbing is the shape every mismatch must have: a stop that names
-// what the test asks for, no probe, no record, no install.
+// refusedBeforeProbing is the shape every mismatch must have: a stop, no probe, no
+// record, no install.
 func (r identityRun) refusedBeforeProbing(t *testing.T, wants ...string) {
 	t.Helper()
 	if r.res.Action != ActionStop {
@@ -186,9 +183,8 @@ func (r identityRun) refusedBeforeProbing(t *testing.T, wants ...string) {
 	}
 }
 
-// The YAML a box from before this change wrote has neither key. It parses to a
-// record with no identity -- accepted, not refused as malformed -- which is what
-// makes the upgrade path safe.
+// An older box's YAML has neither key: it parses to a record with no identity, which
+// is what makes the upgrade path safe.
 func TestParseRecordWithoutClusterIdentity(t *testing.T) {
 	rec, err := parseRecord([]byte(`source: external
 kubeconfig: "/etc/rancher/k3s/k3s.yaml"
@@ -209,8 +205,7 @@ gatewayClass: "eg"
 	}
 }
 
-// A re-run of a record whose kubeconfig still reaches the recorded cluster
-// probes it and writes nothing.
+// A kubeconfig still reaching the recorded cluster is probed, and nothing written.
 func TestBootstrapRecordIdentityMatch(t *testing.T) {
 	run := runRecordedIdentity(t, clusterIdentity{Server: identityServer, CAHash: sha256Hex(testCA)})
 	if run.res.Action != ActionUseCluster {
@@ -224,9 +219,8 @@ func TestBootstrapRecordIdentityMatch(t *testing.T) {
 	}
 }
 
-// The same cluster reached at another address (a tailnet name instead of the
-// local one) is still the recorded cluster: the CA is its identity, the URL is
-// only the route. It is probed, not refused.
+// The same cluster at another address is still the recorded one: the CA is the
+// identity, the URL only the route.
 func TestBootstrapRecordIdentityServerMoved(t *testing.T) {
 	run := runRecordedIdentity(t, clusterIdentity{Server: "https://198.51.100.7:6443", CAHash: sha256Hex(testCA)})
 	if run.res.Action != ActionUseCluster {
@@ -237,8 +231,8 @@ func TestBootstrapRecordIdentityServerMoved(t *testing.T) {
 	}
 }
 
-// A cluster trusted without a CA bundle has no identity but its URL: every such
-// cluster hashes the empty bundle. There a different server is refused.
+// Without a CA bundle, every cluster hashes the empty one, so a different server is
+// refused.
 func TestBootstrapRecordIdentityNoCAServerMismatch(t *testing.T) {
 	if noCAHash != sha256Hex(nil) {
 		t.Fatalf("noCAHash = %q, want the empty bundle's sha256 %q", noCAHash, sha256Hex(nil))
@@ -248,9 +242,8 @@ func TestBootstrapRecordIdentityNoCAServerMismatch(t *testing.T) {
 		rec.Server, identityServer, RecordPath, "trusted without a CA bundle", "will not treat a different cluster")
 }
 
-// A kubeconfig box cannot resolve has no identity to compare. The check stands
-// aside so the prober refuses the file with its own message instead of a
-// comparison against an empty server.
+// A kubeconfig box cannot resolve has no identity: the check stands aside for the
+// prober's own message.
 func TestIdentityConflictUnresolvedKubeconfig(t *testing.T) {
 	rec := &Record{Source: SourceExternal, Kubeconfig: identityKubeconfig, Server: identityServer, CAHash: sha256Hex(testCA)}
 	if got := identityConflict(rec, clusterIdentity{}, RecordPath); got != "" {

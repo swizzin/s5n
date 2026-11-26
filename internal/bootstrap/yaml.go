@@ -2,9 +2,8 @@ package bootstrap
 
 import "strings"
 
-// splitKV splits "key: value" on the first colon. The value keeps any
-// subsequent colons, so "server: https://1.2.3.4:6443" yields ("server",
-// "https://1.2.3.4:6443").
+// splitKV splits on the first colon, so "server: https://1.2.3.4:6443" yields
+// ("server", "https://1.2.3.4:6443").
 func splitKV(line string) (key, value string, ok bool) {
 	i := strings.Index(line, ":")
 	if i < 0 {

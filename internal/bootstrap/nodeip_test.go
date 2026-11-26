@@ -12,9 +12,8 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// testNet is one fixed host for the decision: the uplink it would find, and the
-// links it can see. A test that cares about the host's routes uses it, so no
-// test reads the machine it runs on.
+// testNet is one fixed host: the uplink it would find and the links it sees, so no
+// test reads the machine.
 type testNet struct {
 	uplink Uplink
 	err    error
@@ -43,8 +42,8 @@ func (n testNet) InterfaceFor(addr string) (Link, bool) {
 	return Link{}, false
 }
 
-// The kernel's own tables, with documentation addresses: one default route on
-// an ethernet, one connected route that must not be mistaken for it.
+// The kernel's tables with documentation addresses: a default route on an ethernet,
+// and a connected route that must not be mistaken for it.
 const procRouteFixture = `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
 eth0	0002A8C0	00000000	0001	0	0	100	00FFFFFF	0	0	0
 eth0	00000000	0102A8C0	0003	0	0	100	00000000	0	0	0
@@ -56,8 +55,8 @@ const procRouteHeaderOnly = `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	
 // /proc/net/ipv6_route: ::/0 out of eth0, flags UP|GATEWAY.
 const procRoute6Fixture = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00000003     eth0\n"
 
-// linuxNetFixture is a LinuxNet over fixture tables, a fixed link list and one
-// answer for the source address: the host, without being this host.
+// linuxNetFixture is a LinuxNet over fixture tables, a fixed link list and one source
+// answer: the host, without being this host.
 func linuxNetFixture(t *testing.T, route, route6 string, links []Link, source func(network, destination string) (netip.Addr, error)) LinuxNet {
 	t.Helper()
 	dir := t.TempDir()
@@ -82,10 +81,9 @@ func fixedSource(addr string) func(string, string) (netip.Addr, error) {
 	return func(string, string) (netip.Addr, error) { return netip.MustParseAddr(addr), nil }
 }
 
-// The real-world case: tailscaled is up and holds an address, but the default
-// route leaves through the ethernet, so the node registers on the ethernet and
-// the CNI takes 1500. The tailnet interface is present and is still a tunnel --
-// it just is not the uplink.
+// The real case: tailscaled holds an address, but the default route leaves through
+// the ethernet, so the node registers there and the CNI takes 1500. The tailnet
+// interface is still a tunnel; it is just not the uplink.
 func TestUplinkIsTheDefaultRoutesLinkWithATailnetUp(t *testing.T) {
 	links := []Link{
 		{Name: "eth0", MTU: 1500, Type: 1, Addrs: []netip.Addr{
@@ -107,16 +105,15 @@ func TestUplinkIsTheDefaultRoutesLinkWithATailnetUp(t *testing.T) {
 		t.Fatalf("uplink = %+v, want %+v", up, want)
 	}
 
-	// The tailnet address is still recognised for what it is, which is what the
-	// existing-cluster warning needs.
+	// The tailnet address is still recognised, which the existing-cluster warning
+	// needs.
 	l, ok := n.InterfaceFor("100.64.0.7")
 	if !ok || !l.Tunnel() || l.MTU != 1280 {
 		t.Fatalf("tailscale0 = %+v, %v; want a 1280 tunnel", l, ok)
 	}
 }
 
-// A host whose only default route is IPv6 pins its IPv6 address: the family the
-// default route is in decides, and one address is still the answer.
+// An IPv6-only host pins its IPv6 address: the default route's family decides.
 func TestUplinkWithOnlyAnIPv6DefaultRoute(t *testing.T) {
 	links := []Link{
 		{Name: "eth0", MTU: 1500, Type: 1, Addrs: []netip.Addr{netip.MustParseAddr("2001:db8::10")}},
@@ -140,8 +137,7 @@ func TestUplinkWithOnlyAnIPv6DefaultRoute(t *testing.T) {
 	}
 }
 
-// IPv4 is asked first when a host has both: one node address is the design here,
-// and a dual-stack choice is a later spike.
+// IPv4 is asked first when a host has both: one node address, dual-stack later.
 func TestUplinkPrefersIPv4WhenBothFamiliesRoute(t *testing.T) {
 	links := []Link{
 		{Name: "eth0", MTU: 1500, Type: 1, Addrs: []netip.Addr{
@@ -155,8 +151,8 @@ func TestUplinkPrefersIPv4WhenBothFamiliesRoute(t *testing.T) {
 	}
 }
 
-// No default route is no node IP: box says so rather than pinning an address
-// that happens to be on some connected route.
+// No default route is no node IP: box says so rather than pinning a connected
+// route's address.
 func TestUplinkWithoutADefaultRoute(t *testing.T) {
 	n := linuxNetFixture(t, procRouteHeaderOnly, "", nil, fixedSource("192.0.2.10"))
 	_, err := n.Uplink()
@@ -193,8 +189,8 @@ func TestDefaultRouteTables(t *testing.T) {
 	}
 }
 
-// Device type decides a tunnel, never the interface name, and a PPPoE uplink is
-// point-to-point without being a tunnel: a home line at 1492 must install.
+// Device type decides a tunnel, never the name, and a PPPoE uplink is
+// point-to-point without being one: a home line at 1492 must install.
 func TestTunnelDeviceTypes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -220,8 +216,8 @@ func TestTunnelDeviceTypes(t *testing.T) {
 	}
 }
 
-// pins are the chart's own pins, from the checkout: the plan a clean host gets
-// carries the k0s the release names and the sum of its asset.
+// pins are the chart's own, from the checkout: the plan carries the release's k0s and
+// its sum.
 func testPins() release.Versions {
 	return release.Versions{
 		K0s:       testK0sVersion,
@@ -229,8 +225,7 @@ func testPins() release.Versions {
 	}
 }
 
-// The ethernet case end to end through the plan: the node IP is in the install
-// args where kubelet reads it, and in the config that pins the API address.
+// The ethernet case end to end: the node IP in the install args and in the config.
 func TestInstallPinsTheChosenNodeIP(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)
 	plan := k0sPlan(testPins(), Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500})
@@ -255,8 +250,7 @@ func TestInstallPinsTheChosenNodeIP(t *testing.T) {
 	}
 }
 
-// A PPPoE uplink is 1492, and box pins the node IP on it and sets no MTU
-// anywhere: auto-MTU deriving 1492 is the point, not a number box writes down.
+// A PPPoE uplink is 1492, and box sets no MTU: auto-MTU deriving it is the point.
 func TestPPPoEUplinkIsPinnedAndNoMTUIsSet(t *testing.T) {
 	const (
 		addr = "198.51.100.20"
@@ -274,8 +268,8 @@ func TestPPPoEUplinkIsPinnedAndNoMTUIsSet(t *testing.T) {
 	if len(stubs.run.calls) == 0 || !strings.Contains(stubs.run.calls[0], "--node-ip="+addr) {
 		t.Fatalf("ran %v, want the node IP pinned to %s", stubs.run.calls, addr)
 	}
-	// Nothing box hands k0s may carry an MTU: kube-router derives it from the
-	// node address, and a number here would be a second opinion. The config
+	// Nothing box hands k0s may carry an MTU: kube-router derives it from the node
+	// address, and a number here would be a second opinion. The config
 	// path is stripped first, because a test's own temporary directory is
 	// named after this test.
 	for _, call := range append(stubs.run.calls, testInstallArgs(plan)) {

@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// recordedCluster stages a re-run: a record on disk, the kubeconfig it names,
-// a probe with the cluster's current answers, and a trace of what was touched.
+// recordedCluster stages a re-run: a record, its kubeconfig, a probe with the
+// cluster's answers, and a trace of what was touched.
 func recordedCluster(rec *Record, prober *fakeProber) (*Decision, *fakeSource, *fakeRecords, *fakeInstaller, *[]string) {
 	trace := &[]string{}
 	src := &fakeSource{
@@ -41,9 +41,8 @@ func actions(res Result) map[PlatformComponent]string {
 	return out
 }
 
-// A record written by a run whose platform apply then failed must not make the
-// next run plan nothing: the cluster is probed again, and its missing pieces
-// are installs. This is the "unknown (unexpected probe outcome)" re-run.
+// A record from a run whose platform apply failed must not make the next run plan
+// nothing: missing pieces are installs from the new probe.
 func TestBootstrapRecordRepairsMissingPlatform(t *testing.T) {
 	const kubeconfig = "/etc/rancher/k3s/k3s.yaml"
 	prober := &fakeProber{
@@ -103,8 +102,7 @@ func TestBootstrapRecordRepairsMissingPlatform(t *testing.T) {
 	}
 }
 
-// Everything the record says is there, and still is: a second bootstrap plans
-// no installs and writes no record.
+// Everything the record says is still there: no installs, and no record written.
 func TestBootstrapRecordIdempotent(t *testing.T) {
 	t.Run("box's own implementation", func(t *testing.T) {
 		const kubeconfig = "/etc/rancher/k3s/k3s.yaml"
@@ -181,9 +179,8 @@ func TestBootstrapRecordIdempotent(t *testing.T) {
 	})
 }
 
-// A recorded cluster that now fails a gate stops with the fresh-cluster
-// wording, before the platform probe and before any write. The trace, not just
-// the message, says so.
+// A recorded cluster that fails a gate stops with fresh-cluster wording, before the
+// platform probe and any write; the trace says so, not just the message.
 func TestBootstrapRecordGateFiresBeforeAnyWrite(t *testing.T) {
 	t.Run("the cluster went multi-node", func(t *testing.T) {
 		const kubeconfig = "/etc/rancher/k3s/k3s.yaml"
@@ -331,11 +328,9 @@ func TestBootstrapRecordGateFiresBeforeAnyWrite(t *testing.T) {
 
 // ---- explicit kubeconfig against an existing record ----
 
-// The e2e and any documented re-run pass --kubeconfig on every run. When that
-// path is the one the record names, it is the recorded re-run: the record's
-// decisions (including a k0s-managed lifecycle) are kept and nothing is
-// rewritten. filepath.Clean decides, so a harmless spelling difference is not
-// a different cluster.
+// A re-run passes --kubeconfig every time; when it names the record's own path it is
+// the recorded re-run, keeping the record's decisions and rewriting nothing.
+// filepath.Clean decides, so a spelling difference is not another cluster.
 func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
 	const kubeconfig = K0sAdminConfig
 	rec := &Record{
@@ -359,7 +354,7 @@ func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
 	}
 	d, _, recs, inst, _ := recordedCluster(rec, prober)
 
-	// The same file, spelled differently: filepath.Clean makes it the record.
+	// The same file spelled differently: filepath.Clean makes it the record.
 	res, err := d.Bootstrap(context.Background(), Options{Kubeconfig: "/var/lib/k0s/pki/./admin.conf"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -381,9 +376,8 @@ func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
 	}
 }
 
-// An explicit kubeconfig naming a different file than the record is a move to
-// another cluster. box refuses it before any probe or write and names both
-// paths, the record's source, and the file to remove deliberately.
+// A different file than the record is a move to another cluster: refused before any
+// probe, naming both paths and the file to remove.
 func TestBootstrapExplicitDifferentRecordStops(t *testing.T) {
 	const recorded = K0sAdminConfig
 	const explicit = "/root/.kube/config"
@@ -406,8 +400,7 @@ func TestBootstrapExplicitDifferentRecordStops(t *testing.T) {
 			t.Errorf("reason = %q, want it to name %q", res.Reason, want)
 		}
 	}
-	// The gate fires before anything is read from either kubeconfig, probed,
-	// installed or written.
+	// The gate fires before either kubeconfig is read, probed, installed or written.
 	if len(src.reads) != 0 {
 		t.Errorf("read %v before refusing; the gate must fire before any probe", src.reads)
 	}
@@ -422,8 +415,8 @@ func TestBootstrapExplicitDifferentRecordStops(t *testing.T) {
 	}
 }
 
-// A record whose cluster no longer answers stops naming the kubeconfig the
-// record holds, and never reaches the installer.
+// A cluster that no longer answers stops naming its kubeconfig, never reaching the
+// installer.
 func TestBootstrapRecordUnreachableStops(t *testing.T) {
 	const kubeconfig = "/etc/rancher/k3s/k3s.yaml"
 
@@ -471,9 +464,8 @@ func TestBootstrapRecordUnreachableStops(t *testing.T) {
 	})
 }
 
-// A k0s-managed record is re-probed like any other; only its lifecycle stays
-// box update's. Its platform layer is the one box installed, so a lost piece is
-// an install on the next run rather than an unknown.
+// A k0s-managed record is re-probed; only its lifecycle stays box update's, and a
+// lost platform piece is an install next run rather than an unknown.
 func TestBootstrapManagedRecordReprobes(t *testing.T) {
 	const kubeconfig = K0sAdminConfig
 	rec := &Record{
@@ -513,8 +505,7 @@ func TestBootstrapManagedRecordReprobes(t *testing.T) {
 		t.Errorf("a managed re-run wrote: %d records, %d installs", len(recs.saved), len(inst.plans))
 	}
 
-	// The same record when k0s is not running: a stop that names the record,
-	// never a fall-through to installing k0s over it.
+	// k0s not running: a stop naming the record, never an install over it.
 	prober.versionErr = errors.New("connection refused")
 	res, err = d.Bootstrap(context.Background(), Options{})
 	if err != nil {

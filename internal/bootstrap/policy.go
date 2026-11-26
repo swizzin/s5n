@@ -10,59 +10,46 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// This file is box's k0s policy: the conditions under which box may touch a
-// host at all, and the release it installs there, with the checksum of that
-// release's asset. Neither is compiled in: the version is the k0s pin of the
-// chart release box pulled, and its checksums sit beside it in that release's
-// charts/s5n/platform.yaml, so a k0s bump is a chart release and box is not
-// rebuilt for it.
+// This file is box's k0s policy: the conditions under which box may touch a host,
+// and the release it installs there with that asset's checksum. Neither is compiled
+// in: the version and its sums are pins of the chart release box pulled
+// (charts/s5n/platform.yaml), so a k0s bump is a chart release.
 //
-// It is separate from the sequence in installer.go because every value here is
-// a decision that is expensive to get wrong. The binary box writes runs as root
-// and registers a system service, so the checksum cannot be the one served
-// beside the archive: that only proves both left the same place, not that
-// either is what the release says it is. The pinned sums come from each
-// release's published sha256sums.txt and are checked against the downloaded
-// assets before they land (hack/k0s-sums --check runs in CI), so moving them is
-// a deliberate edit that CI refuses to let go wrong.
+// Every value here is a decision expensive to get wrong: the binary box writes runs
+// as root and registers a service, so the checksum cannot be the one served beside
+// the archive -- that only proves both left the same place. The pinned sums come from
+// each release's published sha256sums.txt and are checked before they land
+// (hack/k0s-sums --check runs in CI).
 
 const (
-	// K0sBinaryPath is where box puts the single k0s binary, and therefore
-	// where the systemd unit k0s writes points.
+	// K0sBinaryPath is where box puts the k0s binary, and where its unit points.
 	K0sBinaryPath = "/usr/local/bin/k0s"
-	// K0sStateDir is k0s's state: its PKI, the admin kubeconfig, and once
-	// started, containerd's and the kubelet's data. Its presence is how box
-	// tells "k0s is already here" from "clean host".
+	// K0sStateDir is k0s's state: PKI, admin kubeconfig, containerd's and the
+	// kubelet's data. Its presence tells "k0s is already here" from "clean host".
 	K0sStateDir = "/var/lib/k0s"
-	// K0sConfigPath is the k0s config box writes on the install path: k0s's
-	// own default path, which k0s reads even when nobody passes --config, so
-	// the file box writes is the only place the API address is pinned. box
+	// K0sConfigPath is the k0s config box writes: k0s's default path, which it reads
+	// without --config, so this file is the only place the API address is pinned. box
 	// refuses to overwrite one it did not write.
 	K0sConfigPath = "/etc/k0s/k0s.yaml"
-	// k0sPodCIDR and k0sServiceCIDR are the cluster's two networks. They are
-	// written into that config, so the installation and the host's firewall
-	// rule read one copy: k0s's values at the pinned release (pkg/apis/k0s/
-	// v1beta1/network.go, DefaultNetwork: 10.244.0.0/16 and 10.96.0.0/12),
-	// stated here because box writes them, not because box needs them for
-	// anything else.
+	// k0sPodCIDR and k0sServiceCIDR are the cluster's networks, written into that
+	// config so the installation and the firewall rule read one copy. They are k0s's
+	// own defaults (pkg/apis/k0s/v1beta1/network.go, DefaultNetwork).
 	k0sPodCIDR     = "10.244.0.0/16"
 	k0sServiceCIDR = "10.96.0.0/12"
 	// k0sReleaseBase is where the k0s project publishes release assets.
 	k0sReleaseBase = "https://github.com/k0sproject/k0s/releases/download"
 )
 
-// k0sRelease is one pinned build: the release, the architecture it was built
-// for, and the checksum box requires of it.
+// k0sRelease is one pinned build: release, architecture, required checksum.
 type k0sRelease struct {
 	Version string
 	Arch    string
 	SHA256  string
 }
 
-// k0sReleaseFor is one release, for one architecture, taken from the pins of
-// the release in hand: the version and the sum of its asset are one pin, in one
-// file, so they cannot describe different releases. An architecture the file
-// pins no sum for is refused by name; installing it unchecked is the one thing
+// k0sReleaseFor is one release for one architecture, from the release in hand: the
+// version and the sum are one pin, so they cannot describe different releases. An
+// architecture with no pinned sum is refused by name; installing unchecked is what
 // this file exists to prevent.
 func k0sReleaseFor(pins release.Versions, arch string) (k0sRelease, error) {
 	if pins.K0s == "" {
@@ -75,24 +62,17 @@ func k0sReleaseFor(pins release.Versions, arch string) (k0sRelease, error) {
 	return k0sRelease{Version: pins.K0s, Arch: arch, SHA256: sum}, nil
 }
 
-// URL is the release asset. The tag carries a '+', which a path segment may
-// hold literally (only a query string reads it as a space), so the tag goes in
-// as published.
+// URL is the release asset. The tag's '+' may sit literally in a path segment, so
+// the tag goes in as published.
 func (r k0sRelease) URL() string {
 	return k0sReleaseBase + "/" + url.PathEscape(r.Version) + "/k0s-" + r.Version + "-" + r.Arch
 }
 
-// k0sPlan is what box records as the install plan on the clean-host branch: the
-// release's pin for this binary's architecture, the affirmative install choice
-// that the installer requires, and the node identity the installer pins. The
-// checksum is the one the same pins carry beside the version, so the plan and
-// the file cannot name different releases. A host whose release pins no sum for
-// this architecture still gets a plan naming the version; the installer refuses
-// it there, on the missing sum, before anything is downloaded.
-//
-// The node IP is a value the decision resolved from the host, not something the
-// plan guesses: the installer refuses a plan that carries none, so box cannot
-// install a node whose address nothing pinned.
+// k0sPlan is the install plan on the clean-host branch: the pin for this
+// architecture, the affirmative install choice, and the node identity. A host whose
+// release pins no sum still gets a plan naming the version; the installer refuses it
+// on the missing sum before downloading. The node IP is resolved from the host, never
+// guessed, and the installer refuses a plan without one.
 func k0sPlan(pins release.Versions, up Uplink) InstallPlan {
 	plan := InstallPlan{
 		Version:    pins.K0s,
@@ -111,25 +91,19 @@ func k0sPlan(pins release.Versions, up Uplink) InstallPlan {
 	return plan
 }
 
-// k0sNodeConfig is the minimal k0s config box installs with. It exists for two
-// things, and both are values k0s would otherwise choose for the host.
+// k0sNodeConfig is the minimal config box installs with, for two values k0s would
+// otherwise choose.
 //
-// The first is spec.api.address. Left unset, k0s fills it with
-// iface.FirstPublicAddress(), the first non-loopback IPv4 in the kernel's
-// interface order -- whatever net.Interfaces() lists first, which on a host
-// with a tunnel up can be the tunnel (k0s pkg/apis/k0s/v1beta1/api.go
-// setDefaults, and internal/pkg/iface/iface.go). k0s writes that address into
-// the admin kubeconfig box records, and binds the API server to it, so a
-// cluster whose API address sits on a tunnel is only reachable while the tunnel
-// is. There is no `k0s install` flag for it, so the config file is the
-// mechanism; k0s merges this document into its defaults, so nothing else has to
-// be written down.
+// spec.api.address: left unset, k0s fills it with iface.FirstPublicAddress(), the
+// first non-loopback IPv4 in the kernel's interface order, which on a host with a
+// tunnel up can be the tunnel (pkg/apis/k0s/v1beta1/api.go setDefaults,
+// internal/pkg/iface/iface.go). That address goes into the admin kubeconfig and
+// binds the API server, so such a cluster is reachable only while the tunnel is; no
+// `k0s install` flag exists for it, so the config is the mechanism.
 //
-// The second is spec.network: the pod and service networks are written here
-// rather than left to k0s's defaults, because the host's firewall rule has to
-// trust the networks the cluster was actually installed with, and a second copy
-// of these numbers anywhere else could disagree with this file. k0sNetworks
-// reads them back out of the text box wrote.
+// spec.network: the networks are written here because the firewall rule must trust
+// what the cluster was installed with, and a second copy could disagree.
+// k0sNetworks reads them back out of box's own text.
 func k0sNodeConfig(nodeIP string) string {
 	return fmt.Sprintf(`# Written by box when it installed k0s. The API address is pinned to the
 # uplink so it is not whatever address the kernel lists first; the node's
@@ -148,12 +122,10 @@ spec:
 `, nodeIP, k0sPodCIDR, k0sServiceCIDR)
 }
 
-// k0sNetworks reads the pod and service networks back out of the k0s config box
-// wrote. It is a reader for the one document this package generates, not a YAML
-// parser: it follows the key path spec.network and refuses a file that does not
-// carry both networks, because the file at that path is box's own
-// (k0sConfigConflict refuses one it did not write) and one without them is a
-// host whose firewall box cannot settle.
+// k0sNetworks reads the two networks back out of the config box wrote: a reader for
+// the one document this package generates, not a YAML parser. It refuses a file
+// without both, because the file at that path is box's own (k0sConfigConflict) and
+// one without them is a firewall box cannot settle.
 func k0sNetworks(config []byte) (pod, service string, err error) {
 	var keys []string
 	var indents []int
@@ -188,17 +160,15 @@ func k0sNetworks(config []byte) (pod, service string, err error) {
 	return pod, service, nil
 }
 
-// installRefusal is the whole "may box touch this host" question, answered
-// from the plan and from read-only host evidence. Every refusal happens before
-// the download, so a run that stops here has written nothing and fetched
-// nothing.
+// installRefusal is "may box touch this host", from the plan and read-only evidence.
+// Every refusal happens before the download, so a run that stops here wrote and
+// fetched nothing.
 //
-// The order is the order of the mistakes: no privilege is box being run wrong;
-// no clean-host choice is box being asked to install by a path that did not
-// decide to; k0s already on the host is the one case where installing would
-// destroy something box did not create; and an unpinned node, or one whose
-// address sits on a tunnel, is box being asked to install a cluster every pod
-// would talk through badly.
+// The order is the order of the mistakes: no privilege is box run wrong; no
+// clean-host choice is box asked to install by a path that did not decide to; k0s
+// already present is the one case where installing destroys what box did not
+// create; an unpinned node, or one on a tunnel, is a cluster every pod would talk
+// through badly.
 func installRefusal(plan InstallPlan, root bool, findings []Finding) string {
 	if !root {
 		return "box installs k0s as root: run it with sudo (or as root)"
@@ -221,11 +191,10 @@ func installRefusal(plan InstallPlan, root bool, findings []Finding) string {
 	return ""
 }
 
-// k0sConfigConflict refuses a k0s config at the install path that box did not
-// write. k0s reads /etc/k0s/k0s.yaml by default, so a file there is somebody's
-// decision about this host: box can neither install around it (k0s would merge
-// it) nor overwrite it. A file whose bytes are exactly what box writes is box's
-// own, left by a run that failed before it could start k0s, and it is reused.
+// k0sConfigConflict refuses a config at the install path that box did not write: k0s
+// reads /etc/k0s/k0s.yaml by default, so a file there is somebody's decision, and box
+// can neither install around it (k0s merges it) nor overwrite it. Exactly box's own
+// bytes are reused, left by a run that failed before starting k0s.
 func k0sConfigConflict(path, want string) string {
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -234,8 +203,7 @@ func k0sConfigConflict(path, want string) string {
 	if string(got) == want {
 		return ""
 	}
-	// A refusal is the fact, the one command that fixes it, and what happens
-	// next (rule 11). The why -- box pins the API address in that config -- is
-	// the log's.
+	// A refusal is the fact, the one command that fixes it, and what happens next
+	// (rule 11); the why is the log's.
 	return fmt.Sprintf("%s exists\n$ sudo mv %s %s.before-box\nthen run this again", path, path, path)
 }

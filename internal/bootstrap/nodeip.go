@@ -11,42 +11,34 @@ import (
 	"strings"
 )
 
-// This file answers one question for the host box installs k0s on: which
-// address should the node register with? The answer is the address of the link
-// that carries the default route, and box pins it.
+// This file answers one question for the host box installs k0s on: which address
+// should the node register with? The address of the link carrying the default route,
+// which box pins.
 //
-// The reason is the CNI's MTU, not the address itself. kube-router runs with
-// auto-MTU on and takes the MTU from the interface that holds the node's
-// primary IP, not from the smallest MTU on the host:
-//
-//	// GetNodeMTU returns the MTU of the interface that the node's primary IP
-//	// address is assigned to. ...
-//	func (n *LocalKRNode) GetNodeMTU() (int, error)
-//
-// (cloudnativelabs/kube-router v2.6.3, pkg/utils/node.go:180, the CNI k0s
-// ships). A node that registers on a tailnet or VPN address therefore gives
-// kube-bridge that interface's MTU -- 1280 for tailscale0 -- and everything a
-// pod sends through the tunnel fragments. box never sets an MTU: it pins the
-// address the MTU is derived from, so the MTU follows whatever the uplink
-// really is (1500 on ethernet, 1492 on PPPoE, whatever a cloud hands out).
+// The reason is the CNI's MTU, not the address. kube-router runs with auto-MTU and
+// takes the MTU from the interface holding the node's primary IP
+// (cloudnativelabs/kube-router v2.6.3, pkg/utils/node.go:180 GetNodeMTU, the CNI k0s
+// ships), so a node registering on a tailnet address gives kube-bridge that
+// interface's MTU -- 1280 for tailscale0 -- and everything a pod sends through the
+// tunnel fragments. box never sets an MTU: it pins the address the MTU derives from,
+// so the MTU follows whatever the uplink is.
 
 const (
-	// ARPHRD device types, as /sys/class/net/<name>/type reports them. A tun
-	// device, a wireguard interface and an ipip tunnel all report ARPHRD_NONE;
-	// the two TUNNEL types are the older ipip/sit shapes.
+	// ARPHRD device types as /sys/class/net/<name>/type reports them: a tun device,
+	// a wireguard interface and an ipip tunnel all report ARPHRD_NONE, and the TUNNEL
+	// types are the older ipip/sit shapes.
 	arphrdPPP     = 512
 	arphrdTunnel  = 768
 	arphrdTunnel6 = 769
 	arphrdNone    = 65534
 
-	// rtfUp is RTF_UP. Both kernel route tables print flags in hex, and a
-	// route without this one is not usable.
+	// rtfUp is RTF_UP: both route tables print flags in hex, and a route without it
+	// is not usable.
 	rtfUp = 0x1
 )
 
-// Link is one local interface as the kernel reports it: the MTU an
-// auto-detecting CNI would take from it, the device type that tells a tunnel
-// from a wire, and the addresses it holds.
+// Link is one local interface: the MTU an auto-detecting CNI would take, the device
+// type that tells a tunnel from a wire, and its addresses.
 type Link struct {
 	Name         string
 	MTU          int
@@ -55,15 +47,13 @@ type Link struct {
 	Addrs        []netip.Addr
 }
 
-// Tunnel reports whether pods on this interface would be talking through a
-// tunnel rather than the uplink.
+// Tunnel reports whether pods on this interface would talk through a tunnel rather
+// than the uplink.
 //
-// The device type decides, not the name: nothing here reads "tailscale" or
-// "wg" out of an interface name. IFF_POINTOPOINT is the second signal, because
-// a tun device is point-to-point and its ARPHRD is often the only other sign.
-// A PPPoE link is point-to-point too and is a real uplink -- a home line with
-// 1492 on ppp0 must install normally -- so ARPHRD_PPP is excluded from that
-// rule by name of type, not by interface name.
+// The device type decides, not the name: nothing reads "tailscale" or "wg" from an
+// interface name. IFF_POINTOPOINT is the second signal, but a PPPoE link is
+// point-to-point and a real uplink -- a home line with 1492 on ppp0 must install
+// normally -- so ARPHRD_PPP is excluded by type.
 func (l Link) Tunnel() bool {
 	switch l.Type {
 	case arphrdNone, arphrdTunnel, arphrdTunnel6:
@@ -74,9 +64,8 @@ func (l Link) Tunnel() bool {
 	return l.PointToPoint
 }
 
-// Uplink is where the node IP comes from: the link holding the address the
-// kernel sources from on the default route, its MTU, and whether that link is
-// a tunnel (which box refuses to install on).
+// Uplink is where the node IP comes from: the link holding the address the kernel
+// sources from on the default route, its MTU, and whether it is a tunnel.
 type Uplink struct {
 	Interface string
 	Address   string
@@ -84,37 +73,31 @@ type Uplink struct {
 	Tunnel    bool
 }
 
-// Net reports this host's default route and its links, read-only. Decision
-// consults it only where box installs k0s and where box warns about a node
-// address it can see locally; the tests fake it.
+// Net reports this host's default route and links, read-only: consulted where box
+// installs k0s and where it warns about a node address it can see locally.
 type Net interface {
-	// Uplink is the link carrying the default route and the address the
-	// kernel prefers on it.
+	// Uplink is the link carrying the default route and the address the kernel
+	// prefers on it.
 	Uplink() (Uplink, error)
-	// InterfaceFor reports the local link holding addr. ok is false when this
-	// host does not hold it, which is how box knows it is not on that node.
+	// InterfaceFor reports the local link holding addr; false means this host does not
+	// hold it, so box is not on that node.
 	InterfaceFor(addr string) (Link, bool)
 }
 
-// LinuxNet is the running host, read from the kernel's own files: the two
-// route tables say which address family has a default route, a connected UDP
-// socket says which address the kernel would source (connecting a UDP socket
-// sends no packet), and /sys/class/net says what each device is. None of it
-// needs netlink, a new dependency, or a write.
-//
-// The five fields exist so a test can run against a fixture instead of the
-// machine it happens to be on; the zero value is the real host.
+// LinuxNet is the running host, read from the kernel's own files: the route tables
+// say which family has a default route, a connected UDP socket says which address the
+// kernel would source (connecting sends no packet), and /sys/class/net says what each
+// device is. No netlink, no new dependency, no write. The fields let a test run
+// against a fixture; the zero value is the real host.
 type LinuxNet struct {
 	procRoute, procRoute6, sysNet string
 	links                         func() ([]Link, error)
 	source                        func(network, destination string) (netip.Addr, error)
 }
 
-// Uplink finds the default route's family, the address the kernel sources for
-// it, and the link that address sits on. The route tables decide the family
-// and whether a default route exists at all; the address the kernel picks is
-// what decides the link, because that is the same choice it makes for a
-// packet, policy routing included.
+// Uplink finds the default route's family, the address the kernel sources for it and
+// the link that address sits on: the tables decide the family, and the kernel's own
+// choice of source address decides the link, policy routing included.
 func (n LinuxNet) Uplink() (Uplink, error) {
 	network, err := n.defaultFamily()
 	if err != nil {
@@ -158,9 +141,8 @@ func (n LinuxNet) InterfaceFor(addr string) (Link, bool) {
 	return Link{}, false
 }
 
-// defaultFamily is IPv4 first: a host with both is an IPv4 host for this
-// choice (dual-stack is a later spike), and a host whose only default route is
-// IPv6 uses that. The s5n node is one address, pinned, in either family.
+// defaultFamily is IPv4 first (dual-stack is a later spike), and a host whose only
+// default route is IPv6 uses that. The node is one address, pinned, in either family.
 func (n LinuxNet) defaultFamily() (string, error) {
 	if data, err := os.ReadFile(n.routePath()); err == nil {
 		if hasDefaultRouteIPv4(data) {
@@ -175,9 +157,8 @@ func (n LinuxNet) defaultFamily() (string, error) {
 	return "", errors.New("this host has no IPv4 and no IPv6 default route")
 }
 
-// sourceFor asks for the local address of a route to a documentation address
-// in the route's family. A UDP connect resolves the route and the source
-// address without sending anything, so this is as read-only as the tables.
+// sourceFor asks the local address of a route to a documentation address in the
+// family: a UDP connect resolves route and source without sending anything.
 func (n LinuxNet) sourceFor(network string) (netip.Addr, error) {
 	destination := "192.0.2.1:9" // RFC 5737, TEST-NET-1
 	if network == "udp6" {
@@ -210,8 +191,7 @@ func (n LinuxNet) linkList() ([]Link, error) {
 	return hostLinks(n.sysPath())
 }
 
-// hostLinks reads the running host: every interface, with the MTU, the
-// addresses and the device type /sys reports for it.
+// hostLinks reads every interface with its MTU, addresses and /sys device type.
 func hostLinks(sysNet string) ([]Link, error) {
 	ifs, err := net.Interfaces()
 	if err != nil {
@@ -244,9 +224,9 @@ func hostLinks(sysNet string) ([]Link, error) {
 	return out, nil
 }
 
-// deviceType reads /sys/class/net/<name>/type. Zero means "the file did not
-// say", which is not a tunnel type: a host that hides sysfs would otherwise
-// turn every point-to-point uplink into a refusal.
+// deviceType reads /sys/class/net/<name>/type. Zero means the file did not say,
+// which is not a tunnel type: a host hiding sysfs would otherwise turn every
+// point-to-point uplink into a refusal.
 func deviceType(path string) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -259,8 +239,8 @@ func deviceType(path string) int {
 	return t
 }
 
-// hasDefaultRouteIPv4 reads one /proc/net/route table. The destination and the
-// mask of a default route are both zero; the flags say whether it is up.
+// hasDefaultRouteIPv4 reads /proc/net/route: a default route's destination and mask
+// are both zero, and the flags say it is up.
 func hasDefaultRouteIPv4(data []byte) bool {
 	for i, line := range strings.Split(string(data), "\n") {
 		if i == 0 { // header
@@ -280,8 +260,8 @@ func hasDefaultRouteIPv4(data []byte) bool {
 	return false
 }
 
-// hasDefaultRouteIPv6 reads one /proc/net/ipv6_route table: the destination is
-// ::/0, and the flags are hex in the ninth field.
+// hasDefaultRouteIPv6 reads /proc/net/ipv6_route: destination ::/0, flags hex in the
+// ninth field.
 func hasDefaultRouteIPv6(data []byte) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		f := strings.Fields(line)
@@ -319,11 +299,10 @@ func (n LinuxNet) sysPath() string {
 	return "/sys/class/net"
 }
 
-// tunnelRefusal is the one paragraph box stops with when the default route
-// leaves through a tunnel: what box would have pinned, what that does to every
-// pod, and the two ways out. There is no override flag on purpose -- a full
-// tunnel on the host is a decision the operator has to make about the host,
-// not a string box should accept.
+// tunnelRefusal is the paragraph box stops with when the default route leaves through
+// a tunnel: what it would have pinned, what that does to every pod, and the two ways
+// out. No override flag on purpose: a full tunnel on the host is the operator's
+// decision about the host.
 func tunnelRefusal(up Uplink) string {
 	if !up.Tunnel {
 		return ""
@@ -331,17 +310,15 @@ func tunnelRefusal(up Uplink) string {
 	return fmt.Sprintf("box pins the node IP to this host's uplink, and this host's default route leaves through %s, a tunnel with an MTU of %d: the node would register %s there, every pod would inherit that MTU, and anything they send through the tunnel would fragment. Bring the uplink's default route up and run bootstrap again, or install with the tunnel down.", up.Interface, up.MTU, up.Address)
 }
 
-// nodeIPWarning is the one line box prints on a cluster it did not install
-// whose node registered on a tunnel it can see. It is a warning, not a
-// refusal: that cluster is somebody else's to change, and box does not change
-// it.
+// nodeIPWarning is the line box prints for a cluster it did not install whose node
+// registered on a tunnel it can see: a warning, since that cluster is not box's to
+// change.
 func nodeIPWarning(addr string, l Link) string {
 	return fmt.Sprintf("the node registered %s, the address on %s, a tunnel: every pod inherits %s's MTU %d. Pin the kubelet node IP to the uplink (--node-ip) and restart kubelet.", addr, l.Name, l.Name, l.MTU)
 }
 
-// nodeIPWarnings is nodeIPWarning over a cluster's node addresses. An address
-// this host does not hold is skipped silently: that node is not this host, and
-// box cannot see its interfaces.
+// nodeIPWarnings is nodeIPWarning over a cluster's addresses; one this host does not
+// hold is skipped, being another node.
 func nodeIPWarnings(cl Cluster, n Net) []string {
 	for _, addr := range cl.NodeIPs {
 		link, ok := n.InterfaceFor(addr)

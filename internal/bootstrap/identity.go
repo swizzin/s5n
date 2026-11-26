@@ -10,33 +10,27 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 )
 
-// clusterIdentity is how a kubeconfig's current context names the cluster behind
-// it: the API server URL, and the sha256 (hex) of the CA bundle client-go would
-// trust. A kubeconfig path is not a cluster -- the file can be edited to point
-// at another cluster between runs -- so the record carries this identity and a
-// re-run compares it before it probes. Without the comparison a re-run would
-// apply a record's decisions (who owns the lifecycle, the platform modes, the
-// GatewayClass) to whatever cluster the file happens to reach now.
+// clusterIdentity is how a kubeconfig names the cluster behind it: the API server URL
+// and the sha256 of the CA bundle client-go would trust. A path is not a cluster, so
+// the record carries this identity and a re-run compares it before probing; without
+// it, a repointed file would get a record's decisions applied to another cluster.
 type clusterIdentity struct {
 	Server string
 	CAHash string
 }
 
-// noCAHash is the sha256 of the empty CA bundle: the hash every cluster trusted
-// without one shares.
+// noCAHash is the sha256 of the empty bundle: what every cluster trusted without a CA
+// shares.
 const noCAHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-// identityOf resolves the identity of the cluster a kubeconfig's current context
-// reaches, through the loader the prober and box's writers use. The CA bundle is
-// hashed as client-go resolves it: the inline data when the kubeconfig carries
-// it, else the file it names. A cluster trusted without a CA bundle hashes the
-// empty bundle, so a new record always carries a digest.
+// identityOf resolves the identity a kubeconfig's current context reaches, through
+// the loader the prober and the writers use: the CA bundle as client-go resolves it
+// (inline data, else the file), the empty bundle when there is none, so a new record
+// always carries a digest.
 //
-// A kubeconfig this cannot resolve yields the zero identity rather than an
-// error: the prober refuses a kubeconfig it cannot use with its own message
-// (including the no-current-context one), and this check must never replace it.
-// The zero identity is also what a record from before box recorded the identity
-// carries, and the comparison skips it.
+// A kubeconfig it cannot resolve yields the zero identity rather than an error: the
+// prober refuses that file with its own better message, and the comparison skips the
+// zero identity an older record carries.
 func identityOf(kubeconfig []byte) clusterIdentity {
 	cfg, err := kube.ConfigFromBytes(kubeconfig)
 	if err != nil {
@@ -56,25 +50,15 @@ func identityOf(kubeconfig []byte) clusterIdentity {
 	}
 }
 
-// identityConflict is the refusal for a recorded cluster whose kubeconfig now
-// reaches a different one. It names both server URLs and the record file an
-// operator removes deliberately, so the message says what changed and what the
-// way out is.
+// identityConflict is the refusal for a recorded cluster whose kubeconfig now reaches
+// a different one, naming both servers and the record file an operator removes.
 //
-// The CA bundle is the cluster's identity; the server URL is only how this
-// kubeconfig reaches it. One cluster is often reached at several addresses (a
-// local one, a tailnet name, a load balancer), and an operator who switches
-// between them has not moved box to another cluster, so a changed URL with the
-// same CA is accepted. A cluster trusted with no CA bundle at all has no
-// identity of its own (every such cluster hashes the empty bundle), so there the
-// URL is all box can compare.
-//
-// A record with either field absent is a record written before box recorded the
-// identity (box writes both together, always). It is accepted: box must not
-// refuse the cluster it has managed all along over fields the box that wrote the
-// record did not keep, and the next record box writes carries them. A kubeconfig
-// box cannot resolve has no identity either; the prober refuses it next with its
-// own message, which says more than a comparison against nothing would.
+// The CA bundle is the identity; the URL is only how this kubeconfig reaches it, and
+// one cluster is often reached at several addresses, so a changed URL with the same CA
+// is accepted. A cluster trusted with no CA has no identity of its own, so there the
+// URL is all box compares. A record missing either field was written before box kept
+// them and is accepted, and a kubeconfig it cannot resolve is left to the prober's own
+// message.
 func identityConflict(rec *Record, cur clusterIdentity, recordPath string) string {
 	if rec.Server == "" || rec.CAHash == "" || cur.CAHash == "" {
 		return ""

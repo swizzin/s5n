@@ -24,38 +24,36 @@ type Downloader interface {
 	Fetch(ctx context.Context, url string) (io.ReadCloser, error)
 }
 
-// Runner runs one command and returns what it said, so a failure can be quoted
-// under box's message and a success can be dropped.
+// Runner runs one command and returns what it said, for quoting under a failure.
 type Runner interface {
 	Run(ctx context.Context, path string, args ...string) ([]byte, error)
 }
 
-// Readiness answers the questions box asks of the API server it just started:
-// is it serving, and which address did the node register? It is polled, so it
-// must be cheap and must not write anything.
+// Readiness answers the questions box asks of the API server it just started: is it
+// serving, and which address did the node register? Polled, so it must be cheap and
+// write nothing.
 type Readiness interface {
 	Ready(ctx context.Context) error
-	// NodeIPs returns the InternalIPs the nodes registered. It is asked once,
-	// after Ready has said yes, to check the node took the address box pinned.
+	// NodeIPs returns the InternalIPs the nodes registered, asked once after Ready to
+	// check the node took the address box pinned.
 	NodeIPs(ctx context.Context) ([]string, error)
 }
 
-// The readiness wait. A first start has to bring containerd and the kubelet up
-// and register the node, which is tens of seconds on a fast host and minutes on
-// a small VPS; three minutes is the point where box stops guessing.
+// The readiness wait: a first start brings containerd and the kubelet up and
+// registers the node, tens of seconds on a fast host and minutes on a small VPS, so
+// three minutes is where box stops guessing.
 const (
 	DefaultReadyTimeout  = 3 * time.Minute
 	DefaultReadyInterval = 2 * time.Second
 )
 
-// K0sInstaller is the real Installer: it downloads the pinned release, checks
-// it against the checksum the chart release pins beside that version, writes it
-// to K0sBinaryPath, installs and starts a single-node controller, then waits
-// until the API and a node answer. The zero value is usable; every field exists
-// so a test can replace one piece without a host, a network or a systemd.
+// K0sInstaller is the real Installer: download the pinned release, check it against
+// the chart's checksum, write it to K0sBinaryPath, install and start a single-node
+// controller, wait until the API and a node answer. The zero value is usable; every
+// field exists so a test replaces one piece without a host, network or systemd.
 type K0sInstaller struct {
-	// Say is every progress line the installer writes; k0s's own output never
-	// goes here, it appears only in a failure, quoted under box's message.
+	// Say is every progress line; k0s's own output appears only in a failure, quoted
+	// under box's message.
 	Say say.Reporter
 	// Root reports whether box may install a system service. Default euid 0.
 	Root func() bool
@@ -65,8 +63,8 @@ type K0sInstaller struct {
 	Run      Runner
 	// Ready checks the API. Nil means the admin kubeconfig at ConfPath.
 	Ready Readiness
-	// BinPath, StateDir and ConfPath are the install target, k0s's state and
-	// the admin kubeconfig k0s writes. Empty means the constants.
+	// BinPath, StateDir and ConfPath are the install target, k0s's state and the admin
+	// kubeconfig it writes. Empty means the constants.
 	BinPath, StateDir, ConfPath string
 	// Timeout and Interval bound the readiness wait. Zero means the defaults.
 	Timeout, Interval time.Duration
@@ -75,21 +73,18 @@ type K0sInstaller struct {
 	Sleep func(time.Duration)
 }
 
-// Install is the whole clean-host sequence. Everything that can refuse happens
-// before the first byte is fetched; everything after the binary is in place
-// reports what it left on the host and how to undo it.
+// Install is the whole clean-host sequence: everything that can refuse happens
+// before the first byte is fetched, and everything after the binary is in place
+// reports what it left and how to undo it.
 //
-// The plan's checksum is the release's, taken from the chart's platform.yaml by
-// k0sPlan: the pins are the only place a k0s sum is written down, so there is
-// nothing to resolve again here and nothing a second copy could disagree with.
-// A plan that carries no sum is one box cannot verify, and it is refused by
-// architecture before the download.
+// The plan's checksum is the release's, from the chart's platform.yaml by k0sPlan:
+// the pins are the only place a k0s sum is written, so nothing here resolves it
+// again. A plan with no sum is refused by architecture before the download.
 //
 // The node's address is pinned twice, because two components choose one
 // independently: --kubelet-extra-args=--node-ip for the Node's InternalIP, and
-// spec.api.address in the config box writes for the API server's own address.
-// Both are the uplink, so the CNI's auto-MTU follows it, and neither is
-// re-derived here -- the plan carries them.
+// spec.api.address for the API server. Both are the uplink, so the CNI's auto-MTU
+// follows it, and the plan carries them.
 func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {
@@ -113,9 +108,8 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	}
 
 	bin := k.binPath()
-	// One row for the whole install: the download, the binary, the config and
-	// the service are one thing that either works or does not, and the paths
-	// are the log's (rule 5).
+	// One row for the whole install: download, binary, config and service are one
+	// thing that works or does not; the paths are the log's (rule 5).
 	step := r.Start(say.Op{Name: "k0s " + rel.Version})
 	r.Detail(fmt.Sprintf("installing k0s %s for %s into %s", rel.Version, rel.Arch, bin))
 	if err := k.writeBinary(ctx, rel, bin); err != nil {
@@ -124,10 +118,9 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	}
 	r.Detail("installed " + bin)
 
-	// From here the host is changed by this run: every failure names what is
-	// there now and the one command that removes it. box never runs that
-	// command itself -- `k0s reset` would also remove a k0s box did not
-	// install, and destroying a cluster is the operator's call to see happen.
+	// From here the host is changed: every failure names what is there and the one
+	// command that removes it. box never runs it -- `k0s reset` would also remove a
+	// k0s box did not install, and destroying a cluster is the operator's call.
 	if err := k.writeConfig(config, plan.ConfigText); err != nil {
 		step.Failed(err)
 		return k.leftBehind(plan, "box could not write the k0s config it installs with", nil, err)
@@ -158,12 +151,10 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 // k0sInstallSubcommand is the k0s subcommand that writes the systemd unit.
 const k0sInstallSubcommand = "install"
 
-// installArgs is the one k0s command the installer runs. `k0s install
-// controller` writes its flags into the systemd unit, so the pin survives
-// reboots and k0s restarts without box being involved again; --kubelet-extra-args
-// is how a kubelet flag reaches k0s's kubelet (k0s v1.37.2+k0s.1,
-// pkg/config/cli.go GetWorkerFlags, and cmd/install/controller.go passes the
-// parsed flags to install.InstallService).
+// installArgs is the one k0s command the installer runs. `k0s install controller`
+// writes its flags into the systemd unit, so the pin survives reboots, and
+// --kubelet-extra-args is how a kubelet flag reaches k0s's kubelet (k0s v1.37.2+k0s.1,
+// pkg/config/cli.go GetWorkerFlags, cmd/install/controller.go).
 func installArgs(plan InstallPlan, config string) []string {
 	return []string{
 		k0sInstallSubcommand, "controller", "--single",
@@ -172,11 +163,10 @@ func installArgs(plan InstallPlan, config string) []string {
 	}
 }
 
-// verifyNodeIP reads the Node's InternalIP once the cluster answers, and fails
-// through leftBehind when it is not the address box pinned: a node that took
-// another address took that interface's MTU with it, which is the failure this
-// whole file exists to prevent. Both addresses are named, because the operator
-// needs to see which interface the host chose.
+// verifyNodeIP reads the Node's InternalIP once the cluster answers and fails through
+// leftBehind when it is not the pinned one: a node on another address took that
+// interface's MTU with it. Both addresses are named, so the operator sees which
+// interface the host chose.
 func (k K0sInstaller) verifyNodeIP(ctx context.Context, plan InstallPlan) error {
 	ips, err := k.ready().NodeIPs(ctx)
 	if err != nil {
@@ -194,9 +184,8 @@ func (k K0sInstaller) verifyNodeIP(ctx context.Context, plan InstallPlan) error 
 		nil, errors.New("every pod would take the MTU of the interface behind that address"))
 }
 
-// writeConfig writes the k0s config the install runs with. It is written after
-// the binary and before `k0s install`, so a download that fails leaves the host
-// as it was and a failure after this point names the file.
+// writeConfig writes the k0s config the install runs with: after the binary and
+// before `k0s install`, so a failed download leaves the host as it was.
 func (k K0sInstaller) writeConfig(path, text string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
@@ -204,10 +193,10 @@ func (k K0sInstaller) writeConfig(path, text string) error {
 	return atomicfile.Write(path, []byte(text), 0o644)
 }
 
-// writeBinary downloads into a temporary file beside the target and renames it
-// into place, so a failed or interrupted download never leaves a partial k0s
-// where the unit would exec it. The checksum is computed while the bytes are
-// written, and a mismatch removes the file without touching the target.
+// writeBinary downloads into a temporary file beside the target and renames it into
+// place, so an interrupted download never leaves a partial k0s where the unit would
+// exec it. The checksum is computed as the bytes are written; a mismatch removes the
+// file without touching the target.
 func (k K0sInstaller) writeBinary(ctx context.Context, rel k0sRelease, bin string) error {
 	body, err := k.fetch().Fetch(ctx, rel.URL())
 	if err != nil {
@@ -257,8 +246,8 @@ func (k K0sInstaller) runK0s(ctx context.Context, args ...string) ([]byte, error
 	return run.Run(ctx, k.binPath(), args...)
 }
 
-// waitReady polls the API until it is ready or the deadline passes, keeping the
-// last refusal so the failure says what was actually wrong.
+// waitReady polls the API until it is ready or the deadline passes, keeping the last
+// refusal so the failure says what was wrong.
 func (k K0sInstaller) waitReady(ctx context.Context) error {
 	timeout, interval := k.Timeout, k.Interval
 	if timeout <= 0 {
@@ -277,9 +266,8 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 
 	r := say.Or(k.Say, nil)
 	r.Detail(fmt.Sprintf("waiting up to %s for the cluster API", timeout))
-	// The installer's own clock is the wait's: a test that proves how many
-	// attempts five seconds made moves a fake Now forward instead of spending
-	// the five seconds.
+	// The installer's clock is the wait's: a test moves a fake Now forward instead of
+	// spending the seconds.
 	var last error
 	waited, err := wait.UntilClock(ctx, wait.Clock{Now: now, Sleep: sleep}, timeout, interval,
 		func(ctx context.Context) (bool, error) {
@@ -296,8 +284,8 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 	return fmt.Errorf("not ready after %s: %w", timeout, last)
 }
 
-// leftBehind is the failure box returns once this run has changed the host: it
-// names what is there now and the one command that undoes it.
+// leftBehind is the failure once this run has changed the host: what is there now and
+// the one command that undoes it.
 func (k K0sInstaller) leftBehind(plan InstallPlan, what string, out []byte, err error) error {
 	config := k.configPath(plan)
 	var b strings.Builder
@@ -310,8 +298,8 @@ func (k K0sInstaller) leftBehind(plan InstallPlan, what string, out []byte, err 
 	return errors.New(b.String())
 }
 
-// quoteOutput indents a command's output so it reads as quoted material under
-// box's own sentence, rather than as box saying it.
+// quoteOutput indents a command's output so it reads as quoted material under box's
+// sentence.
 func quoteOutput(out []byte) string {
 	trimmed := strings.TrimSpace(strings.ReplaceAll(string(out), "\r\n", "\n"))
 	if trimmed == "" {
@@ -373,8 +361,7 @@ func (k K0sInstaller) confPath() string {
 	return K0sAdminConfig
 }
 
-// configPath is where the k0s config goes: the plan's path, or k0s's default
-// when a plan carries none (which installRefusal has already refused).
+// configPath is the plan's path, or k0s's default (which installRefusal refuses).
 func (k K0sInstaller) configPath(plan InstallPlan) string {
 	if plan.ConfigPath != "" {
 		return plan.ConfigPath
@@ -382,20 +369,16 @@ func (k K0sInstaller) configPath(plan InstallPlan) string {
 	return K0sConfigPath
 }
 
-// DryRunInstaller prints the plan instead of carrying it out. `box bootstrap
-// --dry-run` reaches the same clean-host branch as a real run, and this is the
-// installer it gets: a dry run probes nothing and writes nothing, so the only
-// honest thing it can do with an install is say what it would have done.
+// DryRunInstaller prints the plan instead of carrying it out: a dry run probes and
+// writes nothing, so the only honest thing it can do with an install is say what it
+// would have done.
 type DryRunInstaller struct {
 	Say say.Reporter
 }
 
-// Install prints the planned k0s install.
-//
-// The node identity is part of what it prints: this is the operator's one look
-// at the address the cluster will register with, its interface and that
-// interface's MTU, before anything on the host changes. box sets no MTU; the
-// number is what the CNI will derive once the node is up.
+// Install prints the planned k0s install, the node identity included: the operator's
+// one look at the address the cluster will register with, its interface and MTU,
+// before anything changes. box sets no MTU; the CNI derives it.
 func (p DryRunInstaller) Install(_ context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {

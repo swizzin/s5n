@@ -15,7 +15,7 @@ func TestDecideComponent(t *testing.T) {
 		// auto: use when present, install when absent
 		{ComponentGateway, ModeAuto, OutcomePresent, "use"},
 		{ComponentGateway, ModeAuto, OutcomeAbsent, "install"},
-		// managed: always install ours, present or absent
+		// managed: always install ours
 		{ComponentGateway, ModeManaged, OutcomePresent, "install"},
 		{ComponentGateway, ModeManaged, OutcomeAbsent, "install"},
 		// external: verify when present, stop when absent
@@ -25,12 +25,12 @@ func TestDecideComponent(t *testing.T) {
 		{ComponentGateway, ModeAuto, OutcomeConflict, "stop"},
 		{ComponentGateway, ModeManaged, OutcomeConflict, "stop"},
 		{ComponentGateway, ModeExternal, OutcomeConflict, "stop"},
-		// not probed is unknown for every capability whose probe is read-only
+		// not probed is unknown for a read-only probe
 		{ComponentGateway, ModeAuto, OutcomeNotProbed, "unknown"},
 		{ComponentCertManager, ModeExternal, OutcomeNotProbed, "unknown"},
-		// the LoadBalancer's probe is a write, so not probed means after the
-		// confirm: a conditional install in auto, an install in managed, a
-		// verification in external.
+		// LoadBalancer's probe is a write, so not probed means after the confirm: a
+		// conditional install in auto, an install in managed, a verification in
+		// external.
 		{ComponentLoadBalancer, ModeAuto, OutcomeNotProbed, "probe"},
 		{ComponentLoadBalancer, ModeManaged, OutcomeNotProbed, "install"},
 		{ComponentLoadBalancer, ModeExternal, OutcomeNotProbed, "verify"},
@@ -43,9 +43,8 @@ func TestDecideComponent(t *testing.T) {
 	}
 }
 
-// The decision block bootstrap prints before the platform plan must not
-// contradict the plan: a not-probed LoadBalancer is not "unknown", it is the
-// question the plan prints as "unless the Gateway gets an address without it".
+// The decision block must not contradict the plan: a not-probed LoadBalancer is not
+// "unknown" but "unless the Gateway gets an address without it".
 func TestDecidePlatformLoadBalancerSaysWhenItIsDecided(t *testing.T) {
 	components, conflict := decidePlatform(DefaultPlatform(), PlatformProbe{
 		GatewayAPI:   OutcomePresent,
@@ -93,7 +92,7 @@ func TestDecidePlatformConflictStopsInEveryMode(t *testing.T) {
 		if len(components) != 4 {
 			t.Errorf("mode %s: expected 4 component results, got %d", mode, len(components))
 		}
-		// the conflicting component's own action is "stop" in every mode
+		// the conflicting component's action is "stop" in every mode
 		for _, c := range components {
 			if c.Component == ComponentGateway && c.Action != "stop" {
 				t.Errorf("mode %s: Gateway action = %q, want stop", mode, c.Action)

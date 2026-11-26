@@ -12,37 +12,31 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// Record is the persisted cluster record (hostroot.RecordPath). It is written in a fixed,
-// box-owned schema; box reads it back before any probing on a re-run so the
-// decision short-circuits.
+// Record is the persisted cluster record (hostroot.RecordPath), in a fixed box-owned
+// schema; a re-run reads it before any probing so the decision short-circuits.
 type Record struct {
 	Source     Source
 	Kubeconfig string
-	// Server and CAHash identify the cluster the kubeconfig's current context
-	// reached when this record was written: the API server URL and the sha256
-	// (hex) of the cluster CA bundle. A kubeconfig path is not a cluster, so a
-	// re-run compares the path's current identity before it probes and refuses
-	// one that now reaches another cluster. Both are empty in a record written
-	// before box recorded them; such a record is accepted, never refused for
-	// the missing fields, and the next record box writes carries them.
+	// Server and CAHash identify the cluster the kubeconfig reached when this record
+	// was written: the API server URL and the sha256 of its CA bundle. A path is not a
+	// cluster, so a re-run compares the current identity and refuses one that now
+	// reaches another cluster. Both empty is an older record: accepted, and the next
+	// one carries them.
 	Server       string
 	CAHash       string
 	Distribution Distribution
-	// Nodes is what the run that wrote the record saw. A re-run refuses the
-	// recorded value cheaply before touching the network and then re-probes the
-	// node list: the record is a cached decision, not evidence.
+	// Nodes is what the writing run saw. A re-run refuses it cheaply before touching
+	// the network, then re-probes: the record is a cached decision, not evidence.
 	Nodes    int
 	Platform PlatformConfig
-	// GatewayClass is the GatewayClass box attached its Gateway to. A re-run
-	// keeps it while the cluster still serves it: the class is a decision, and
-	// asking a second time would be able to silently move a box's routes. The
-	// cluster still has to show it Accepted and owned by Envoy Gateway's
-	// controller.
+	// GatewayClass is the class box attached its Gateway to. A re-run keeps it while
+	// the cluster serves it: asking again could silently move a box's routes. It must
+	// still be Accepted and owned by Envoy Gateway's controller.
 	GatewayClass string
 }
 
-// encodeRecord renders a Record as the fixed YAML schema. The kubeconfig path
-// is quoted so leading/trailing spaces survive.
+// encodeRecord renders a Record as the fixed schema; the path is quoted so spaces
+// survive.
 func encodeRecord(r *Record) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "source: %s\n", r.Source)
@@ -66,8 +60,7 @@ func encodeRecord(r *Record) []byte {
 	return []byte(b.String())
 }
 
-// parseRecord decodes the fixed YAML schema. It rejects unknown keys and
-// malformed lines rather than guessing.
+// parseRecord decodes the fixed schema, rejecting unknown keys and malformed lines.
 func parseRecord(data []byte) (*Record, error) {
 	rec := &Record{}
 	inPlatform := false
@@ -112,11 +105,9 @@ func parseRecord(data []byte) (*Record, error) {
 			case "gatewayClass":
 				rec.GatewayClass = unquote(val)
 			case "assumeGatewayFeatures":
-				// The key only existed for a class publishing no feature list,
-				// and box no longer accepts any implementation other than
-				// Envoy Gateway. Refuse by name rather than reporting it as an
-				// unknown key: an operator upgrading a box needs to know which
-				// line to remove and why.
+				// The key only existed for a class publishing no feature list, and box
+				// accepts only Envoy Gateway. Refused by name, so an operator upgrading
+				// knows which line to remove and why.
 				return nil, fmt.Errorf("cluster.yaml: assumeGatewayFeatures is no longer supported: box supports only Envoy Gateway, which publishes no feature list to override. Remove that line and run box bootstrap again")
 			default:
 				return nil, fmt.Errorf("cluster.yaml: unknown key %q", key)
@@ -187,16 +178,14 @@ func (r FilesystemRecords) Load() (*Record, error) {
 // RecordPath reports where this store persists the record.
 func (r FilesystemRecords) RecordPath() string { return r.Path }
 
-// RecordedKubeconfig reports the kubeconfig the record names, and whether there
-// is a record at all. It is kube.Records: a command that only has to know where
-// the cluster is (`box apply`, and root's `box adduser` next) asks the store
-// this and never sees the record's schema.
+// RecordedKubeconfig reports the kubeconfig the record names and whether one
+// exists: kube.Records, so a command that only needs where the cluster is never sees
+// the schema.
 func (r FilesystemRecords) RecordedKubeconfig() (string, bool, error) {
 	return recordedKubeconfig(r.Load)
 }
 
-// recordedKubeconfig is the one reading of "where is the recorded cluster" both
-// stores answer with.
+// recordedKubeconfig is the one reading of "where is the recorded cluster".
 func recordedKubeconfig(load func() (*Record, error)) (string, bool, error) {
 	rec, err := load()
 	if err != nil {
@@ -216,8 +205,8 @@ func (r FilesystemRecords) Save(rec *Record) error {
 	return atomicfile.Write(r.Path, encodeRecord(rec), 0o600)
 }
 
-// ReadOnlyRecords wraps a store: Load still reads, Save is a no-op. box
-// bootstrap --dry-run uses it so a dry run never writes the record.
+// ReadOnlyRecords wraps a store: Load reads, Save does nothing. --dry-run uses it so
+// a dry run never writes the record.
 type ReadOnlyRecords struct {
 	Inner RecordStore
 }
@@ -226,8 +215,7 @@ func (r ReadOnlyRecords) Load() (*Record, error) { return r.Inner.Load() }
 func (r ReadOnlyRecords) RecordPath() string     { return r.Inner.RecordPath() }
 func (r ReadOnlyRecords) Save(*Record) error     { return nil }
 
-// RecordedKubeconfig is the read half of kube.Records; a dry run still answers
-// where the cluster is, it just never writes.
+// RecordedKubeconfig is the read half: a dry run still answers where the cluster is.
 func (r ReadOnlyRecords) RecordedKubeconfig() (string, bool, error) {
 	return recordedKubeconfig(r.Inner.Load)
 }

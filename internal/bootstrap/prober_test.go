@@ -26,9 +26,8 @@ import (
 	"time"
 )
 
-// kubeconfigFixtureToken is a token-based kubeconfig for the read-only HTTP
-// prober. Served over TLS in the auth tests: clientcmd deliberately sends no
-// credentials to a plain http server, as kubectl does.
+// kubeconfigFixtureToken is a token kubeconfig for the read-only prober, served over
+// TLS in the auth tests: clientcmd sends no credentials to a plain http server.
 func kubeconfigFixtureToken(t *testing.T, server string) []byte {
 	t.Helper()
 	return []byte(fmt.Sprintf(`apiVersion: v1
@@ -51,9 +50,8 @@ users:
 `, server))
 }
 
-// kubeconfigWithUser writes the same single-cluster/context shape, with the
-// user block spelled exactly as a test needs it. The cluster skips TLS
-// verification so an httptest TLS server needs no CA fixture.
+// kubeconfigWithUser writes the same shape with the user block a test needs; TLS
+// verification is skipped so an httptest server needs no CA.
 func kubeconfigWithUser(server, userBody string) []byte {
 	return []byte(fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -139,8 +137,7 @@ func TestHTTPProberSendsBearerToken(t *testing.T) {
 	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()
 
-	// The same server answers 401 when the header is absent; that is the
-	// failure main exhibits, where the prober never set it.
+	// The same server answers 401 without the header: the failure being fixed.
 	raw := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 	resp, err := raw.Get(srv.URL + "/version")
 	if err != nil {
@@ -223,9 +220,8 @@ func TestHTTPProberReadsTokenFile(t *testing.T) {
 	}
 }
 
-// writeExecCredScript writes a stand-in exec credential plugin: it records
-// that it ran, then prints one v1beta1 ExecCredential carrying a fixed token.
-// Nothing in box may run it except client-go, on an actual request.
+// writeExecCredScript writes a stand-in exec plugin: it records that it ran, then
+// prints a v1beta1 ExecCredential with a fixed token. Only client-go may run it.
 func writeExecCredScript(t *testing.T, marker string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cred.sh")
@@ -297,8 +293,8 @@ func TestHTTPProberCheckLocal(t *testing.T) {
 		}
 	}
 
-	// A local kubeadm cluster's admin.conf names the node's own address. The
-	// address list is injected so this does not depend on the test machine.
+	// A kubeadm admin.conf names the node's own address; the list is injected, so this
+	// does not depend on the machine.
 	onMachine := fakeAddrs("192.0.2.10", "2001:db8::5")
 	for _, server := range []string{
 		"https://192.0.2.10:6443",
@@ -324,14 +320,14 @@ func TestHTTPProberCheckLocal(t *testing.T) {
 		}
 	}
 
-	// A hostname is never local, even when the machine has addresses: proving
-	// it would take a DNS lookup, which this guard must not make.
+	// A hostname is never local: proving it would take a DNS lookup, which this guard
+	// must not make.
 	p := &HTTPProber{baseURL: "https://node.example.com:6443", localOnly: true, localAddrs: onMachine}
 	if err := p.checkLocal(); !errors.Is(err, ErrRemoteCluster) {
 		t.Errorf("checkLocal(a hostname) = %v, want ErrRemoteCluster", err)
 	}
 
-	// An address list that cannot be read proves nothing, so it refuses.
+	// An unreadable address list proves nothing, so it refuses.
 	failing := func() ([]net.IP, error) { return nil, errors.New("no interfaces") }
 	p = &HTTPProber{baseURL: "https://192.0.2.10:6443", localOnly: true, localAddrs: failing}
 	if err := p.checkLocal(); !errors.Is(err, ErrRemoteCluster) {
@@ -339,8 +335,7 @@ func TestHTTPProberCheckLocal(t *testing.T) {
 	}
 }
 
-// fakeAddrs is the injected interface-address lookup: these addresses are the
-// machine's, and only these.
+// fakeAddrs is the injected lookup: these are the machine's addresses.
 func fakeAddrs(ips ...string) func() ([]net.IP, error) {
 	return func() ([]net.IP, error) {
 		out := make([]net.IP, 0, len(ips))
@@ -351,9 +346,9 @@ func fakeAddrs(ips ...string) func() ([]net.IP, error) {
 	}
 }
 
-// The tests above inject the address list, so prove the real lookup finds this
-// host's own loopback address: a broken interfaceAddrs would still pass every
-// fake-host case while making a local cluster look remote.
+// The tests above inject the list, so prove the real lookup finds this host's
+// loopback: a broken interfaceAddrs would pass every fake case and make a local
+// cluster look remote.
 func TestInterfaceAddrsIncludesLoopback(t *testing.T) {
 	addrs, err := interfaceAddrs()
 	if err != nil {
@@ -367,9 +362,8 @@ func TestInterfaceAddrsIncludesLoopback(t *testing.T) {
 	t.Fatalf("interfaceAddrs = %v, want this host's loopback address", addrs)
 }
 
-// dialTo delivers every connection to srv, whatever host the request names.
-// It lets a test prove what the guard decided without giving it a resolvable
-// name: if the guard lets the call through, the counting server sees it.
+// dialTo delivers every connection to srv, whatever host is named, so a test proves
+// what the guard decided: a call let through reaches the counting server.
 func dialTo(srv *httptest.Server) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -378,9 +372,8 @@ func dialTo(srv *httptest.Server) *http.Client {
 	}}
 }
 
-// TestHTTPProberLocalOnlyAcceptsAnAddressOnThisMachine is the local kubeadm
-// case end to end: the kubeconfig names 192.0.2.10, an address this (fake)
-// host holds, and the request goes through.
+// The local kubeadm case end to end: the kubeconfig names 192.0.2.10, an address
+// this fake host holds, and the request goes through.
 func TestHTTPProberLocalOnlyAcceptsAnAddressOnThisMachine(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -408,9 +401,8 @@ func TestHTTPProberLocalOnlyAcceptsAnAddressOnThisMachine(t *testing.T) {
 	}
 }
 
-// TestHTTPProberLocalOnlyRefusesBeforeAnyRequest: a refused hostname reaches
-// no server at all — zero HTTP requests — even though the client would have
-// delivered the call to the counting server.
+// A refused hostname reaches no server at all: zero requests, though the client
+// would have delivered them.
 func TestHTTPProberLocalOnlyRefusesBeforeAnyRequest(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -497,8 +489,7 @@ func TestHTTPProberAgainstLoopbackServer(t *testing.T) {
 	}
 }
 
-// selfSignedCert generates a throwaway ECDSA certificate/key for the client
-// certificate test.
+// selfSignedCert is a throwaway ECDSA certificate for the client-certificate test.
 func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -527,9 +518,8 @@ func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
 	return certPEM, keyPEM
 }
 
-// A kubeconfig with contexts but no current-context is refused with what is
-// missing, not clientcmd's "no configuration has been provided". box does not
-// pick a context: the writers load the same file and would refuse it too.
+// Contexts without a current-context get what is missing, not clientcmd's "no
+// configuration has been provided": box never picks a context.
 func TestNewHTTPProberNoCurrentContext(t *testing.T) {
 	kc := []byte(`apiVersion: v1
 kind: Config
