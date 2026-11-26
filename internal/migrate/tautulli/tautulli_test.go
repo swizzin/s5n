@@ -14,16 +14,10 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// fixture is a config.ini shaped like the one Tautulli writes from
-// _CONFIG_DEFINITIONS (plexpy/config.py at v2.18.2): one section per group of
-// settings, `key = value`, comments between them, and a quoted value holding a
-// space.
-//
-// Every key is lower case because that is the only spelling Tautulli writes:
-// Config's _define (plexpy/config.py:473) folds each setting's name to
-// `ini_key = name.lower()`, and Config.write() (:528-556) builds the file from
-// those keys. The fixture was all caps before the migration read a real
-// config.ini and found none of it.
+// fixture is shaped like the config.ini Tautulli writes from
+// _CONFIG_DEFINITIONS (plexpy/config.py at v2.18.2). Keys are lower case, the only
+// spelling Tautulli writes: _define folds each name (:473) and Config.write()
+// builds the file from those keys (:528-556).
 const fixture = `[General]
 # the web server
 http_host = 127.0.0.1
@@ -98,8 +92,8 @@ func setupFile(t *testing.T, text string) rewrite.Input {
 
 func setup(t *testing.T) rewrite.Input { t.Helper(); return setupFile(t, fixture) }
 
-// rewritten runs both passes over one config.ini and returns the file as it is
-// afterwards, by section/key as the file spells them.
+// rewritten runs both passes over one config.ini, returning it by section/key as
+// the file spells them.
 func rewritten(t *testing.T, text string) map[string]string {
 	t.Helper()
 	in := setupFile(t, text)
@@ -115,12 +109,9 @@ func rewritten(t *testing.T, text string) map[string]string {
 	return read(t, in.Dir)
 }
 
-// respelled is one config.ini with every key in the other spelling, which is
-// what a file a person hand-edited (or one an older tool wrote) looks like.
-// Tautulli resolves a setting only through its lower-case name, so a file
-// spelled this way is not the setting to Tautulli itself; to a person reading
-// the file, it is the same config, and migrate rewriting nothing there is the
-// failure this package exists to avoid.
+// respelled is the same config.ini with every key in the other case, as a
+// hand-edited file looks. Tautulli reads only the lower-case name, but rewriting
+// nothing there is the failure this package exists to avoid.
 func respelled(ini string) string {
 	var out []string
 	for _, line := range strings.Split(ini, "\n") {
@@ -182,8 +173,7 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 		}
 	}
 
-	// Only the values changed: comments, the blank quote-only line and every
-	// line's position are as they were.
+	// Only the values changed: comments, the quote-only line and positions stand.
 	after, err := os.ReadFile(filepath.Join(in.Dir, configName))
 	if err != nil {
 		t.Fatal(err)
@@ -198,8 +188,7 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 			t.Errorf("%q is not in the rewritten file:\n%s", kept, after)
 		}
 	}
-	// A second pass has nothing left to do, and no address is unclassified:
-	// pms_ip now names the box, and in.Resolve knows the box's own endpoints.
+	// A second pass has nothing to do: pms_ip names the box's own endpoint.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -212,10 +201,8 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 	}
 }
 
-// TestReadsEverySpellingOfAKey: the same config with its keys in the other
-// case is rewritten the same way, and the file keeps the spelling it had. A
-// rewrite that renames a key would write a setting the app does not read next
-// to the one it does.
+// TestReadsEverySpellingOfAKey: the same config in either case is rewritten the
+// same way, and keeps the spelling it had.
 func TestReadsEverySpellingOfAKey(t *testing.T) {
 	want := map[string]string{
 		"General/http_host":         "0.0.0.0",
@@ -251,8 +238,7 @@ func TestReadsEverySpellingOfAKey(t *testing.T) {
 	}
 }
 
-// lookupFold is read()'s map, asked for a section/key without caring how the
-// file spelled it.
+// lookupFold asks read()'s map without caring how the file spelled the key.
 func lookupFold(ini map[string]string, where string) (string, bool) {
 	for k, v := range ini {
 		if strings.EqualFold(k, where) {
@@ -262,9 +248,7 @@ func lookupFold(ini map[string]string, where string) (string, bool) {
 	return "", false
 }
 
-// TestKeepsTheKeySpellingOnDisk: what the two passes above say must hold on the
-// bytes, not only in the parsed view: an upper-case file has upper-case keys
-// after the rewrite and gains none of the lower-case ones.
+// TestKeepsTheKeySpellingOnDisk: the bytes keep their case and gain no other.
 func TestKeepsTheKeySpellingOnDisk(t *testing.T) {
 	in := setupFile(t, respelled(fixture))
 	ctx := context.Background()
@@ -285,8 +269,7 @@ func TestKeepsTheKeySpellingOnDisk(t *testing.T) {
 	}
 }
 
-// TestReportNamesTheSpellingTheFileUses: the plan the operator reads names the
-// line the file holds, not this package's spelling of the setting.
+// TestReportNamesTheSpellingTheFileUses: the plan names the line the file holds.
 func TestReportNamesTheSpellingTheFileUses(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -419,8 +402,7 @@ func read(t *testing.T, dir string) map[string]string {
 	return out
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()
@@ -454,9 +436,8 @@ func treeHash(t *testing.T, dir string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// withLogin is the fixture with the source's own web login configured, the way
-// an install behind a plain proxy has it: a name, a hashed password and the two
-// flags that tell the app the value is a hash.
+// withLogin is the fixture with the source's own web login configured: a name, a
+// hashed password and the two flags saying the value is a hash.
 const withLogin = `[General]
 http_host = 127.0.0.1
 http_port = 8181
@@ -473,11 +454,8 @@ pms_port = 32400
 pms_ssl = 1
 `
 
-// The app's own login is switched off, and the plan says so: behind box the
-// person signs in at the edge once, so a password the source had is a password
-// nobody will be asked for and nobody can use. What the chart's init container
-// re-seals on every start (internal/ttlconf) has to be true of the migrated file
-// too, or the first restart changes the app's behaviour.
+// The app's own login is switched off and the plan says so, matching what the
+// chart's init container re-seals on every start (internal/ttlconf).
 func TestSwitchesTheAppsOwnLoginOffAndSaysSo(t *testing.T) {
 	in := setupFile(t, withLogin+"\npath_map = /srv/plex=/config/plex\n")
 	rep, err := rewriter{}.Check(context.Background(), in)
@@ -511,9 +489,7 @@ func TestSwitchesTheAppsOwnLoginOffAndSaysSo(t *testing.T) {
 	}
 }
 
-// A key the file does not hold is not written: Tautulli's own defaults answer
-// for it, and a migration that invented settings would be writing a config the
-// app never had.
+// A key the file does not hold is not written: the app's defaults answer for it.
 func TestLoginOffLeavesAbsentKeysAlone(t *testing.T) {
 	got := rewritten(t, "[General]\nhttp_port = 8181\n\n[PMS]\npms_ip = localhost\npms_port = 32400\n")
 	for _, where := range []string{"General/http_username", "General/http_password", "General/http_basic_auth"} {
@@ -523,11 +499,9 @@ func TestLoginOffLeavesAbsentKeysAlone(t *testing.T) {
 	}
 }
 
-// Tautulli 2.19's two switches are the other half of "its own login is off": a
-// file at 2.19 that a migration takes over holds them at the install defaults,
-// which mint a password for a wizard that never finished and refuse every
-// request a reverse proxy forwarded. A source on the same version as the chart
-// is what the fixture runs, so the file migrate reads is a 2.19 file.
+// Tautulli 2.19's two switches are the other half of "its own login is off": at
+// the install defaults they mint a password for a wizard that never finished and
+// refuse every request a reverse proxy forwarded.
 func TestSwitchesTheTwoSwitches219AddedToKeepTheLoginOff(t *testing.T) {
 	got := rewritten(t, "[General]\nhttp_port = 8181\nfirst_run_complete = 0\n"+
 		"http_password = \"\"\n\n[PMS]\npms_ip = localhost\npms_port = 32400\n\n"+
