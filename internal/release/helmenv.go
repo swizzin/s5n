@@ -6,13 +6,10 @@ import (
 	"path/filepath"
 )
 
-// helmEnv is a private Helm home for one chart pull. box runs as root, and the
-// operator's Helm state -- config, cache, HELM_* and DOCKER_CONFIG -- must not
-// affect what box installs: Helm's registry client reads a credentials file at
-// construction and defaults it to the operator's registry/config.json. The
-// path here is inside a 0700 temp dir removed after the pull, and the client's
-// authorizer carries no credential (OCIChart.client), so no credentials store
-// is read or sent. A private registry is out of scope (docs/box.md).
+// helmEnv is a private Helm home for one pull: the operator's Helm state must
+// not affect what box installs, and the registry client reads a credentials file
+// at construction. The 0700 temp dir is removed after the pull, and the
+// authorizer carries no credential, so no store is read or sent.
 type helmEnv struct {
 	dir string
 	// registryConfig is an empty private path; box never logs in.

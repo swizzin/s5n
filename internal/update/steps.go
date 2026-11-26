@@ -158,17 +158,12 @@ type ImageChange struct {
 	Snapshot bool
 }
 
-// movingApps is the enabled apps whose image moves between two releases, the
-// ones a values pin or a hold keeps in place, and each move's image pair. A
-// database migrates when its image changes, so moving is exactly what a step
-// snapshots.
+// movingApps is the enabled apps whose image moves, the ones a pin or hold keeps
+// in place, and each move's image pair -- exactly what a step snapshots.
 //
-// The compared image is the selected variant's: repository and digest, by tag
-// when neither release pins a digest (a locally built image). An app in only one
-// release has nothing to migrate; a chart with no variants.yaml moves nothing.
-//
-// A values pin holds an app at one image on both sides, so it is neither
-// stopped nor copied. A pin cannot hold an app whose repository changes.
+// Images compare by repository and digest, by tag when neither release pins one.
+// An app in only one release has nothing to migrate. A pin holds an app on one
+// image; it cannot hold one whose repository changes.
 func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.Hold) (moving, held, heldBack []string, images map[string]ImageChange, err error) {
 	if len(from.Variants) == 0 || len(to.Variants) == 0 {
 		return nil, nil, nil, nil, nil

@@ -160,15 +160,12 @@ func (s *ApplySnapshots) cleanupWait() time.Duration { return orDuration(s.Clean
 
 func (s *ApplySnapshots) poll() time.Duration { return orDuration(s.Poll, 2*time.Second) }
 
-// decideMove says whether one app's image changes and, when the catalog names
-// state to copy, the bytes it ran. Whether it moves is the reference its
-// StatefulSets ask for, never a pod digest: an untouched tag-only pin renders
-// the tag already running, and comparing digests would make every later apply
-// stop the app again. The digest is read only once a move is being copied.
+// decideMove says whether an app's image changes and, when state is copyable,
+// the bytes it ran. A move is the StatefulSet's reference, never a pod digest:
+// comparing digests would stop an untouched tag-only pin on every apply.
 //
-// When those bytes cannot be named -- no pod reports one, instances disagree --
-// the app moves uncopied: a refusal would lock the box out of the apply that
-// pins the digest, so the plan says why and the operator's no is the safeguard.
+// Unnameable bytes leave the app uncopied -- a refusal would lock the box out of
+// the apply that pins the digest -- so the plan says why and the operator decides.
 func decideMove(app string, run Running, movedTo snapshot.ImageRef, copyable bool) (release.SnapshotMove, bool) {
 	instances := sortedInstances(run.Images)
 	if len(instances) == 0 {

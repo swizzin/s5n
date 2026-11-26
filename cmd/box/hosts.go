@@ -157,20 +157,9 @@ func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFun
 	}
 }
 
-// Pending reports whether the login's page differs from the cluster's, and
-// Reconcile writes it when it does. They are the release.Login half of this
-// step, and they are separate from Missing and Ensure because none of it is per
-// host: a theme is a new face for one page, not a name that needs a listener, a
-// Certificate and a DNS record.
-//
-// Both are root's. The login serves every seedbox on the host, so it is written
-// once for the host and its theme is root's `theme:`, not a user's: an identity
-// that cannot apply a ConfigMap in the platform's namespace gets no step at all
-// rather than a refusal in the middle of its own apply. That is also why a
-// `theme:` in a user's values file does nothing to the login -- it is the
-// palette that user's own box draws its dialogs in, which box reads from the
-// file it was started with (cmd/box/settings.go), and the chart renders nothing
-// from it.
+// Pending reports whether the login page differs; Reconcile writes it. Both are
+// root's: the login serves every seedbox, and a user's `theme:` is their own
+// box's palette, never this page (cmd/box/settings.go).
 func (a applyHosts) Pending(ctx context.Context, plan release.HostPlan) (bool, error) {
 	d, ok, err := a.loginStep(ctx, plan)
 	if err != nil || !ok {

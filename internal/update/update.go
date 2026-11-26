@@ -1,16 +1,12 @@
 // Package update is `box update`: it moves a seedbox to a newer chart release.
-// The installed release is what Helm has deployed, never what box remembers.
-// The releases' upgrade-from floors decide the steps, each with its own apply,
-// wiring gate and health gate. The values file is never rewritten; a step that
-// moves an image snapshots that app with it scaled to zero first, which is what
-// makes a rollback over a forward-only database real.
+// Helm's deployed release is the truth, and upgrade-from floors decide the steps,
+// each with its own apply, wiring gate and health gate. The values file is never
+// rewritten; a moving image is snapshotted with its app stopped, so a rollback
+// over a forward-only database is real.
 //
-// box puts one thing back on its own: a moved app that keeps exiting is
-// restored from this step's copy and held on the image it ran until a release
-// pins another. The rest of the release stays. An app the catalog gives nothing
-// to copy is never put back, so that step stops instead. An app that is running
-// but not yet listening is waited for, because an Arr opens its port only after
-// its migration.
+// box puts one thing back: a moved app that keeps exiting is restored from this
+// step's copy and held on its old image. An app with nothing to copy stops
+// instead, and an app that is running but not listening is waited for.
 package update
 
 import (

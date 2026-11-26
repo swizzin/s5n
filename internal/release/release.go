@@ -1,10 +1,7 @@
 // Package release is `box apply`: it turns one seedbox's two files into the
-// release that runs it. Every refusal happens before the first cluster write:
-// load, merge, check the schema, read what is deployed, show the diff, ask,
-// then create the namespace, write storage, install, and read the receipt. A
-// volume this run wrote is removed if the run never reaches the release. The
-// Helm SDK is the client (PLAN.md), so `helm` can read and roll back what box
-// installs.
+// release that runs it. Every refusal happens before the first write; a volume
+// this run wrote is removed if the run never reaches the release. The Helm SDK
+// is the client (PLAN.md), so `helm` can read and roll back what box installs.
 package release
 
 import (
@@ -187,13 +184,9 @@ type Anchor interface {
 	Ensure(ctx context.Context, plan AnchorPlan) error
 }
 
-// Snapshotter copies an app's config before this apply moves its image
-// (docs/box.md, "Snapshot and rollback"); a values pin migrates like a release
-// bump, and without a copy `box rollback` has nothing to put back.
-//
-// Pending is the read with the diff, so a copy that cannot be taken refuses
-// before the question. Take runs after the confirm, immediately before the
-// release, so nothing else can fail while apps are down. Prune's failure is a
+// Snapshotter copies an app's config before this apply moves its image; without
+// a copy `box rollback` has nothing to put back. Pending refuses before the
+// question; Take runs immediately before the release; Prune's failure is a
 // warning, not a failed apply.
 type Snapshotter interface {
 	Pending(ctx context.Context, plan SnapshotPlan) (SnapshotWork, error)
@@ -1149,12 +1142,10 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 const undoTimeout = time.Minute
 
 // undo removes the volumes this run created when a failure stops it before the
-// release. A retained PV nobody owns makes the next apply refuse; what was
-// already there, and the claims and namespace, stay.
+// release; what was already there, and the claims and namespace, stay.
 //
-// It detaches from cancellation: a Ctrl-C is exactly when the volume must come
-// off, and a Delete on the cancelled context would strand it. Its own deadline
-// keeps a silent API server from holding the failed run open.
+// It detaches from cancellation -- a Ctrl-C is when the volume must come off --
+// and carries its own deadline so a silent API server cannot hold the run open.
 func (a *Applier) undo(ctx context.Context, store StorageClient, created []StorageObject, cause error) error {
 	if len(created) == 0 {
 		return cause

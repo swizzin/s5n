@@ -450,9 +450,6 @@ func TestReadinessAcceptsAnAppScaledToZero(t *testing.T) {
 	}
 }
 
-// TestRunningReadsEachInstanceImageAndPodDigest pins the other reading beside it:
-// Readiness and Running answer different questions and neither may take the
-// other's shape.
 func TestReadinessIsEmptyOnAReleaseWithNoWorkloads(t *testing.T) {
 	got, err := NewWorkloadsFor("testbox", "s5n", k8sfake.NewClientset()).Readiness(context.Background())
 	if err != nil {
@@ -501,9 +498,6 @@ func TestRunningReadsEachInstanceImageAndPodDigest(t *testing.T) {
 	}
 }
 
-// TestParseImageSplitsARegistryReference covers every shape a chart's variants
-// and a kubelet's imageID put in front of box: the registry's port is a colon
-// before the tag's, so the tag is the colon after the last slash.
 func TestParseImageSplitsARegistryReference(t *testing.T) {
 	cases := []struct {
 		ref  string
@@ -524,8 +518,6 @@ func TestParseImageSplitsARegistryReference(t *testing.T) {
 	}
 }
 
-// TestPodDigestAcceptsARuntimeScheme: an older runtime prefixes the imageID with
-// docker-pullable://; the digest is still the part after the @.
 func TestPodDigestAcceptsARuntimeScheme(t *testing.T) {
 	pod := runningPod("sonarr-0", "sonarr", "sonarr", digestC)
 	pod.Status.ContainerStatuses[0].ImageID = "docker-pullable://registry.example.com/seedbox/sonarr@" + digestC

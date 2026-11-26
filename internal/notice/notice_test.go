@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// Both fields a receiver might read carry the same sentence.
 func TestSentences(t *testing.T) {
 	o := Options{Box: "box.example.com", Seedbox: "seedbox"}
 	for _, c := range []struct {
@@ -128,7 +127,6 @@ func TestPostReportsAStatusWithoutThePath(t *testing.T) {
 	}
 }
 
-// A refused connection is net/http's *url.Error, whose message is the whole URL.
 func TestPostNeverPrintsTheAddressWhenTheTransportFails(t *testing.T) {
 	secret := "/services/T00/B00/s3cret?token=abc123"
 	client := &http.Client{Timeout: 2 * time.Second}

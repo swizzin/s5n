@@ -492,9 +492,6 @@ func TestAlreadyCurrentWritesOnlyTheCheckTime(t *testing.T) {
 	}
 }
 
-// TestUpdateAsksTheRepositoryFromTheInstalledReleaseUp: an update only steps
-// forward, so the listing it plans with starts at the release Helm reports as
-// deployed. Everything below it is history box never reads.
 func TestUpdateAsksTheRepositoryFromTheInstalledReleaseUp(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -508,10 +505,6 @@ func TestUpdateAsksTheRepositoryFromTheInstalledReleaseUp(t *testing.T) {
 	}
 }
 
-// TestABoxAheadOfEveryPublishedReleaseIsCurrent: an empty listing is not an
-// error. A box on a release newer than anything published -- a hand-installed
-// prerelease, or the newest release with everything older behind the floor --
-// has nothing to do, and says so.
 func TestABoxAheadOfEveryPublishedReleaseIsCurrent(t *testing.T) {
 	h := newHarness(t)
 	h.rel.state.ChartVersion = "0.5.0-rc.1"
@@ -539,9 +532,6 @@ func TestABoxAheadOfEveryPublishedReleaseIsCurrent(t *testing.T) {
 	}
 }
 
-// TestAPlanThatFailsBeforeChoosingATargetRecordsNothing: the record names a
-// release box tried and failed on. A listing that could not be read is not a
-// release, so nothing is recorded for the next run and the timer to pass over.
 func TestAPlanThatFailsBeforeChoosingATargetRecordsNothing(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -626,10 +616,6 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 	}
 }
 
-// TestAnAppWithNoSnapshotIsMovedWithoutACopy: the release's catalog says sonarr
-// has nothing an upgrade can rewrite, so the step leaves it running, copies only
-// radarr, and the plan says so after sonarr's name. A copy box never took is a
-// copy box will never restore, so the operator reads it before the step moves.
 func TestAnAppWithNoSnapshotIsMovedWithoutACopy(t *testing.T) {
 	h := newHarness(t)
 	catalog, err := os.ReadFile("testdata/catalog-nosnapshot.yaml")
@@ -682,9 +668,6 @@ func TestAStepThatMovesNoImageTakesNoSnapshot(t *testing.T) {
 	}
 }
 
-// TestAHeldAppIsNamedInThePlan: an app the operator pinned runs the same image
-// on both sides of the step, so nothing of it moves and the plan says why
-// instead of leaving it out.
 func TestAHeldAppIsNamedInThePlan(t *testing.T) {
 	h := newHarness(t)
 	h.values = "testdata/pinned-values.yaml"
@@ -721,9 +704,6 @@ func TestAHeldAppIsNamedInThePlan(t *testing.T) {
 	}
 }
 
-// TestARollbackHoldIsNamedInThePlan: an app a rollback holds runs the image the
-// snapshot recorded, not the one the release pins, so nothing of it moves and
-// the plan says why -- and until which release that stays true.
 func TestARollbackHoldIsNamedInThePlan(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -761,9 +741,6 @@ func TestARollbackHoldIsNamedInThePlan(t *testing.T) {
 	}
 }
 
-// TestALapsingHoldMovesTheApp: the release pins an image other than the one the
-// rollback avoided, so the hold is over and the app moves -- and is copied --
-// like any other app the step moves.
 func TestALapsingHoldMovesTheApp(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -827,10 +804,6 @@ func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	}
 }
 
-// TestAWiringGateFailureStopsTheUpdate: the release moved, the gate passed, and
-// the wiring the closing apply runs says it did not work. Box leaves the release
-// where the step put it, leaves the apps as the new release left them, keeps the
-// snapshot and records the failed release.
 func TestAWiringGateFailureStopsTheUpdate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -882,9 +855,6 @@ func TestAWiringGateFailureStopsTheUpdate(t *testing.T) {
 	}
 }
 
-// TestAHealthGateFailureStopsTheUpdate: the release deployed but never became
-// healthy. Same answer as the wiring gate -- the new release stays, nothing is
-// scaled, the snapshot is kept -- because a migration may be about to finish.
 func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -921,10 +891,6 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	}
 }
 
-// TestACrashloopRollsTheAppBackAndTheUpdateContinues: the step moves two apps,
-// one of them keeps exiting. Box puts only that app back -- stop, wait, restore
-// its copy, hold it, re-apply the same release -- and the step then counts as
-// passed, so the run goes on to the next release.
 func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
 	h := newHarness(t)
 	h.grant = "testdata/grant-radarr.yaml"
@@ -1009,8 +975,6 @@ func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
 	}
 }
 
-// TestARolledBackStepRecordsTheAppsItPutBack: the step counts as passed and its
-// record says which app was put back, so status and a later run can see it.
 func TestARolledBackStepRecordsTheAppsItPutBack(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1042,12 +1006,6 @@ func TestARolledBackStepRecordsTheAppsItPutBack(t *testing.T) {
 	}
 }
 
-// TestAStepRunsTheWiringOnceAfterTheGate: a step with nothing to roll back still
-// has the chart's wiring to run, and it runs in one apply after the gate. The
-// apply that moves the release runs with the hooks off, because the wiring Job
-// waits for every app to answer and cannot pass while a moved app is still
-// starting; the gate reads the apps; and the same release is applied once more
-// with the hooks on, so the wiring runs against the images that stay.
 func TestAStepRunsTheWiringOnceAfterTheGate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1068,10 +1026,6 @@ func TestAStepRunsTheWiringOnceAfterTheGate(t *testing.T) {
 	}
 }
 
-// TestACrashloopingAppIsRestoredBeforeTheHooksRun: the step's one hooks-on apply
-// comes after the restore, never before it. A wiring Job that runs while the app
-// box is putting back is down would wait out its budget and fail, which is the
-// whole reason the apply that moves the release runs without the hooks.
 func TestACrashloopingAppIsRestoredBeforeTheHooksRun(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1108,9 +1062,6 @@ func TestACrashloopingAppIsRestoredBeforeTheHooksRun(t *testing.T) {
 	}
 }
 
-// TestAnExitingAppWithoutASnapshotStopsTheUpdate: box has nothing to restore, so
-// it does not scale the app or write a hold -- it stops, names the app and its
-// exits, and records the release as failed.
 func TestAnExitingAppWithoutASnapshotStopsTheUpdate(t *testing.T) {
 	h := newHarness(t)
 	catalog, err := os.ReadFile("testdata/catalog-nosnapshot.yaml")
@@ -1145,10 +1096,6 @@ func TestAnExitingAppWithoutASnapshotStopsTheUpdate(t *testing.T) {
 	}
 }
 
-// TestTheGateReadsTheAppsBeforeHelmsStatus: an image that never starts makes
-// Helm's own wait give up, so the release reads failed while the app is
-// crashlooping. The gate has to see the exiting app whatever Helm says, or it
-// would wait out the budget and record a timeout instead of rolling back.
 func TestTheGateReadsTheAppsBeforeHelmsStatus(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1176,10 +1123,6 @@ func TestTheGateReadsTheAppsBeforeHelmsStatus(t *testing.T) {
 	}
 }
 
-// TestARestoreThatFailsLeavesTheAppStopped: the copy is the one thing box must
-// not get wrong, so a restore that refuses stops the step with the app still
-// scaled to zero and says both things the operator needs: that it is stopped and
-// where its copy is.
 func TestARestoreThatFailsLeavesTheAppStopped(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1212,9 +1155,6 @@ func TestARestoreThatFailsLeavesTheAppStopped(t *testing.T) {
 	}
 }
 
-// TestASecondGateThatFailsRecordsTheRollbackGate: the app was restored and held,
-// but it keeps exiting on the image it was put back on. The step stops with the
-// rollback gate, keeps the copy and points the operator at it.
 func TestASecondGateThatFailsRecordsTheRollbackGate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1248,10 +1188,6 @@ func TestASecondGateThatFailsRecordsTheRollbackGate(t *testing.T) {
 	}
 }
 
-// TestAFailedApplyAtOneRestartRollsBackWhenItReachesThree: Helm's own wait gives
-// up on the first CrashLoopBackOff, so the step's apply is where a never-starting
-// image fails. A moved app that has restarted puts the step into the health
-// gate's watch, which finds the crashloop and rolls the app back.
 func TestAFailedApplyAtOneRestartRollsBackWhenItReachesThree(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1283,10 +1219,6 @@ func TestAFailedApplyAtOneRestartRollsBackWhenItReachesThree(t *testing.T) {
 	}
 }
 
-// TestAFailedApplyThatRecoversReappliesOnce: the moved app restarted once and
-// then came up, so the image was slow rather than broken. Helm's revision never
-// reached deployed, so box applies the same release once more and the normal gate
-// decides.
 func TestAFailedApplyThatRecoversReappliesOnce(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1317,9 +1249,6 @@ func TestAFailedApplyThatRecoversReappliesOnce(t *testing.T) {
 	}
 }
 
-// TestAFailedApplyWithNoMovedAppRestartingStopsAtTheApplyGate: an apply can fail
-// for reasons that are not the image, and box must not spend the health budget
-// on one. With no moved app restarting, the apply's failure is the answer.
 func TestAFailedApplyWithNoMovedAppRestartingStopsAtTheApplyGate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1339,8 +1268,6 @@ func TestAFailedApplyWithNoMovedAppRestartingStopsAtTheApplyGate(t *testing.T) {
 	}
 }
 
-// TestTheExitingCauseNamesEveryApp: the gate reports every moved app that is
-// exiting, one clause each, so a record naming one app does not hide a second.
 func TestTheExitingCauseNamesEveryApp(t *testing.T) {
 	got := exitingText([]Exiting{{App: "radarr", Restarts: 5}, {App: "sonarr", Restarts: 3}})
 	want := "radarr exited 5 times on its new image; sonarr exited 3 times on its new image"
@@ -1349,10 +1276,6 @@ func TestTheExitingCauseNamesEveryApp(t *testing.T) {
 	}
 }
 
-// TestAnApplyThatRefusedStartsTheAppsAgain: Helm never reported the upgrade
-// done, so the old release is what runs -- with the apps this run stopped
-// still down unless box starts them. The release is still recorded as failed
-// on this box.
 func TestAnApplyThatRefusedStartsTheAppsAgain(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1386,9 +1309,6 @@ func TestAnApplyThatRefusedStartsTheAppsAgain(t *testing.T) {
 	}
 }
 
-// TestAnApplyThatRefusedNamesARestartThatFailed: the restart is part of the
-// error, not a second thing box shrugs at. The app is left down and the
-// operator is told.
 func TestAnApplyThatRefusedNamesARestartThatFailed(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1408,9 +1328,6 @@ func TestAnApplyThatRefusedNamesARestartThatFailed(t *testing.T) {
 	}
 }
 
-// TestAFailedStopStartsTheAppsAgainAndRecordsNothing: the release was never
-// tried, so this is not a failed release -- only a stopped app that box starts
-// again.
 func TestAFailedStopStartsTheAppsAgainAndRecordsNothing(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1432,9 +1349,6 @@ func TestAFailedStopStartsTheAppsAgainAndRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestPodsThatNeverGoStartTheAppsAgain: the settle wait can time out with the
-// apps still stopping. Nothing has been applied, so nothing is a failed
-// release, and box puts back the replicas it took down.
 func TestPodsThatNeverGoStartTheAppsAgain(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1456,9 +1370,6 @@ func TestPodsThatNeverGoStartTheAppsAgain(t *testing.T) {
 	}
 }
 
-// TestASnapshotterThatCannotCopyStopsBeforeAnythingStops: box asks whether the
-// copy can be taken first, so a refusal leaves every app running and records
-// nothing -- the box refused, not the release.
 func TestASnapshotterThatCannotCopyStopsBeforeAnythingStops(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1483,9 +1394,6 @@ func TestASnapshotterThatCannotCopyStopsBeforeAnythingStops(t *testing.T) {
 	}
 }
 
-// TestAFailedSnapshotStartsTheAppsAgain: the copy failed, which is box's
-// refusal rather than a release that did not work. The apps go back up and
-// nothing is recorded as failed.
 func TestAFailedSnapshotStartsTheAppsAgain(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1507,9 +1415,6 @@ func TestAFailedSnapshotStartsTheAppsAgain(t *testing.T) {
 	}
 }
 
-// TestAFailedGateThatCannotReadTheStateSaysSo: the sentence is Helm's answer
-// read now. When Helm cannot answer, box says that instead of naming a
-// release it would be guessing at.
 func TestAFailedGateThatCannotReadTheStateSaysSo(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1664,9 +1569,6 @@ func TestNoDeployedReleasePointsAtInit(t *testing.T) {
 	}
 }
 
-// TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything: an image bump
-// over a migrated database cannot be put back without the copy, so box says so
-// before it asks, stops an app or writes anything.
 func TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1682,10 +1584,6 @@ func TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything(t *testing.T) {
 	}
 }
 
-// TestAPinnedPrereleaseIsTheTarget: prereleases are not releases box takes
-// unasked, so the listing leaves them out; naming one with --chart-version is
-// the escape hatch, and the plan has to carry its floors even though it is not
-// on the published list.
 func TestAPinnedPrereleaseIsTheTarget(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1729,9 +1627,6 @@ type notices struct{ got []Notice }
 
 func (n *notices) add(ctx context.Context, notice Notice) { n.got = append(n.got, notice) }
 
-// TestAPassingStepNotifiesWhatMoved: the notice a step posts names the releases
-// and every app it moved, with the images on either side -- but not an app it
-// put back, because that app did not stay on the new image.
 func TestAPassingStepNotifiesWhatMoved(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1754,8 +1649,6 @@ func TestAPassingStepNotifiesWhatMoved(t *testing.T) {
 	}
 }
 
-// TestARolledBackAppIsNotifiedBeforeTheStep: the app box put back is its own
-// event, said first, and the step that passed does not claim it moved.
 func TestARolledBackAppIsNotifiedBeforeTheStep(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1783,9 +1676,6 @@ func TestARolledBackAppIsNotifiedBeforeTheStep(t *testing.T) {
 	}
 }
 
-// TestAFailedStepNotifiesTheGateAndTheRelease: someone who is not watching needs
-// to know where the box was left, so a stopped notice carries the gate, the
-// reason, and what Helm says is deployed now.
 func TestAFailedStepNotifiesTheGateAndTheRelease(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -1812,8 +1702,6 @@ func TestAFailedStepNotifiesTheGateAndTheRelease(t *testing.T) {
 	}
 }
 
-// TestACheckNotifiesNothing: asking what would happen is not something that
-// happened, so nobody is told about it.
 func TestACheckNotifiesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)

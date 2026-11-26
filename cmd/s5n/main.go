@@ -152,13 +152,9 @@ func runQbtConfig(args []string) error {
 	return nil
 }
 
-// runTautulliConfig is Tautulli's init container: it seals config.ini before the
-// app's first start, mirroring runQbtConfig. Tautulli generates its own API key
-// only when config.ini has none, so seeding a known one is what lets the wiring
-// Job authenticate to an app it has no other way to read credentials back from
-// (no mount into Tautulli's own /config). The URL root and the app's own login
-// are re-sealed on every start: box serves Tautulli under a prefix, and the
-// person signs in at the edge (internal/ttlconf).
+// runTautulliConfig seals config.ini before the first start: seeding the API key
+// is how the wiring Job authenticates, since it cannot read one back. The URL
+// root and login are re-sealed every start (internal/ttlconf).
 func runTautulliConfig(args []string) error {
 	fs := flag.NewFlagSet("tautulli-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/config.ini", "path to Tautulli's config.ini")
@@ -194,13 +190,9 @@ func runTautulliConfig(args []string) error {
 	return nil
 }
 
-// runJellyfinConfig is Jellyfin's init container. Jellyfin reads the interfaces
-// it binds and the peers whose forwarded address it honours once, at startup
-// (internal/jellyconf says why and cites it), so both are in its own network.xml
-// before the app reads it; the wiring Job can only report what the running app
-// holds. The bind list is always written empty -- every interface -- because that
-// is what keeps the app reachable from outside its pod, and the container runs on
-// every start so a value another writer left cannot survive it.
+// runJellyfinConfig writes network.xml before Jellyfin reads its bind list and
+// trusted proxies once (internal/jellyconf). The bind list is always empty (every
+// interface), so an app outside its pod stays reachable.
 func runJellyfinConfig(args []string) error {
 	fs := flag.NewFlagSet("jellyfin-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/config/network.xml", "path to Jellyfin's config/network.xml")
@@ -253,14 +245,9 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-// runBazarrConfig is Bazarr's init container: it seals the API key the wiring
-// Job uses and the URL prefix the chart serves the app under into
-// config/config.yaml before the app reads it. Neither can be set through the
-// API -- the prefix is read when the app registers its routes, and the key is
-// what a request would have to present -- so this runs before every start, the
-// same way Tautulli's does. Bazarr rewrites the file whole from memory when it
-// saves settings; the two keys it was given here are in that memory, so they
-// survive, and a start that finds them already right writes nothing.
+// runBazarrConfig seals the API key and URL prefix into config.yaml before Bazarr
+// reads them; neither can be set through the API. Bazarr rewrites the file from
+// memory, which holds these keys, so they survive.
 func runBazarrConfig(args []string) error {
 	fs := flag.NewFlagSet("bazarr-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/config/config.yaml", "path to Bazarr's config/config.yaml")
@@ -299,13 +286,9 @@ func runBazarrConfig(args []string) error {
 	return nil
 }
 
-// runSabnzbdConfig is SABnzbd's init container: it seals the URL prefix, the
-// two download paths, the API key and the X-Forwarded-For switch into
-// sabnzbd.ini before the app reads it. None of them can wait for the API: the
-// prefix is what mounts the API, the paths are what the first job uses, and the
-// XFF switch is what decides whether a request through the Gateway is answered
-// at all. It runs after the image's own defaults container has put a file
-// there, and writes nothing when the file already says what the chart wants.
+// runSabnzbdConfig seals the URL prefix, download paths, API key and XFF switch
+// into sabnzbd.ini before the app reads them: the prefix mounts the API, and the
+// XFF switch decides whether a Gateway request is answered at all.
 func runSabnzbdConfig(args []string) error {
 	fs := flag.NewFlagSet("sabnzbd-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/sabnzbd.ini", "path to SABnzbd's sabnzbd.ini")

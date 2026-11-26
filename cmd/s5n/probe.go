@@ -1,30 +1,11 @@
-// probe.go is `s5n probe`: the one thing box runs inside a seedbox namespace
-// to find out whether the cluster enforces the release's NetworkPolicy.
+// probe.go is `s5n probe`: the one thing box runs inside a seedbox namespace to
+// find out whether the CNI enforces the release's NetworkPolicy. The probe is the
+// s5n image itself, so no new image is pulled.
 //
-// It exists because a NetworkPolicy is an instruction to the CNI, not something
-// the API server enforces: a cluster whose CNI ignores egress rules would run a
-// rehearsal as the live box, and box has to be able to tell before any app
-// starts. The probe pod is the s5n image itself, so it is an image the release
-// already runs and the chart's blessed-image policy already admits; nothing new
-// is pulled for a rehearsal.
-//
-// The exit code is the answer, and it is the only thing box reads:
-//
-//	0  the connection behaved as --want asked
-//	3  it behaved the other way
-//	4  the probe could not run at all (bad address, no such host, usage)
-//
-// --settle is for the moment a pod starts. A CNI programs a new pod's policy
-// shortly after the pod exists (kind's kindnet takes about half a second), so a
-// single dial at start-up can open where every later one is denied. With
-// --settle the probe dials until the answer --want names holds settleRun times
-// in a row, and answers the other way only when the deadline passes first. The
-// rehearsal's per-pod gate is this: an init container that holds the app back
-// until its own pod's egress is closed.
-//
-// Splitting "the wrong answer" from "no answer" is what lets box refuse a
-// rehearsal for the right reason: a control pod that cannot run means the proof
-// never happened, which is not the same as a lock that does not hold.
+// Exit codes are the answer: 0 as --want asked, 3 the other way, 4 could not run.
+// --settle holds the wanted answer several times in a row, because a CNI
+// programs a new pod's policy shortly after it starts. A probe that cannot run is
+// a failed proof, not a lock that does not hold.
 package main
 
 import (

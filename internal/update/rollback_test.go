@@ -327,8 +327,6 @@ func TestRollbackPinReplacesAHandPin(t *testing.T) {
 	}
 }
 
-// Every refusal is byte-exact and happens before the first scale: an app
-// stopped for a rollback that refuses is a seedbox down for nothing.
 func TestRollbackRefusesBeforeAnythingStops(t *testing.T) {
 	newerStep := "0.5.0-0.6.0-20260101T030405Z"
 	cases := []struct {
