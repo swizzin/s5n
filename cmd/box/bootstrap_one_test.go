@@ -68,9 +68,6 @@ func (h *oneHarness) answers() setup.Answers {
 	return setup.Answers{Login: "alice", Apps: []string{"qbittorrent"}, Namespace: "s5n-alice"}
 }
 
-// TestOneQuestionInstallsThePlatformAfterTheAnswer: the question comes first, once,
-// and the layer is installed after it. That order is the whole flow: a person who
-// said no to the platform must not have one.
 func TestOneQuestionInstallsThePlatformAfterTheAnswer(t *testing.T) {
 	h := newOneHarness(true)
 	if err := h.flow().beforeWrite(context.Background(), h.answers()); err != nil {
@@ -96,8 +93,6 @@ func TestOneQuestionInstallsThePlatformAfterTheAnswer(t *testing.T) {
 	}
 }
 
-// TestOneQuestionLeavesTheHostAloneWhenTheAnswerIsNo: nothing of the platform is
-// written, and the run says so in the words a refused question uses.
 func TestOneQuestionLeavesTheHostAloneWhenTheAnswerIsNo(t *testing.T) {
 	h := newOneHarness(false)
 	err := h.flow().beforeWrite(context.Background(), h.answers())
@@ -112,8 +107,6 @@ func TestOneQuestionLeavesTheHostAloneWhenTheAnswerIsNo(t *testing.T) {
 	}
 }
 
-// TestOneQuestionInstallsNothingWhenTheQuestionCannotBeAsked: a terminal that went
-// away (Ctrl-D) is a cancellation, not an answer, and it installs nothing either.
 func TestOneQuestionInstallsNothingWhenTheQuestionCannotBeAsked(t *testing.T) {
 	h := newOneHarness(true)
 	h.ask.err = setup.ErrCancelled
@@ -126,10 +119,6 @@ func TestOneQuestionInstallsNothingWhenTheQuestionCannotBeAsked(t *testing.T) {
 	}
 }
 
-// TestOneQuestionStopsOnThePlatformItCouldNotInstall: the answer was yes and the
-// platform half failed. The failure is the run's, and the seedbox half never
-// starts -- a half-installed platform is what the next run finds and finishes,
-// which is why this refunds nothing.
 func TestOneQuestionStopsOnThePlatformItCouldNotInstall(t *testing.T) {
 	h := newOneHarness(true)
 	failed := errors.New("cert-manager's webhook refused the ClusterIssuer")
@@ -143,9 +132,6 @@ func TestOneQuestionStopsOnThePlatformItCouldNotInstall(t *testing.T) {
 	}
 }
 
-// TestGuidedFreshIsAFreshPlatformAndATerminal: --yes and a pipe ask nothing (they
-// are unattended, and their answers are the flags), and a box that has a platform
-// keeps asking per half. Only a person on a host with none is asked once.
 func TestGuidedFreshIsAFreshPlatformAndATerminal(t *testing.T) {
 	fresh := []bootstrap.ComponentResult{
 		{Component: bootstrap.ComponentGatewayAPI, Action: "install"},

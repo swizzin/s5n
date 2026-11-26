@@ -18,10 +18,8 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// updateFlags are `box update`'s flags: apply's, because an update ends in
-// applies, plus the few of their own and the record. They are a value rather
-// than locals in runUpdate so the mapping from flags to options is testable
-// without a cluster, the way apply's is.
+// updateFlags are apply's flags plus update's own; a value so the mapping is
+// testable without a cluster.
 type updateFlags struct {
 	*applyFlags
 	check       *bool
@@ -38,66 +36,46 @@ func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
 		check:      fs.Bool("check", false, "show what the box would update to, and write nothing"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 		timer:      fs.Bool("timer", false, "the run the update timer makes: check when root's config says one is due, and post notices"),
-		// The record is bootstrap's -- the cluster decision update reads and
-		// writes its own state beside -- so it is named the same way and
-		// defaults to the same path. apply and rollback take no such flag:
-		// neither writes state, and both get their kubeconfig from a flag or
-		// the environment.
+		// The record is bootstrap's; update writes its state beside it. apply and
+		// rollback write no state and take no such flag.
 		record:      fs.String("record", bootstrap.RecordPath, "where box recorded the cluster decision; update keeps its own record beside it"),
 		holdBox:     fs.Bool("hold-box", false, "take no new box even when a newer one is out: the chart update runs on this one"),
 		rollbackBox: fs.Bool("rollback-box", false, "put back the box an update replaced, and do no chart work (root only)"),
 	}
-	// --chart-version comes from apply's flag set, where it now means "the
-	// release that is installed". An update's names the release to move to,
-	// so its help is put back to the install wording.
+	// apply's --chart-version means "installed"; update's means "move to".
 	if f := fs.Lookup("chart-version"); f != nil {
 		f.Usage = chartVersionInstalls
 	}
 	return o
 }
 
-// statePath is this run's own record: update.json beside the cluster record,
-// which is the rule update.FilePath states and the reason --record exists. A
-// box whose record is not at bootstrap's default path would otherwise fail the
-// whole update on its own bookkeeping, after the plan and before any step.
+// statePath is update.json beside the cluster record, which is why --record
+// exists: a non-default record must not fail the update on its own bookkeeping.
 func (o *updateFlags) statePath() string { return update.FilePath(*o.record) }
 
-// options is what this invocation hands the Updater: every step runs apply
-// with these, with the step's chart version in place of the pin.
+// options is what the Updater runs every step's apply with.
 func (o *updateFlags) options() update.Options {
 	return update.Options{Apply: o.applyFlags.options(), Check: *o.check}
 }
 
-// stepOptions is what each step's apply runs with: apply's options plus the
-// three values box derives from the cluster -- the claim names, the per-host
-// TLS, and the holds a rollback wrote. The Updater puts each step's release in
-// place of the pin and keeps the rest.
+// stepOptions adds the cluster-derived values: claims, per-host TLS and holds.
 func (o *updateFlags) stepOptions(kc string, out say.Reporter, resolver setup.Resolver, holds *boxHolds) release.Options {
 	opts := o.applyFlags.options()
 	opts.BoxValues = boxValues(kc)
-	// Root's per-host TLS is apply's, so a release whose new image serves an app
-	// at a host of its own gets that host's listener before the pods move.
+	// Per-host TLS writes a listener before the pods move.
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
-	// An app a rollback holds stays on the image it ran: the holds file is
-	// overlaid by the same apply `box apply` runs, so a step does not undo a
-	// rollback.
+	// Apply the same holds `box apply` does, so a step does not undo a rollback.
 	opts.Holds = holds.values
 	return opts
 }
 
-// runOptions is what `box update` hands the Updater: the options its steps run
-// with, and the plan's own --check. Handing it options() instead would drop the
-// claim names, the host work and the hold, and a step would install a release
-// this box is not: the chart's default claims, a host with no listener, and the
-// image the rollback avoided.
+// runOptions keeps stepOptions: plain options would install default claims, no
+// listener, and the image a rollback avoided.
 func (o *updateFlags) runOptions(step release.Options) update.Options {
 	return update.Options{Apply: step, Check: *o.check}
 }
 
-// selfUpdateOptions is what box's own replacement needs from this command: the
-// version it is running, the release page (empty means the published one; a
-// development e2e serves its own), the package that owns the binary if one does,
-// and the hold.
+// selfUpdateOptions is the version, release page, package and hold.
 func (o *updateFlags) selfUpdateOptions(baseURL string) selfupdate.Options {
 	return selfupdate.Options{
 		Version:  version,
@@ -107,18 +85,10 @@ func (o *updateFlags) selfUpdateOptions(baseURL string) selfupdate.Options {
 	}
 }
 
-// updateHelm opens one release handle for an update. Its wait gets the health
-// gate's budget, and it waits only for the release's hooks: the step's health
-// gate is box's, and it is the one that can tell a moved app that keeps exiting
-// from one that is still starting.
-//
-// Helm's own resource wait cannot make that call. Helm v4's status watcher reads
-// a crashlooping pod as failed and drops failed resources from the wait, so the
-// release's StatefulSet keeps the wait going for the whole budget: a step whose
-// new image exits after three seconds would sit for thirty-five minutes before
-// the gate it is meant to roll back could look. The wiring Job is still waited
-// for, which is the gate's other half, and `box apply` keeps Helm's own wait
-// because nothing else gates it.
+// updateHelm gives the handle the health gate's budget and hooks-only waiting:
+// Helm v4's status watcher reads a crashloop as failed and waits the full
+// thirty-five minutes, so the step's gate must judge first. `box apply` keeps
+// Helm's own wait because nothing else gates it.
 func updateHelm(kubeconfig, namespace string) (*release.Helm, error) {
 	h, err := release.NewHelm(kubeconfig, namespace, release.ReleaseName)
 	if err != nil {
@@ -129,31 +99,23 @@ func updateHelm(kubeconfig, namespace string) (*release.Helm, error) {
 	return h, nil
 }
 
-// foldedReceipt is the reporter a step's apply writes through: everything the
-// apply prints, and not the wiring receipt. update folds that receipt into one
-// row of its own from the apply's result, and the full check list goes to the
-// run log, so the apply printing it as well would say it twice.
+// foldedReceipt drops the apply's receipt: update folds it into one row, and the
+// full list goes to the log.
 type foldedReceipt struct{ say.Reporter }
 
 func (foldedReceipt) Receipt(string, []say.ReceiptRow) {}
 
-// updateChartSource is the one chart source an update works with. It is not
-// chartSource's return type widened: this command needs the repository listing
-// as well as a load, and one OCIChart for the command is what makes the release
-// the plan settles on the one each step installs, out of the same cache.
+// updateChartSource is one OCIChart, so the settled release is each step's
+// install, from one cache.
 func updateChartSource(out say.Reporter) *release.OCIChart {
 	return &release.OCIChart{BoxVersion: version, Say: out}
 }
 
-// runUpdate is `box update`: it replaces box when a newer release verifies, then
-// moves the installed release to a newer one, stepping through the releases the
-// chart's upgrade-from floors require.
+// runUpdate replaces box when a newer release verifies, then moves the chart
+// through its upgrade-from floors.
 func runUpdate(ctx context.Context, args []string) {
-	// The same dev switches apply takes, stripped before the FlagSet sees
-	// them so --help cannot offer them: --paths-in-node skips the host-path
-	// check for the kind e2e, --dns-file is the resolver the per-host step
-	// checks an app host's name against, and --box-releases is the release page
-	// the self-update e2e serves its own boxes from.
+	// apply's dev switches, out of --help: --paths-in-node, --dns-file, and
+	// --box-releases for the self-update e2e's own page.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -182,14 +144,12 @@ func runUpdate(ctx context.Context, args []string) {
 	}
 	o.pathsInNode = pathsInNode
 	if *o.valuesPath == "" {
-		// A run with nowhere to read its values from has nothing to update, and
-		// it says so before it replaces box or opens the cluster.
+		// No values file is said before replacing box or opening the cluster.
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
 	if *o.timer && *o.check {
-		// A timer run is the unattended update itself; a check writes nothing
-		// and would leave the timer never moving a box.
+		// A timer run is the update; a check would never move a box.
 		fmt.Fprintln(os.Stderr, "box: --timer runs the update the timer would, so it cannot be a --check")
 		os.Exit(2)
 	}
@@ -202,18 +162,15 @@ func runUpdate(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// Root's config is read by every update, not only the timer's: it says
-	// whether box takes a new box, and a file that does not parse is a refusal
-	// naming the line -- a setting silently ignored is a box that quietly
-	// stopped updating.
+	// Every update reads root's config: it says whether to take a new box, and a
+	// parse failure refuses by line rather than silently stopping updates.
 	conf, _, err := hostconf.Load(hostconf.Path(*o.record))
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 	if conf.HoldBox {
-		// The same hold as the flag: one decision in one place, so the timer
-		// and a hand run agree about the box's own version.
+		// The flag and the file are one decision.
 		*o.holdBox = true
 	}
 	if *o.timer {
@@ -229,12 +186,10 @@ func runUpdate(ctx context.Context, args []string) {
 					Charts: charts,
 				}.run(ctx)
 			},
-			// The wake's own reading, made here rather than at the end of the
-			// chart half, so it happens even when that half stopped early.
+			// Read health here, so it happens even if the chart half stopped.
 			Health: func(ctx context.Context) { healthOnly(ctx, o, out, conf) },
 		}
-		// The self-update's own --rollback-box is not a timer decision: a timer
-		// never puts the previous box back, and the flag is root's hand.
+		// A timer never rolls back the box; --rollback-box is root's hand.
 		if err := t.run(ctx); err != nil {
 			out.Error(err)
 			os.Exit(1)
@@ -242,11 +197,8 @@ func runUpdate(ctx context.Context, args []string) {
 		return
 	}
 
-	// box's own replacement comes before any chart work, so the release the
-	// update settles on is one the box that installs it meets min-box for. It
-	// re-executes with this process's own arguments when it installs a newer
-	// box, which is why the chart work below is handed to the run rather than
-	// simply following it.
+	// Replace box first, so the release settled on meets min-box. It re-executes
+	// with these arguments, so the chart work is handed to the run.
 	su := newBoxUpdate(out, os.Args[1:], os.Environ(), o.selfUpdateOptions(boxReleases))
 	su.RollbackBox = *o.rollbackBox
 	su.CheckOnly = *o.check
@@ -256,8 +208,7 @@ func runUpdate(ctx context.Context, args []string) {
 	}
 	if err := run.run(ctx); err != nil {
 		if errors.Is(err, release.ErrCancelled) {
-			// A declined question is an answer, not a fault: one exit code and
-			// nothing to explain.
+			// A declined question is an answer, not a fault.
 			os.Exit(1)
 		}
 		out.Error(err)
@@ -265,26 +216,19 @@ func runUpdate(ctx context.Context, args []string) {
 	}
 }
 
-// updateCharts is the chart half of `box update`: the release plan, the steps
-// through the floors, and the applies under them. It is a function of its own
-// because the box's replacement comes first and can end the run before any of
-// this -- or hand the process over, so that this runs in the new binary.
-//
-// It returns its failures instead of ending the process: a timer's wake reads
-// health after this whatever it returned, and the printing and the exit code are
-// runUpdate's, in one place.
+// updateCharts is the chart half: plan, steps, applies. It returns failures
+// instead of exiting, because a timer's wake reads health after it whatever it
+// returned.
 func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolver setup.Resolver, conf hostconf.Config) error {
 	yes, _ := o.unattended()
 
-	// The cluster decision belongs to `box bootstrap`; update reuses it the
-	// same way apply does and never probes a cluster of its own.
+	// Reuse bootstrap's cluster, as apply does.
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.record})
 	if err != nil {
 		return err
 	}
 
-	// The grant is read here rather than only in the snapshotter, because the
-	// notices need two things from it: the namespace, and the box's own name.
+	// The grant gives the notices the namespace and the box's name.
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
 		return err
@@ -293,34 +237,26 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 	if err != nil {
 		return err
 	}
-	// The notice address can carry the token that makes it work, and a failure
-	// to post it names the address: the log never keeps either.
+	// The notice address is a secret: keep it out of the log.
 	redact(conf.NoticeURL)
 	poster := notice.Poster{URL: conf.NoticeURL}
 	noticeOpts := notice.Options{Box: grantDomain(sb), Seedbox: namespace}
 	post := func(n notice.Notice) {
-		// A notice that cannot be delivered is one line, never a failed update:
-		// the update is the work and the notice is the telling.
+		// A failed notice is one line: the update is the work.
 		if err := poster.Post(ctx, n); err != nil {
 			out.Warn(err.Error())
 		}
 	}
 
-	// One chart source for the plan and every step: the release the plan
-	// settles on is the one each apply installs, pulled once.
+	// One chart source: the settled release is each step's install.
 	charts := updateChartSource(out)
-	// The applier a step's apply runs through. It is built per apply rather
-	// than once, because the release handle a step opens depends on the apply:
-	// the one that moves the release runs no hooks (the step's gate judges the
-	// moved apps first, and the chart's wiring Job cannot pass while one of
-	// them is down), and the one that installs the state that stays runs them.
+	// The applier is built per apply: the move runs no hooks (the gate judges
+	// first), and the apply that keeps the state runs them.
 	applierFor := func(skipHooks bool) *release.Applier {
 		return &release.Applier{
 			Charts: charts,
-			// The step's apply is the update the operator said yes to. The
-			// update asked once, before any step wrote; a second question
-			// partway through a multi-step path would be asking after the box
-			// had already moved.
+			// The update already asked; a second question would come after it
+			// moved.
 			Confirm: answered{},
 			Say:     foldedReceipt{out},
 			Open: func(namespace string) (release.ReleaseClient, error) {
@@ -339,15 +275,11 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 			},
 		}
 	}
-	// The options every step applies with: apply's own, plus the three values
-	// box derives from the cluster. The Updater replaces the release with each
-	// step's, and keeps everything else.
+	// Each step applies with these; the Updater swaps only the release.
 	holds := newBoxHolds(out)
 	stepOpts := o.stepOptions(kc, out, resolver, holds)
 
-	// OpenSnapshots is the copy of each copying app's config, under the grant's
-	// config root: a step copies it before the release moves so a crashloop or
-	// a later `box rollback` has state to go back to.
+	// OpenSnapshots copies under the grant's config root before the move.
 	up := &update.Updater{
 		Charts: charts,
 		Open: func(namespace string) (update.Release, error) {
@@ -399,12 +331,9 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 	return nil
 }
 
-// reportUpdateFailure puts a failed update's reason on screen once and returns
-// the error marked as drawn. Nothing was planned: the failure is the registry
-// read, and the chart is the subject of the one ✗ row. Past that, the step's own
-// ✗ row says which step stopped and the reason hangs under it: the updater says
-// nothing more itself, so an error left unprinted here is a ✗ with no reason
-// (rule 2: a refusal gets its one reason).
+// reportUpdateFailure puts a failure's reason on screen once, as drawn. Before a
+// plan the chart gets the ✗ row; after it the step's row carries the reason
+// (rule 2).
 func reportUpdateFailure(out say.Reporter, res update.Result, err error) error {
 	if res.Target == "" {
 		out.Rows([]say.Row{{Mark: say.MarkFailed, Name: "chart", Facts: []string{err.Error()}}})

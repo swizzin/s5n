@@ -11,53 +11,33 @@ import (
 	"github.com/swizzin/s5n/internal/selfupdate"
 )
 
-// `box update` replaces box before it plans any chart work, then re-runs itself
-// as the new binary with the arguments it was given. A release that raises
-// box.s5n/min-box would otherwise leave an unattended box unable to install
-// anything, and a box that can only install the release it already knows is a
-// box someone has to replace by hand. Because the update re-executes, the chart
-// work always runs under the newest box -- including the timer's, which is the
-// run nobody is watching.
-//
-// Nothing here can stop the chart update. A network failure, a build with no
-// signing key, a package-managed binary, a signature that does not verify: each
-// is one line naming the cause, and the chart work continues under the box that
-// is running -- which is what it would have done before this step existed. The
-// binary is only ever replaced after the release verified, so no failure path
-// leaves a box on disk that will not run.
+// `box update` replaces box before chart work, then re-executes with the same
+// arguments, so the chart always runs under the newest box -- including the
+// timer's unattended run. Every self-update failure is one line naming the
+// cause, never a stopped chart update; the binary is replaced only after the
+// release verified.
 
-// geteuid is os.Geteuid. It is a variable so a test can be root, or not, without
-// being either: who may replace the binary is the first question this step asks.
+// geteuid is a variable so a test can be root without being root.
 var geteuid = os.Geteuid
 
-// boxUpdate is `box update`'s own step: what happens to the box it is running as
-// before the chart work starts.
+// boxUpdate is what happens to box itself before chart work.
 type boxUpdate struct {
-	// Options is what selfupdate needs to know, and nothing this command decides
-	// on its own: the version now running, the package that owns the binary if
-	// one does, the operator's hold, and the release page (a development e2e
-	// points it at a release page of its own).
+	// Options is the self-update's inputs: version, package, hold and page.
 	Options selfupdate.Options
 
-	// Args and Env are the process's own. A box that replaces itself re-executes
-	// with these, so the command that triggered the update runs again under the
-	// new binary rather than finishing under the old one.
+	// Args and Env are the process's own, re-executed under the new binary.
 	Args []string
 	Env  []string
 
-	// RollbackBox is --rollback-box: put back the binary an update replaced, and
-	// do no chart work at all.
+	// RollbackBox puts the previous binary back and does no chart work.
 	RollbackBox bool
 
-	// CheckOnly is --check: say what newer box is out and install nothing. A
-	// check that replaced the binary would be the one thing an operator asking
-	// what would happen must not get.
+	// CheckOnly says what is out and installs nothing.
 	CheckOnly bool
 
 	Out say.Reporter
 
-	// selfupdate's entry points, as fields so a test can watch a decision
-	// instead of replacing the binary the test runs from.
+	// Entry points as fields, so a test watches instead of replacing itself.
 	Update     func(context.Context, selfupdate.Options) (selfupdate.Result, error)
 	Check      func(context.Context, selfupdate.Options) (selfupdate.Available, error)
 	Rollback   func(string) error
@@ -79,25 +59,20 @@ func newBoxUpdate(out say.Reporter, args, env []string, opts selfupdate.Options)
 	}
 }
 
-// run carries out this run's decision about box itself, and reports whether the
-// chart work should now run in this process. It does not when a newer binary
-// took the process over, and not when the run is over.
+// run applies the box decision and says whether chart work still runs here.
 func (b *boxUpdate) run(ctx context.Context) (bool, error) {
 	if b.RollbackBox {
 		return false, b.rollback()
 	}
 	if release.IsDevVersion(b.Options.Version) {
-		// A development build has no version to compare a release with, and
-		// selfupdate refuses it by name. Saying it as a line rather than an
-		// error is what keeps an e2e reading its own transcript from looking
-		// broken, and the chart work runs either way.
+		// A development build refuses by name as a line, not an error, and the
+		// chart work runs either way.
 		b.Out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{fmt.Sprintf("this is a development build of box (version %q), so there is no released version to compare it with: box does not replace itself", b.Options.Version)}}})
 		return true, nil
 	}
 	if selfupdate.Reexecuted(b.Options.Version) {
-		// This process is already the box an update installed a moment ago, and
-		// the process that installed it said so. Asking again would replace the
-		// binary this process is running.
+		// This is already the installed box; asking again would replace the
+		// running binary.
 		return true, nil
 	}
 	if b.CheckOnly {
@@ -111,7 +86,7 @@ func (b *boxUpdate) run(ctx context.Context) (bool, error) {
 	return b.updateAsRoot(ctx)
 }
 
-// rollback puts the previous binary back: the one step back an update keeps.
+// rollback puts the one kept previous binary back.
 func (b *boxUpdate) rollback() error {
 	if geteuid() != 0 {
 		return errors.New("--rollback-box puts root's box back, and this process is not root: run it as root")
@@ -127,8 +102,8 @@ func (b *boxUpdate) rollback() error {
 	return nil
 }
 
-// reportNewer says what a run that cannot or must not install has waiting for
-// it, once. who is the rest of the sentence: whose update installs it, or why
+// reportNewer says once what a run that cannot install has waiting. who is the
+// rest of the sentence.
 // this one does not.
 //
 // A release the seedbox would move to that needs a newer box is the chart

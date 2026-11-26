@@ -12,35 +12,24 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// timerRun is `box update --timer`: the run systemd's box-update.timer makes
-// every fifteen minutes.
-//
-// The unit wakes box on a fixed schedule and box decides what a wake is worth.
-// That keeps root's box.yaml the only switch: turning the timer off, or making
-// it check less often, is an edit in one file and takes effect on the next wake
-// without touching systemd.
+// timerRun is `box update --timer`, which box-update.timer wakes. box decides
+// what a wake is worth, so box.yaml is the only switch and systemd is untouched.
 type timerRun struct {
-	// Conf is root's config, already parsed: an error in it stopped the command
-	// before this value was built.
+	// Conf is root's parsed config.
 	Conf hostconf.Config
-	// Path is where that config lives, so the one line a switched-off or
-	// not-due run says can name the file.
+	// Path lets a not-due line name the file.
 	Path string
-	// State is update.json, which holds the last check and the last health.
+	// State is update.json: the last check and health.
 	State update.StateStore
-	// Now is the clock, so a test decides due or not due without waiting.
+	// Now lets a test decide due without waiting.
 	Now func() time.Time
 	Out say.Reporter
 
-	// Update is the whole update: box's own replacement and then the charts. It
-	// runs only when a check is due, so a wake between checks asks the registry
-	// nothing and replaces nothing.
+	// Update runs only when a check is due: box, then charts.
 	Update func(context.Context) error
-	// Health is the reading a wake makes: after Update on a due wake, whatever
-	// Update returned, and alone on a wake that is not due (no registry contact,
-	// no self-update, LastCheck stays where it was). On a due wake that replaced
-	// box, this process never returns and the new binary makes its own reading.
-	// Nil skips it, which is what a caller that only wants the update says.
+	// Health is read after Update on a due wake whatever it returned, and alone
+	// otherwise. A replaced box never returns here; the new binary reads its own.
+	// Nil skips it.
 	Health func(context.Context)
 }
 
@@ -53,13 +42,10 @@ func (t timerRun) now() time.Time {
 
 func (t timerRun) report() say.Reporter { return say.Or(t.Out, nil) }
 
-// run is one wake of the timer: off writes nothing, a wake that is not due reads
-// health only, and a due one updates and then reads health.
+// run: off writes nothing; not due reads health only; due updates then reads it.
 func (t timerRun) run(ctx context.Context) error {
 	if !t.Conf.Timer {
-		// One line and nothing else: no state write, no cluster client, no
-		// registry. The unit keeps waking box, and box keeps saying this, so an
-		// operator who turned the timer off can see that it is off.
+		// One line and no work: the wake still shows the timer is off.
 		t.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "updates", State: "off", Facts: []string{t.Path + " says update.timer: off"}}})
 		return nil
 	}
@@ -68,12 +54,9 @@ func (t timerRun) run(ctx context.Context) error {
 		return err
 	}
 	if state.Due(t.now(), t.Conf.Interval) {
-		// The reading happens whatever the update did, and it happens here
-		// rather than at the end of the chart half: a plan, a registry listing
-		// or a step that stopped returns an error, and a failed check leaves
-		// LastCheck unwritten -- so every wake would be due and fail again, and
-		// a registry outage would silence every health notice for as long as it
-		// lasted. The wake still exits 1; the reading is not its answer.
+		// Read health here, whatever Update returned: a failed check leaves
+		// LastCheck unwritten, so without this a registry outage would silence
+		// every health notice. The wake still exits 1.
 		err := t.Update(ctx)
 		if t.Health != nil {
 			t.Health(ctx)
@@ -86,9 +69,7 @@ func (t timerRun) run(ctx context.Context) error {
 	return nil
 }
 
-// unattended is what --timer means for the two questions a run answers: nobody
-// is watching, so it says yes and it asks with plain lines. It is a method so
-// the mapping is tested without a run.
+// unattended is --timer's answer: yes, with plain lines, because nobody watches.
 func (o *updateFlags) unattended() (yes, plain bool) {
 	if *o.timer {
 		return true, true
@@ -96,21 +77,16 @@ func (o *updateFlags) unattended() (yes, plain bool) {
 	return *o.yes, *o.plain
 }
 
-// noTimerLine is what bootstrap says on a host where box cannot schedule its own
-// update: one line, naming the command cron would run, because a box that
-// silently never updates is the failure this feature exists to prevent.
+// noTimerLine names the cron command when box cannot schedule itself.
 const noTimerLine = "no update timer on this host: run box update --timer from cron every 15 minutes"
 
-// systemdRunning says this host's systemd is up: /run/systemd/system exists for
-// as long as it is. root on a host without it (a container, a PID 1 that is not
-// systemd) would get unit files nothing ever reads.
+// systemdRunning: /run/systemd/system exists only while systemd is up.
 func systemdRunning() bool {
 	info, err := os.Stat("/run/systemd/system")
 	return err == nil && info.IsDir()
 }
 
-// timerUnits is where bootstrap puts the timer's files on this host, and the one
-// line it says when there is nowhere to put them.
+// timerUnits is where bootstrap puts the timer files, or why it cannot.
 //
 // --unit-dir is the development switch: the files land in a directory this run
 // names and no systemctl runs at all, because the systemd they are for is not

@@ -82,8 +82,6 @@ func confirmFixture() apply.Summary {
 	}
 }
 
-// TestTheConfirmScreenIsTheDecidingPage is the golden: what the one question
-// shows, in the order a person reads it.
 func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -122,8 +120,6 @@ func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 	}
 }
 
-// TestTheAppFoldFoldsTheTail: a box with more apps than the confirm lists folds
-// the rest into one row naming them, so the question stays inside the column.
 func TestTheAppFoldFoldsTheTail(t *testing.T) {
 	s := confirmFixture()
 	for _, name := range []string{"autobrr-2", "prowlarr", "radarr-4k", "sonarr-4k", "tautulli"} {
@@ -151,9 +147,6 @@ func TestTheAppFoldFoldsTheTail(t *testing.T) {
 	}
 }
 
-// TestTheRunWritesItsOwnPage: the report beside the snapshot is this run's, it is
-// the sectioned page rule 7 asks for, and it is 0600 like everything next to a
-// snapshot.
 func TestTheRunWritesItsOwnPage(t *testing.T) {
 	dir := t.TempDir()
 	snapshot := filepath.Join(dir, "migrate-20261123T045038Z-final.tar.gz")

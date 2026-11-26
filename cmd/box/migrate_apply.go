@@ -1,16 +1,10 @@
 package main
 
-// migrate_apply.go is the write half: `box migrate apply [<snapshot>]`.
-//
-// It is the thin layer the design asks for. Everything that can be tested
-// without a cluster is in internal/migrate/apply; this file opens the snapshot,
-// reads the plan out of it, reads the seedbox, checks that the release exists,
-// builds the environment apply talks to (the release's ownership record, the
-// grant editor, the Plex runner, the one question) and then hands over to the
-// same apply path `box apply` uses.
-//
-// The order matters as much here as in the package: nothing is written until
-// the plan, the two files and the deployed release have all been read.
+// migrate_apply.go is the write half: `box migrate apply [<snapshot>]`. The
+// testable decision lives in internal/migrate/apply; this file opens the
+// snapshot, reads the plan, the seedbox and the deployed release, builds the
+// environment and hands over to `box apply`'s path. Nothing is written until all
+// of that has been read.
 
 import (
 	"context"
@@ -54,15 +48,12 @@ import (
 // this command adds.
 type migrateApplyFlags struct {
 	*applyFlags
-	// install are the answers a host with no box has to be given; on a host
-	// that already has one they are ignored.
+	// install answers are for a host with no box; ignored when one exists.
 	install *installFlags
 	plain   *bool
-	// details prints every rewrite, column by column, instead of the grouped
-	// summary. The whole list is in the snapshot's report.txt either way.
+	// details prints every rewrite; the report has the whole list either way.
 	details *bool
-	// yolo runs a downgrade: the release's app is older than the version that
-	// wrote the source's config, which box refuses unless this is given.
+	// yolo allows a downgrade: an older app on a newer config.
 	yolo *bool
 }
 
@@ -77,17 +68,13 @@ func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
 }
 
 func runMigrateApply(ctx context.Context, args []string) {
-	// --paths-in-node is the e2e's storage switch, taken out of the arguments
-	// before the FlagSet sees them: a host with no box runs init here, and
-	// init's dev switch has to reach it the same way `box bootstrap`'s does.
+	// --paths-in-node is the e2e's switch: a host with no box runs init here.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --unit-dir is bootstrap's timer switch, taken out of the arguments the
-	// same way: on a host with no box this run installs one, and the timer it
-	// writes for it lands in the directory this run names.
+	// --unit-dir names where a fresh host's timer units land.
 	unitDir, args, err := takeDevFlag(args, "unit-dir")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -97,18 +84,13 @@ func runMigrateApply(ctx context.Context, args []string) {
 	o := addMigrateApplyFlags(fs)
 	o.install.pathsInNode = pathsInNode
 	o.install.unitDir = unitDir
-	// The apply this command hands over to reads the same switch: on a host
-	// whose paths are inside a test node, the second render must not stat them
-	// on the host that does not have them.
+	// The handed-over apply reads the same switch: a kind host cannot stat them.
 	o.pathsInNode = pathsInNode
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// Go's flag package stops at the first argument that is not a flag, and the
-	// snapshot is one: `box migrate apply <file> --yes` would otherwise read
-	// --yes as a second argument. So what follows the file is parsed as flags,
-	// and only the file itself may be left over.
+	// Go's flag parser stops at the snapshot, so parse what follows it as flags.
 	file := ""
 	if rest := fs.Args(); len(rest) > 0 {
 		file = rest[0]
@@ -142,14 +124,9 @@ func runMigrateApply(ctx context.Context, args []string) {
 	}
 }
 
-// openSnapshot finds the snapshot apply runs, verifies it, and extracts the part
-// this run reads into a private directory beside it. With no file named it is the
-// newest one in bundle.Dir that is not a survey, and the run says which file it
-// read.
-//
-// The mode is what apply is allowed to do: a survey holds no configs, a
-// rehearsal applies locked and never adopts data, and a final snapshot is the
-// one a real run applies.
+// openSnapshot finds and verifies the snapshot, extracting what the run reads
+// into a private directory beside it. No file means the newest non-survey in
+// bundle.Dir. The mode decides what apply may do: only a final is a real run.
 func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error) {
 	if strings.TrimSpace(file) == "" {
 		newest, err := bundle.Newest(bundle.Dir)
@@ -158,17 +135,13 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 		}
 		file = newest
 	}
-	// The plan says which part of each app's config this run's checks read, so it
-	// is read out of the archive first: a plan box cannot parse is a refusal
-	// before anything is extracted, and the bulk the plan says travels whole is
-	// left in the snapshot for the staging step.
+	// Read the plan first: an unparseable plan refuses before extraction, and
+	// whole-travelling bulk stays in the snapshot for staging.
 	p, err := snapshotPlan(file)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	// The run works beside the snapshot and never in the system's temporary
-	// directory: what it extracts is the same disk the snapshot is already on, and
-	// on a Fedora or an Arch host /tmp is RAM.
+	// Work beside the snapshot, never /tmp, which is RAM on Fedora and Arch.
 	dir, done, err := work.New(filepath.Dir(file))
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("a private directory for the snapshot: %w", err)
@@ -188,20 +161,14 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 		cleanup()
 		return nil, func() {}, fmt.Errorf("%s is a %q snapshot, and apply runs a final one: `box migrate cutover` writes it", file, opened.Mode)
 	}
-	// The snapshot this run read goes to the log, not to the screen: a refusal
-	// opens with its fact (rule 1), and the command it prints already names this
-	// file. A run that goes on names it in the log, where the plumbing lives.
+	// The file goes to the log: a refusal's command already names it (rule 1).
 	out.Detail(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
 	return opened, cleanup, nil
 }
 
-// keepFor is what an apply extracts out of its snapshot before its checks: the
-// plan, the report and the sources, and every app's config whole -- except an app
-// whose config is a library as well as its state, whose state is what a check
-// reads and whose tree is written at the config root, once, by apply.Bulk.
-//
-// The plan is what says which app that is and which carry the snapshot took of
-// it: a snapshot that carried the state alone has no tree to leave behind.
+// keepFor extracts the plan, report, sources and every config whole, except an
+// app whose config is also a library: a check reads its state, and apply.Bulk
+// writes its tree once at the config root. The plan says which app and carry.
 func keepFor(p *plan.Plan) archive.Filter {
 	return func(name string) bool {
 		rest, ok := strings.CutPrefix(name, archive.ConfigPrefix+"/")
@@ -219,8 +186,7 @@ func keepFor(p *plan.Plan) archive.Filter {
 	}
 }
 
-// snapshotPlan is the plan out of a snapshot, before any of it is extracted: it
-// is what says which part of each app's config the extraction has to keep.
+// snapshotPlan reads the plan before extraction, to decide what to keep.
 func snapshotPlan(file string) (*plan.Plan, error) {
 	raw, err := archive.ReadEntry(file, archive.PlanName)
 	if err != nil {
@@ -229,9 +195,7 @@ func snapshotPlan(file string) (*plan.Plan, error) {
 	return parsePlan(raw, file)
 }
 
-// parsePlan parses a plan that came out of one snapshot, naming the snapshot and
-// the entry a refusal is about: that file is what an operator copies between
-// hosts and what a bug report has to name.
+// parsePlan names the snapshot and entry a refusal is about.
 func parsePlan(raw []byte, file string) (*plan.Plan, error) {
 	p, err := plan.Parse(raw)
 	if err != nil {
@@ -244,39 +208,25 @@ func parsePlan(raw []byte, file string) (*plan.Plan, error) {
 	return p, nil
 }
 
-// migrateApply is the command without the exit, so a test can drive its
-// refusals. It returns the error the run stopped on; a cancelled run returns
-// apply.ErrCancelled after saying so in box's own voice.
-//
-// file is the snapshot to run, or empty for the newest one in bundle.Dir. The
-// snapshot is extracted into a private directory for the length of the run and
-// removed when it ends: the configs apply rewrites are its copies, not the
-// source's.
-//
-// A rehearsal snapshot takes the same path with the lock on: the grant gets
-// box's rehearsal flag before the release is rendered, the release is applied
-// locked with every app still off, the lock is proven from inside the
-// namespace, and only then does the adoption switch anything on. No data is
-// renamed, and the flag is in the grant, so every later `box apply` and `box
-// update` renders the lock too.
+// migrateApply is the command without the exit. The snapshot is extracted into a
+// private directory for the run; apply rewrites its copies, never the source's.
+// A rehearsal sets the grant's lock, applies with every app off, proves the lock
+// from inside the namespace, and only then switches apps on.
 func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out say.Reporter) error {
 	opened, cleanup, err := openSnapshot(file, out)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	// Step 0: the plan, and then the host: a host with no box gets one from
-	// the plan before anything is adopted, and a host with one is adopted into
-	// as it stands.
+	// Step 0: the plan, then the host -- a fresh one gets a box, an existing one
+	// is adopted as it stands.
 	p, err := loadPlan(opened)
 	if err != nil {
 		return err
 	}
 	rehearsal := opened.Mode == archive.ModeRehearsal
 	if rehearsal {
-		// The masthead and the transcript both say what this run is. The live
-		// renderer's phase head is the masthead; the fact is the line a plain
-		// transcript and the e2e read.
+		// Phase head and fact both say what this run is.
 		out.Phase("rehearsal: nothing leaves this box")
 		out.Fact("rehearsal", "nothing leaves this box")
 		if err := rehearsalSourceHost(p); err != nil {
@@ -289,17 +239,14 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	}
 	raw := opened.Plan
 	charts := &chartRelease{flags: o.chart, out: out}
-	// installed says this host has no box, so this run is the installer: it
-	// shows the whole run once and then does it, in that order. agreed is what
-	// the operator said yes to -- nil on a host that already has a box, where
-	// the one question is asked inside apply.Run after every check, as it always
-	// was.
+	// installed means this run is the installer: it shows the run, asks once,
+	// then does it. agreed is that answer; nil on an existing box, where the
+	// question comes inside apply.Run after every check.
 	installed, err := boxInstalled(*o.install.record)
 	if err != nil {
 		return err
 	}
-	// The release is read once, for both halves: the pre-install pass needs its
-	// values and ports, and the adoption installs this same chart.
+	// One release for both halves: the pre-install pass and the install.
 	chart, err := loadMigrateChart(ctx, charts)
 	if err != nil {
 		return err
@@ -319,42 +266,30 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 			return err
 		}
 	}
-	// Every refusal the snapshot, the plan and the chart decide on their own has
-	// happened by now: the archive verified, the plan parsed, the chart loaded,
-	// and -- on a host with no box -- the version column read and the one
-	// question answered before anything was installed. What follows reads the
-	// cluster, and then writes.
+	// The snapshot, plan and chart refusals have all happened; on a fresh host
+	// the version column and the question did too. What follows reads the
+	// cluster, then writes.
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
 		return err
 	}
-	// A plan this release cannot honour is the one refusal this half can make
-	// before it writes anything at all: an instance the chart's catalog does not
-	// name, an app with no port or URL base to rewrite an address to. It comes
-	// before the rehearsal's lock goes into the grant, so a refused run leaves
-	// the grant as it found it.
-	//
-	// The version column's refusal stays with the confirm below, and it has to:
-	// whether there is anything to refuse is what apply.Run decides, and a second
-	// run of a plan that is already applied is its own no-op -- the apps it moved
-	// are running on the release's images, and box's update path, not this
-	// command, is what moves them next.
+	// Refuse a plan this release cannot honour before the grant is touched: an
+	// unnamed instance, or an app with no port or URL base. The version column's
+	// refusal stays with the confirm, because apply.Run decides it and an
+	// already-applied plan is its own no-op.
 	if effective, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}); err != nil {
 		return err
 	} else if _, err := planFacts(p, cat, effective, chart); err != nil {
 		return err
 	}
 	if rehearsal {
-		// A rehearsal is disposable, and it starts its own box: a box that
-		// already runs an app is somebody's live one, and locking it would cut
-		// that app's internet without asking.
+		// A rehearsal starts its own box: locking a live one would cut its
+		// internet without asking.
 		if apps := enabledApps(sb); len(apps) > 0 {
 			return fmt.Errorf("this box already runs %s, and a rehearsal is disposable: it installs its own box on a clean host, so the live box is never locked or touched", strings.Join(apps, ", "))
 		}
-		// The gate's address goes in with the flag: every app pod of a
-		// rehearsal box waits on it until its own policy is in place, and the
-		// proof below dials the same address. It is written first, because a
-		// grant that says rehearsal without a gate renders nothing.
+		// Write the gate address first: a grant saying rehearsal without one
+		// renders nothing. Every pod waits on it, and the proof dials it.
 		gate, err := rehearsalGateAddress(ctx, o)
 		if err != nil {
 			return err
@@ -365,8 +300,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		if err := sb.SetGrant("rehearsal", true); err != nil {
 			return fmt.Errorf("record the rehearsal lock in %s: %w", *o.grantPath, err)
 		}
-		// Re-read the grant: the effective values below are what the lock
-		// apply renders, so they must carry the flag this run just wrote.
+		// Re-read the grant so the values carry the flag just written.
 		if sb, err = seedbox.Load(*o.grantPath, *o.valuesPath); err != nil {
 			return err
 		}
@@ -379,8 +313,8 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	// The release is what migrate adopts into: its claims hold this run's
-	// staging tree, and its wiring record is where the adopted connections go.
+	// The release is what migrate adopts into: claims hold staging, its wiring
+	// record takes the adopted connections.
 	client, err := release.NewHelm(kc, namespace, release.ReleaseName)
 	if err != nil {
 		return err
@@ -403,9 +337,8 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		return err
 	}
 	if rehearsal {
-		// The release must render the lock with every app still off, and the
-		// proof must run before the adoption switches one on. A release whose
-		// pods never had the policy would make the proof a test of nothing.
+		// Render the lock with every app off before proving it: a pod that never
+		// had the policy proves nothing.
 		if _, err := migrateRelease(ctx, o, chart, kc, out); err != nil {
 			return err
 		}
@@ -420,9 +353,8 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	}
 	if err != nil {
 		if agreed != nil && apply.StoppedBeforeWrite(err) {
-			// The install this run was told to make is done, and its checks
-			// stopped the migration before anything of the snapshot moved: a
-			// person has to know both, and what running it again does.
+			// The box is installed and nothing of the snapshot moved: say both,
+			// and what a re-run does.
 			return fmt.Errorf("%w\n\nthe box is installed and nothing of the snapshot has been moved into it: fix what this names, then run this again -- the next run finds a box already, so it asks its one question after these checks and carries on from here", err)
 		}
 		return err
@@ -443,9 +375,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		Command: "less " + screen.Report,
 	}})
 
-	// Step 11: the same apply `box apply` runs, with the answer the operator
-	// gave above. The files are re-read there, which is what makes the release
-	// render what this run just moved into place.
+	// Step 11: `box apply`'s own path, re-reading the files this run moved.
 	return migrateHandOver(ctx, o, chart, kc, out)
 }
 
@@ -454,13 +384,10 @@ func loadPlan(opened *bundle.Opened) (*plan.Plan, error) {
 	return parsePlan(opened.Plan, opened.Path)
 }
 
-// snapshotBulk is apply's view of the part of a snapshot it does not extract: what
-// the archive holds of each app's whole data, counted by the pass that verified it,
-// and the one pass that writes it into the staging tree.
+// snapshotBulk is the unevicted part of a snapshot, counted and staged once.
 type snapshotBulk struct{ opened *bundle.Opened }
 
-// HoldsTree reports whether the snapshot's copy of one instance is more than the
-// extraction kept.
+// HoldsTree says the snapshot's copy is more than extraction kept.
 func (b snapshotBulk) HoldsTree(instance string) bool { return b.opened.Contents[instance].Tree }
 
 // Measure is what staging one instance writes at the config root.
@@ -481,10 +408,7 @@ func (b snapshotBulk) Stage(instance, dst string, uid, gid int) (apply.Staged, e
 	return apply.Staged{Files: c.Files, Bytes: c.Bytes}, nil
 }
 
-// loadMigrateChart loads the one chart release this command reads and installs.
-// It is loaded once and handed to the apply, so the release migrate checks
-// against is the release it installs -- and on a host with no box, the release
-// bootstrap and init installed.
+// loadMigrateChart loads the one release this command checks and installs.
 func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart, error) {
 	return charts.load(ctx)
 }
@@ -507,25 +431,20 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	if env.ConfigRoot == "" || env.DataRoot == "" {
 		return env, nil, errors.New("the grant names no storage paths: box init writes both")
 	}
-	// Every config apply rewrites comes out of the snapshot, one directory per
-	// planned app. An app the plan names and the snapshot does not carry is a
-	// refusal preflight makes, naming the app.
+	// One directory per planned app; a missing one is preflight's refusal.
 	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
-	// What the extraction left in the snapshot, for the one app whose config is a
-	// library as well as its state: apply stages it once, at the config root.
+	// What extraction left behind for an app that is also a library.
 	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
 	env.Image = chartImage(chart, values)
-	// The globals are numbers in the effective document, which is where a
-	// renderer reads them too.
+	// The globals are numbers in the effective document.
 	if env.PUID, err = number(values, "global", "puid"); err != nil {
 		return env, nil, err
 	}
 	if env.PGID, err = number(values, "global", "pgid"); err != nil {
 		return env, nil, err
 	}
-	// Every instance a rewriter may meet an address for: this plan's, and
-	// every one the release already switches on.
+	// Every instance a rewriter may meet: the plan's and the release's.
 	names := append([]string(nil), sortedKeys(p.Apps)...)
 	for _, name := range apply.Instances(values) {
 		if !containsString(names, name) {
@@ -549,9 +468,8 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	env.Secret = &secretStore{cs: cs, namespace: namespace, name: releaseSecretName(values)}
 	env.Values = &grantEditor{sb: sb, catalog: env.Catalog, values: values}
 
-	// The one app whose database only its own image may write: the runner is
-	// built only when the plan names it, because it needs the image the values
-	// select and a claim to mount.
+	// The runner is built only when the plan names the app whose database only
+	// its own image may write.
 	if planNeedsRunner(p, env.Catalog) {
 		image, err := apply.Image(chart.Variants, values, "plex")
 		if err != nil {
@@ -583,17 +501,15 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 // askOptions is how one run asks its one question: what the screen shows, and
 // what it refuses.
 type askOptions struct {
-	// Rehearsal says this run locks the box and renames nothing, so the screen
-	// says what a rehearsal leaves alone.
+	// Rehearsal says the screen shows what a rehearsal leaves alone.
 	Rehearsal bool
 	// Details prints every rewrite instead of the grouped summary.
 	Details bool
-	// AllowDowngrades is --yolo: run an older app on a config a newer one wrote.
+	// AllowDowngrades is --yolo.
 	AllowDowngrades bool
 }
 
-// askOptionsOf is this run's flags as askOptions. A nil flag is one this caller
-// never parsed, and reads as absent.
+// askOptionsOf is this run's flags; a nil flag reads as absent.
 func askOptionsOf(o *migrateApplyFlags, rehearsal bool) askOptions {
 	return askOptions{
 		Rehearsal:       rehearsal,
@@ -602,11 +518,8 @@ func askOptionsOf(o *migrateApplyFlags, rehearsal bool) askOptions {
 	}
 }
 
-// migrateAnswer is the confirm a run uses. On a host that had no box the question
-// was asked before anything was installed, so this run asks nothing and holds
-// itself to the answer instead. On a host that already had one there is nothing
-// to agree to beforehand, and the question is asked here, inside the run, after
-// every app's Check -- Plex's included.
+// migrateAnswer holds a fresh install to the answer it already gave; an existing
+// box asks here, after every app's Check.
 func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, rehearsal bool, agreed *apply.Summary, screen confirmScreen) func(apply.Summary) (bool, error) {
 	if agreed != nil {
 		return migrateAgreed(out, *agreed)
@@ -614,9 +527,7 @@ func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, reh
 	return migrateConfirm(out, confirmer(out, *o.yes), namespace, askOptionsOf(o, rehearsal), nil, "", screen)
 }
 
-// confirmScreenOf is the heading and report path of one run: what it is about to
-// apply, and where its page goes. target is the seedbox's name, or "" before one
-// is chosen -- which reads as "this box" rather than as an empty column.
+// confirmScreenOf is one run's heading and report path.
 func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
 	when := ""
 	if !opened.Taken.IsZero() {
@@ -631,40 +542,23 @@ func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
 	}
 }
 
-// migrateConfirm shows the summary and asks the one question. It is the same
-// confirmer `box apply` asks with, so a terminal gets the live form and a
-// --plain or piped run gets the line prompt; --yes answers without asking, and
-// no terminal without --yes refuses, as apply does.
-//
-// It is the run's only question. On a host with no box it comes before anything
-// is installed, so the platform this run would install is part of it, shown
-// first, and the first line says so: a person deciding to install a cluster and
-// a platform layer has to read that from the screen, not from the order of the
-// output. A run that asked "install the platform layer?" and then "move these
-// into ...?" was two questions about one decision, and the second one came after
-// both.
-//
-// The screen is the heading, the blocks, and one footer line counting what folded
-// away; the page with every row in it is written beside the snapshot before the
-// question, so a person who says no still has what they were shown.
+// migrateConfirm shows the summary and asks the run's one question with apply's
+// confirmer. A fresh host's question covers the platform it will install, so a
+// person reads that from the screen. The report is written before the question,
+// so a no still has what was shown.
 func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptions, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
-		// The version column's one refusal, on the column the screen would show:
-		// a host that already has a box reaches it here, because only a run with
-		// something to move has a downgrade to refuse.
+		// The version column's refusal, only when there is something to move.
 		if err := refuseDowngrades(out, s.Versions(), opts.AllowDowngrades, screen.Snapshot); err != nil {
 			return false, err
 		}
 		if err := showSummary(out, s, opts.Details, plat, lead, screen); err != nil {
 			return false, err
 		}
-		// Every question here is asked with no as the default: a migration
-		// rewrites a source's configs and switches apps on, and pressing enter
-		// at the end of a long screen should not be a decision to do that.
+		// Default no: a migration rewrites configs and switches apps on.
 		if opts.Rehearsal {
-			// The screen a person reads before the first write says what this
-			// box is, not only what moves into it.
+			// Say what this box is, not only what moves into it.
 			out.List("this rehearsal", []string{
 				"nothing leaves this box: no internet egress, and the release's own pods only",
 				"every torrent starts stopped, and no data is renamed",
@@ -678,20 +572,10 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptio
 	}
 }
 
-// refuseDowngrades stops a run whose release runs an older app than the version
-// that wrote the source's config, and names every such app with both versions.
-//
-// The config and the database belong to the version that wrote them: an older app
-// reads a newer schema at its peril, and a migration is the one moment the choice
-// is still open. --yolo is the operator's word that they want it anyway, and then
-// the confirm carries one `!` row per app instead of a refusal.
-//
-// It reads a version column rather than a summary: two image references are the
-// whole of the question, so a run can answer it before it stages a single file
-// (apply.Versions). The rows are the refusal: what the run found, the command
-// that does it anyway, and the one line saying what that costs. Reported says box
-// has already put it on screen, so the command exits non-zero without saying it
-// twice.
+// refuseDowngrades stops an older app on a config a newer version wrote: the
+// database belongs to the writer, and a migration is the last moment to choose.
+// --yolo puts a `!` row per app instead. It reads two image references, so it
+// answers before staging a file, and Reported keeps the line from printing twice.
 func refuseDowngrades(out say.Reporter, versions []apply.AppVersion, allow bool, snapshot string) error {
 	if allow {
 		return nil
@@ -724,16 +608,9 @@ func refuseDowngrades(out say.Reporter, versions []apply.AppVersion, allow bool,
 // already been printed with the command that runs it anyway.
 var errDowngrade = errors.New("the release runs an older app than wrote this config")
 
-// planFacts is the plan and the chart against each other: the version column for
-// every planned app, and the error a plan this release cannot honour makes on the
-// way (apply.Targets: an instance the chart's catalog does not name, an app with
-// no port or URL base to rewrite an address to).
-//
-// None of it needs a snapshot's configs or a cluster, so the installer half reads
-// it before it probes the host for a platform or stages a copy, and refuses a
-// downgrade on it before either (beforeInstall). The checks that genuinely need
-// the cluster -- is the release installed, does this box already run these apps,
-// which address does the rehearsal gate answer at -- stay where they are.
+// planFacts is the plan against the chart: versions per app, and the error an
+// unhonourable plan makes. No configs or cluster, so the installer can refuse a
+// downgrade before probing or staging.
 func planFacts(p *plan.Plan, cat *catalog.Catalog, values map[string]any, chart release.Chart) ([]apply.AppVersion, error) {
 	if _, err := apply.Targets(values, cat.Names(), sortedKeys(p.Apps)); err != nil {
 		return nil, err
@@ -741,8 +618,7 @@ func planFacts(p *plan.Plan, cat *catalog.Catalog, values map[string]any, chart 
 	return apply.Versions(p, cat.Names(), chartImage(chart, values)), nil
 }
 
-// showSummary is the screen above the question: the heading, the platform this
-// run would install, the blocks, the footer, and the page beside the snapshot.
+// showSummary is the screen above the question and its page.
 func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform.Plan, lead string, screen confirmScreen) error {
 	if screen.Head != "" {
 		out.Line(screen.Head)
@@ -752,21 +628,18 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 		if lead != "" {
 			out.Muted(lead)
 		}
-		// The folded plan bootstrap prints, not the detailed one: the confirm
-		// is a decision, and the components it installs are one line of it.
+		// The folded plan: the confirm is a decision, not a component list.
 		if items := plat.Summary(); len(items) > 0 {
 			out.Plan("platform", items)
 		}
 		out.Line("")
 	}
-	// The page is written whatever shape the screen takes: --details prints the
-	// list, and the report is the file an operator keeps.
+	// Write the page whatever the screen shape; --details prints the list.
 	if err := writeApplyReport(out, s, screen); err != nil {
 		return err
 	}
 	if details {
-		// Every rewrite, column by column: the list the report holds, for the
-		// operator who wants to check one row before saying yes.
+		// Every rewrite, for the operator checking a row before yes.
 		out.List("this migration", s.Lines())
 		return nil
 	}
@@ -787,9 +660,7 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 	return nil
 }
 
-// writeApplyReport puts this run's page beside the snapshot, before the question:
-// the file the footer and --details point at, written 0600 like everything else
-// next to a snapshot.
+// writeApplyReport puts the page beside the snapshot, 0600, before the question.
 func writeApplyReport(out say.Reporter, s apply.Summary, screen confirmScreen) error {
 	if screen.Report == "" {
 		return nil
@@ -814,10 +685,8 @@ func appsWord(n int) string {
 	return fmt.Sprintf("%d apps", n)
 }
 
-// confirmLead is the first line of the one question on a host with no box: what
-// the answer buys, before any of it exists. The cluster is named only when box
-// installs it -- a host that already has one gets the platform layer and the box,
-// and promising a cluster there would be a promise about something already there.
+// confirmLead says what a fresh host's answer buys; the cluster is named only
+// when box installs it.
 func confirmLead(installsCluster bool) string {
 	if installsCluster {
 		return "nothing is installed yet: this run installs the cluster and the platform layer, writes the box, and then moves the snapshot into it"
@@ -825,9 +694,7 @@ func confirmLead(installsCluster bool) string {
 	return "nothing is installed yet: this run installs the platform layer, writes the box, and then moves the snapshot into it"
 }
 
-// confirmTarget is the box a question names: the namespace it will have, or "this
-// box" when the install has not been told one yet -- a guided run asks for the
-// login, and the login is what names it.
+// confirmTarget is the namespace, or "this box" before one is chosen.
 func confirmTarget(namespace string) string {
 	if ns := strings.TrimSpace(namespace); ns != "" {
 		return ns
@@ -835,21 +702,14 @@ func confirmTarget(namespace string) string {
 	return "this box"
 }
 
-// migrateAgreed is the answer a host with no box already gave: the confirm that
-// does not ask, and refuses a summary that is not the one the operator agreed to.
-//
-// Both runs read the same snapshot and the same plan, so they have to produce
-// the same summary. The one thing that differs is the rows the pre-install pass
-// could not check, and apply.Summary.Holds ignores exactly those. Anything else
-// is a fault, and a run that would do what nobody was shown stops instead.
+// migrateAgreed refuses a summary that is not the one agreed; the only allowed
+// difference is rows the pre-install pass could not check.
 func migrateAgreed(out say.Reporter, agreed apply.Summary) func(apply.Summary) (bool, error) {
 	return func(s apply.Summary) (bool, error) {
 		if why := s.Holds(agreed); why != "" {
 			return false, fmt.Errorf("this run would not do what it asked about, and nothing of the snapshot has been moved: %s. The snapshot was read twice from the same file and the plan is the same, so this is a fault in box, not something to answer differently", why)
 		}
-		// The rows the question could not fill in are filled in here: the check
-		// it said would happen once the app's image ran has just run, and what
-		// it found belongs where the operator read the promise.
+		// Fill in the rows the question promised after the install.
 		if rows := s.CheckedRows(agreed); len(rows) > 0 {
 			out.Table("checked after the install", rows)
 		}
@@ -857,8 +717,7 @@ func migrateAgreed(out say.Reporter, agreed apply.Summary) func(apply.Summary) (
 	}
 }
 
-// migrateHandOver is step 11: the apply. It is `box apply`'s own path, with the
-// chart already loaded and the question already answered.
+// migrateHandOver is step 11: `box apply`'s path, chart loaded, question answered.
 func migrateHandOver(ctx context.Context, o *migrateApplyFlags, chart release.Chart, kc string, out say.Reporter) error {
 	res, err := migrateRelease(ctx, o, chart, kc, out)
 	if err != nil {
@@ -870,11 +729,8 @@ func migrateHandOver(ctx context.Context, o *migrateApplyFlags, chart release.Ch
 	return nil
 }
 
-// migrateRelease runs `box apply`'s own path once: the same chart, the same
-// files and the same hosts, against the cluster this run already holds. It is
-// what renders a change to the release, so a rehearsal calls it twice -- once
-// to put the lock in place before any app starts, and once at the end to switch
-// on what the adoption moved -- and a final snapshot calls it once.
+// migrateRelease runs `box apply`'s path: a rehearsal twice (lock, then switch
+// on), a final once.
 func migrateRelease(ctx context.Context, o *migrateApplyFlags, chart release.Chart, kc string, out say.Reporter) (release.Result, error) {
 	app := &release.Applier{
 		Charts:  chartSource(out),
@@ -893,17 +749,14 @@ func migrateRelease(ctx context.Context, o *migrateApplyFlags, chart release.Cha
 	opts := o.options()
 	opts.Chart = &chart
 	opts.BoxValues = boxValues(kc)
-	// The same steps a bare apply runs: an app this migration switched on may
-	// be served at a host of its own, which is root's listener and Certificate
-	// to write before the release moves.
+	// The same steps a bare apply runs, per-host TLS included.
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: setup.NetResolver{}}
 	holds := newBoxHolds(out)
 	opts.Holds = holds.values
 	return applyThenSettle(ctx, app.Apply, opts, holds)
 }
 
-// releaseSecretName is the Secret the chart renders: `<release>-keys`, or the
-// one `secrets.existingSecret` names (charts/s5n/templates/secret.yaml:7-9).
+// releaseSecretName is `<release>-keys` or `secrets.existingSecret`.
 func releaseSecretName(values map[string]any) string {
 	secrets, _ := values["secrets"].(map[string]any)
 	if name, _ := secrets["existingSecret"].(string); strings.TrimSpace(name) != "" {
@@ -912,9 +765,7 @@ func releaseSecretName(values map[string]any) string {
 	return release.ReleaseName + "-keys"
 }
 
-// secretStore is the release Secret, one data key at a time. The chart's keys
-// are plain base64 of the value, which is what corev1.Secret's Data already is,
-// so nothing here encodes or prints anything.
+// secretStore is the release Secret; corev1.Secret's Data is already decoded.
 type secretStore struct {
 	cs        kubernetes.Interface
 	namespace string
@@ -938,8 +789,7 @@ func (s *secretStore) Set(ctx context.Context, key, value string) error {
 		sec.Data = map[string][]byte{}
 	}
 	sec.Data[key] = []byte(value)
-	// The object was just read, so the update carries its resourceVersion: a
-	// concurrent writer is refused rather than overwritten.
+	// The read carries a resourceVersion, so a concurrent write is refused.
 	_, err = s.cs.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
 	return err
 }
@@ -983,12 +833,8 @@ func (w *wiringRecord) Write(ctx context.Context, data []byte) error {
 	return err
 }
 
-// grantEditor switches an instance on in the seedbox's files.
-//
-// Both keys are grant keys (internal/seedbox/grant.go: apps.*.enabled and
-// apps.*.instances), so this edits the grant and not the user's values file:
-// a grant key in values is refused by the merge, and the grant is what decides
-// which apps exist.
+// grantEditor switches an instance on. Both keys are grant keys, so this edits
+// the grant: a grant key in values is refused by the merge.
 type grantEditor struct {
 	sb      *seedbox.Seedbox
 	catalog []string
@@ -1010,9 +856,7 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 		own, hasOwn := grantInstances(g.sb, app)
 		switch {
 		case !hasOwn:
-			// The grant names no list, so the release renders the chart's
-			// defaults. The list is the grant's as a unit, so the one edit
-			// writes it whole, with this instance on.
+			// No list: write the chart's whole default list with this one on.
 			edits = append(edits, seedbox.Edit{
 				Path:  "apps." + app + ".instances",
 				Value: switchOn(defaults, suffix, app, downloadCategory),
@@ -1023,8 +867,7 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 					Path:  fmt.Sprintf("apps.%s.instances[%d].enabled", app, index),
 					Value: true,
 				})
-				// The category the torrents are in, when it is not the
-				// directory the library is renamed onto.
+				// The torrents' category, when it differs from the library dir.
 				if downloadCategory != "" {
 					edits = append(edits, seedbox.Edit{
 						Path:  fmt.Sprintf("apps.%s.instances[%d].downloadCategory", app, index),
@@ -1032,9 +875,7 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 					})
 				}
 			} else {
-				// An instance the grant's list does not carry: box init adds
-				// one by appending, and the entry has the keys the schema
-				// requires.
+				// A new instance: append an entry with the schema's keys.
 				entry := map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true}
 				if downloadCategory != "" {
 					entry["downloadCategory"] = downloadCategory
@@ -1046,9 +887,8 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 			}
 		}
 	}
-	// One atomic write for both keys: a grant naming an app that is on and an
-	// instance list without its entry is a release with one instance fewer than
-	// the operator asked for.
+	// One atomic write: an enabled app with no instance entry is one fewer than
+	// asked for.
 	editor := g.sb.Grant.Editor()
 	if err := editor.SetAll(edits); err != nil {
 		return err
@@ -1056,9 +896,7 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 	return editor.Save()
 }
 
-// grantInstances is the list the grant itself names for one app, and whether it
-// names one at all: an app the operator never turned on has no instances key,
-// and the chart's default list is what the release then renders.
+// grantInstances is the grant's own list and whether it names one.
 func grantInstances(sb *seedbox.Seedbox, app string) ([]any, bool) {
 	apps, _ := sb.Grant.Map()["apps"].(map[string]any)
 	entry, _ := apps[app].(map[string]any)
@@ -1066,8 +904,7 @@ func grantInstances(sb *seedbox.Seedbox, app string) ([]any, bool) {
 	return list, ok
 }
 
-// instancesOf is the app's effective instances list, and whether it has one at
-// all: only an app that takes instances has the key.
+// instancesOf is an app's effective list, if it takes instances.
 func instancesOf(values map[string]any, app string) ([]any, bool) {
 	apps, _ := values["apps"].(map[string]any)
 	entry, _ := apps[app].(map[string]any)
@@ -1089,8 +926,7 @@ func findInstance(list []any, suffix string) (int, string) {
 	return -1, ""
 }
 
-// switchOn is a list of instances with one suffix switched on, adding the entry
-// when the list does not carry it.
+// switchOn enables one suffix, adding the entry when absent.
 func switchOn(list []any, suffix, app, downloadCategory string) []any {
 	out := make([]any, 0, len(list)+1)
 	found := false
@@ -1102,9 +938,7 @@ func switchOn(list []any, suffix, app, downloadCategory string) []any {
 			entry = cloneEntry(entry)
 			entry["enabled"] = true
 			if downloadCategory != "" {
-				// The category the instance's torrents are already in. It is
-				// not the directory the library is renamed onto, so the two
-				// keys disagree on a migrated box and agree on a fresh one.
+				// The torrents' existing category, not the library directory.
 				entry["downloadCategory"] = downloadCategory
 			}
 		}
@@ -1120,8 +954,7 @@ func switchOn(list []any, suffix, app, downloadCategory string) []any {
 	return out
 }
 
-// cloneEntry is one instance entry as a fresh map, so the edit does not mutate
-// the document it was read from.
+// cloneEntry copies an entry so the edit does not mutate its source.
 func cloneEntry(entry map[string]any) map[string]any {
 	out := make(map[string]any, len(entry)+1)
 	for k, v := range entry {
@@ -1130,11 +963,8 @@ func cloneEntry(entry map[string]any) map[string]any {
 	return out
 }
 
-// categoryFor names the category of an instance the chart's list does not
-// carry. It is one qBittorrent category and one directory under each /data
-// tree, so the suffix is the honest name: the instance is called sonarr-1080
-// and its directory 1080. The primary instance of a list with no primary entry
-// takes the app's name, because a category cannot be empty.
+// categoryFor is the suffix, or the app name for a primary: it is one
+// qBittorrent category and one directory per /data tree, and cannot be empty.
 func categoryFor(app, suffix string) string {
 	if suffix == "" {
 		return app
@@ -1142,8 +972,7 @@ func categoryFor(app, suffix string) string {
 	return suffix
 }
 
-// planNeedsRunner reports whether a plan names the one app whose rewriter needs
-// an image to write its format.
+// planNeedsRunner says a plan names the app whose rewriter needs an image.
 func planNeedsRunner(p *plan.Plan, catalogApps []string) bool {
 	for name := range p.Apps {
 		if apply.NeedsRunner(apply.CatalogApp(name, catalogApps)) {
@@ -1153,16 +982,13 @@ func planNeedsRunner(p *plan.Plan, catalogApps []string) bool {
 	return false
 }
 
-// The grant's two storage keys, as `box init` writes them
-// (internal/seedbox/storage.go): the host path the apps' settings live on, and
-// the tree downloads and media are in.
+// The grant's two storage keys, as `box init` writes them.
 const (
 	volumeData   = "data"
 	volumeConfig = "config"
 )
 
-// wiringConfigMap is `<release>-wiring`: the ConfigMap the chart renders and
-// the wiring Job upserts its record into (charts/s5n/templates/wiring.yaml).
+// wiringConfigMap is the wiring Job's record (wiring.yaml).
 const wiringConfigMap = release.ReleaseName + "-wiring"
 
 // number reads one integer out of the effective values document.
@@ -1213,22 +1039,13 @@ func containsString(list []string, name string) bool {
 	return false
 }
 
-// rehearsalInternet is the public address a rehearsal's second check dials. It
-// only ever adds a refusal (a pod carrying the release's label reached it, so
-// the egress policy is absent); not reaching it is also what a host with no
-// internet looks like, and the in-cluster proof is the one that counts.
+// rehearsalInternet is the public address a rehearsal must not reach. Failing to
+// reach it is not proof: the in-cluster check is the one that counts.
 var rehearsalInternet = lock.Target{Host: "1.1.1.1", Port: 443}
 
-// rehearsalSourceHost refuses a rehearsal on the host that holds the source's
-// data. A locked Arr still writes the library, and adopting a tree that the
-// live source is using is exactly the thing a rehearsal must not do; a
-// rehearsal is for another host or VM.
-//
-// Two answers, either one enough: the plan names this host as its source, or
-// the plan's data root exists here and is not empty. The host name is the
-// source's node name, which on a single-node box is the host's own; the data
-// root is what is actually at stake, and a source on another machine can still
-// have left a tree here.
+// rehearsalSourceHost refuses to rehearse beside the live source: a locked Arr
+// still writes the library. Either the plan names this host, or its data root
+// exists here non-empty -- a source elsewhere can still have left one.
 func rehearsalSourceHost(p *plan.Plan) error {
 	var why []string
 	if host, err := os.Hostname(); err == nil && p.Source != nil && sameHost(p.Source.Host, host) {
@@ -1245,8 +1062,7 @@ func rehearsalSourceHost(p *plan.Plan) error {
 	return fmt.Errorf("this host holds the source's data (%s), and a rehearsal must not run beside the live box: rehearse on another host or VM", strings.Join(why, "; "))
 }
 
-// sameHost compares two host names by their short form: a plan may name a node
-// as a bare name or as a fully-qualified one, and both mean the same machine.
+// sameHost compares short forms: bare and fully-qualified names are one host.
 func sameHost(a, b string) bool {
 	short := func(s string) string {
 		s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
@@ -1258,8 +1074,7 @@ func sameHost(a, b string) bool {
 	return short(a) != "" && short(a) == short(b)
 }
 
-// grantLocked reports whether this host's grant records a rehearsal box. A
-// missing grant is not a lock: a host with no box has no grant yet.
+// grantLocked: a missing grant is not a lock -- a host with no box has none.
 func grantLocked(path string) (bool, error) {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -1275,8 +1090,7 @@ func grantLocked(path string) (bool, error) {
 	return on, nil
 }
 
-// enabledApps is the apps this box's grant switches on, sorted, so a refusal
-// can name them.
+// enabledApps is the grant's enabled apps, sorted.
 func enabledApps(sb *seedbox.Seedbox) []string {
 	apps, _ := sb.Grant.Map()["apps"].(map[string]any)
 	var out []string
@@ -1290,8 +1104,7 @@ func enabledApps(sb *seedbox.Seedbox) []string {
 	return out
 }
 
-// rehearsalGateAddress is the in-cluster address a rehearsal box's gate and
-// proof dial: the cluster DNS Service's metrics port, which the lock denies.
+// rehearsalGateAddress is the DNS metrics port the lock denies.
 func rehearsalGateAddress(ctx context.Context, o *migrateApplyFlags) (lock.Target, error) {
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.install.record})
 	if err != nil {
@@ -1308,10 +1121,8 @@ func rehearsalGateAddress(ctx context.Context, o *migrateApplyFlags) (lock.Targe
 	return lock.DNSTarget(ctx, lock.Cluster{Client: cs})
 }
 
-// migrateProveLock proves the release's egress lock from inside the namespace,
-// after the release rendered it with every app still off and before the
-// adoption switches one on. It uses the s5n image the release already runs, so
-// no new image is pulled and the blessed-image policy admits the pods.
+// migrateProveLock proves the egress lock inside the namespace, using the
+// release's own image so the blessed-image policy admits the pods.
 func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart release.Chart, values map[string]any, namespace string, out say.Reporter) error {
 	image, err := apply.WiringImage(chart.Variants, chart.AppVersion, values)
 	if err != nil {

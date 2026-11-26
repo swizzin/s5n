@@ -62,9 +62,6 @@ func at(hour, minute int) time.Time {
 // fixed is a clock stopped at one moment.
 func fixed(t time.Time) func() time.Time { return func() time.Time { return t } }
 
-// TestTimerOffWritesNothingAndSaysWhere: turning the timer off is an edit in
-// root's file, and the wake that finds it says so without touching the registry,
-// the cluster or update.json.
 func TestTimerOffWritesNothingAndSaysWhere(t *testing.T) {
 	state := &timerState{}
 	body := &timerBody{}
@@ -88,8 +85,6 @@ func TestTimerOffWritesNothingAndSaysWhere(t *testing.T) {
 	}
 }
 
-// TestTimerNotDueReadsHealthOnly: the unit wakes every fifteen minutes and the
-// interval says once an hour, so most wakes read health and nothing else.
 func TestTimerNotDueReadsHealthOnly(t *testing.T) {
 	state := &timerState{state: update.State{LastCheck: at(3, 0)}}
 	body := &timerBody{}
@@ -112,9 +107,6 @@ func TestTimerNotDueReadsHealthOnly(t *testing.T) {
 	}
 }
 
-// TestTimerDueUpdatesThenReadsHealth: the due wake is the update and then the
-// reading, in that order, so the notice about an app is about the release it
-// just moved to.
 func TestTimerDueUpdatesThenReadsHealth(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -149,12 +141,6 @@ func TestTimerDueUpdatesThenReadsHealth(t *testing.T) {
 	}
 }
 
-// TestTimerReadsHealthEvenWhenTheUpdateFails: an update that returns an error
-// is still the wake's answer -- it exits 1 -- but the reading happens first.
-// A registry or release that failed is exactly when an app's readiness is worth
-// someone's attention, and a failed check leaves LastCheck unwritten, so the
-// next wake is due again within minutes: without this read a registry outage
-// would silence every health notice for as long as it lasts.
 func TestTimerReadsHealthEvenWhenTheUpdateFails(t *testing.T) {
 	state := &timerState{}
 	body := &timerBody{updateErr: errors.New("the registry is down")}
@@ -172,8 +158,6 @@ func TestTimerReadsHealthEvenWhenTheUpdateFails(t *testing.T) {
 	}
 }
 
-// TestTimerRefusesAStateItCannotRead: a record box cannot read is not "never
-// checked" -- guessing would re-check a release the last run already failed on.
 func TestTimerRefusesAStateItCannotRead(t *testing.T) {
 	body := &timerBody{}
 	_, err := body.run(t, timerRun{
@@ -190,9 +174,6 @@ func TestTimerRefusesAStateItCannotRead(t *testing.T) {
 	}
 }
 
-// TestTimerIsUnattended: the run nobody is watching answers yes and prints plain
-// lines. It is the flag mapping on its own, because the rest of the run needs a
-// cluster.
 func TestTimerIsUnattended(t *testing.T) {
 	for _, c := range []struct {
 		name              string
@@ -220,9 +201,6 @@ func TestTimerIsUnattended(t *testing.T) {
 	}
 }
 
-// TestUpdateHoldsTheBoxWhenRootsConfigSaysSo: `update.hold-box: true` is the
-// same switch as --hold-box, on every run, so a hand update and the timer's
-// agree about the box's own version.
 func TestUpdateHoldsTheBoxWhenRootsConfigSaysSo(t *testing.T) {
 	conf, _, err := hostconf.Load(writeHostConf(t, "update:\n  hold-box: true\n"))
 	if err != nil {
@@ -254,9 +232,6 @@ func writeHostConf(t *testing.T, data string) string {
 	return path
 }
 
-// TestTimerUnitsNeverSchedulesOnAHostThatCannotRunIt: the two units are only
-// installed by root on a host whose systemd is up, or into a directory a test
-// names. Everything else gets the one line naming cron.
 func TestTimerUnitsNeverSchedulesOnAHostThatCannotRunIt(t *testing.T) {
 	dir := t.TempDir()
 	for _, c := range []struct {
@@ -304,9 +279,6 @@ func TestTimerUnitsNeverSchedulesOnAHostThatCannotRunIt(t *testing.T) {
 	}
 }
 
-// TestScheduleUpdatesWritesTheFilesTheRunUsed: the unit's command carries the
-// record, grant and values this run installed, so the timer updates this seedbox
-// and not one a default path happens to name.
 func TestScheduleUpdatesWritesTheFilesTheRunUsed(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
@@ -344,9 +316,6 @@ func TestScheduleUpdatesWritesTheFilesTheRunUsed(t *testing.T) {
 	}
 }
 
-// TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule is the row that keeps
-// an unschedulable host from being a box nobody updates: the command is the
-// row's, and the reason it could not install a timer is the log's.
 func TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule(t *testing.T) {
 	var buf bytes.Buffer
 	rows := scheduleUpdates(context.Background(), "", "c", "g", "v", &say.Plain{W: &buf})
@@ -364,9 +333,6 @@ func TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule(t *testing.T) {
 	}
 }
 
-// What a name with no DNS record leaves a person is one row naming the records
-// and the command that moves the certificates once they exist; the run that
-// finds none leaves nothing (rule 4: a run with nothing to do says nothing).
 func TestNoDNSFollowUpNamesTheRecordsAndTheCommand(t *testing.T) {
 	hosts := []setup.Host{
 		{Host: "box.example.test", Issuer: setup.IssuerSelfSigned, NoDNS: true},

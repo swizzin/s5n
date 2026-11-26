@@ -8,13 +8,10 @@ import (
 	"github.com/swizzin/s5n/internal/runlog"
 )
 
-// runLog is this command's transcript, opened once as its output is built. It
-// is nil for the commands that print one line and leave (`box version`).
+// runLog is this command's transcript, nil for one-line commands.
 var runLog *runlog.Log
 
-// openRunLog starts the run's log. A log that cannot be written is one muted
-// line and nothing else: the command's work is not the log's, and a box on a
-// host with a read-only /var/log still has to update.
+// openRunLog: a log that cannot be written is one muted line, never a failure.
 func openRunLog(command string) *runlog.Log {
 	lg, err := runlog.Open(commandName(command))
 	if err != nil {
@@ -23,7 +20,7 @@ func openRunLog(command string) *runlog.Log {
 	return lg
 }
 
-// logPath is where this run's transcript is, or "" when there is none.
+// logPath is the transcript's path, or "".
 func logPath(l *runlog.Log) string {
 	if l == nil {
 		return ""
@@ -31,9 +28,7 @@ func logPath(l *runlog.Log) string {
 	return l.Path()
 }
 
-// redact names a value the run log must never carry. Every secret box handles --
-// a generated password, a notice address with its token -- is registered before
-// the line that might print it.
+// redact registers a secret before any line that might print it.
 func redact(secret string) {
 	if runLog == nil || strings.TrimSpace(secret) == "" {
 		return
@@ -41,14 +36,11 @@ func redact(secret string) {
 	runLog.Register(secret)
 }
 
-// boxName is the fallback a log is named when box cannot tell which command
-// this is.
+// boxName is the fallback log name.
 const boxName = "box"
 
-// commandName is the command as the log names it: `box update`, `box migrate
-// discover`, and the command alone for anything box does not know. Only letters,
-// digits, dots, dashes and underscores survive: the name becomes a file name,
-// and a name that walks up the directory is not one box wrote.
+// commandName becomes a file name: only letters, digits, dots, dashes and
+// underscores survive, so a name cannot walk up the directory.
 func commandName(command string) string {
 	var b strings.Builder
 	for _, r := range command {
@@ -66,9 +58,8 @@ func commandName(command string) string {
 // logName is the command this process is running, for the log's file name.
 func logName() string { return logNameFor(os.Args) }
 
-// logNameFor is logName for the arguments it is handed. An update timer's wake
-// logs under its own name (runlog.TimerCommand): the prune keeps only a few of
-// those, so a wake every fifteen minutes never pushes out a run a person started.
+// logNameFor: a timer wake logs as runlog.TimerCommand, so the prune keeps only
+// a few and never pushes out a person's run.
 func logNameFor(args []string) string {
 	if len(args) < 2 {
 		return boxName

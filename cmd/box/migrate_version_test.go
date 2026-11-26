@@ -80,9 +80,6 @@ func untouchedSteps(t *testing.T, versions []apply.AppVersion, reached *string) 
 	}
 }
 
-// TestADowngradeRefusesBeforeAnythingMoves: the run stops on the fact, with both
-// versions on the row, one command that runs it anyway, and nothing else said --
-// and neither the platform nor the pre-install pass is reached to say it.
 func TestADowngradeRefusesBeforeAnythingMoves(t *testing.T) {
 	var out bytes.Buffer
 	reached := ""
@@ -118,10 +115,6 @@ func TestADowngradeRefusesBeforeAnythingMoves(t *testing.T) {
 	}
 }
 
-// TestADowngradeIsFoundFromThePlanAndTheChart: the column the refusal reads is
-// the one the confirm prints, and it is read without a snapshot's configs: one
-// row per planned app, the source's tag against the release's image, `?` for a
-// pair it cannot compare.
 func TestADowngradeIsFoundFromThePlanAndTheChart(t *testing.T) {
 	p := &plan.Plan{Apps: map[string]plan.App{
 		"sonarr": {Image: "ghcr.io/example/sonarr:version-4.0.14.2939"},
@@ -156,9 +149,6 @@ func TestADowngradeIsFoundFromThePlanAndTheChart(t *testing.T) {
 	}
 }
 
-// TestYoloRunsADowngradeWithARowForIt: --yolo is the operator's word, and the
-// screen then carries the downgrade as a row that needs them rather than a
-// refusal.
 func TestYoloRunsADowngradeWithARowForIt(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -182,7 +172,6 @@ func TestYoloRunsADowngradeWithARowForIt(t *testing.T) {
 	}
 }
 
-// TestAnUpgradeIsNotARefusal: the ordinary case, which every real source is.
 func TestAnUpgradeIsNotARefusal(t *testing.T) {
 	versions := downgradeVersions()
 	for i := range versions {
@@ -205,11 +194,6 @@ func TestAnUpgradeIsNotARefusal(t *testing.T) {
 	}
 }
 
-// TestAHostWithABoxRefusesAtTheConfirm: the other half of the same refusal. A
-// host that already has a box reaches the version column inside apply.Run, after
-// its checks and only when there is something to move -- a second run of a
-// finished plan is its own no-op -- so the refusal is the confirm's, on the rows
-// the screen shows.
 func TestAHostWithABoxRefusesAtTheConfirm(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}

@@ -25,8 +25,6 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// TestGrantEditorEnablesAnInstance: the switch-on writes the grant, one atomic
-// edit for both keys, and leaves the comments and the rest of the file alone.
 func TestGrantEditorEnablesAnInstance(t *testing.T) {
 	dir := t.TempDir()
 	grantPath := filepath.Join(dir, "root.yaml")
@@ -109,8 +107,6 @@ apps:
 	}
 }
 
-// TestLoadPlanNamesTheSnapshot: a plan a person edited has to fail with the
-// snapshot and the entry it came from, not with a bare parse error.
 func TestLoadPlanNamesTheSnapshot(t *testing.T) {
 	snapshot := "/var/lib/s5n/migrate/migrate-20261117T090000Z-final.tar.gz"
 	if _, err := loadPlan(&bundle.Opened{Path: snapshot, Plan: []byte("version: 3\napps: {}\n")}); err == nil {
@@ -120,9 +116,6 @@ func TestLoadPlanNamesTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestGrantEditorWritesTheListWhenTheGrantHasNone: a grant written before the
-// instance existed names no list at all, so the one edit writes the list the
-// release would otherwise render, with the migrated instance on.
 func TestGrantEditorWritesTheListWhenTheGrantHasNone(t *testing.T) {
 	dir := t.TempDir()
 	grantPath := filepath.Join(dir, "root.yaml")
@@ -164,9 +157,6 @@ func TestGrantEditorWritesTheListWhenTheGrantHasNone(t *testing.T) {
 	}
 }
 
-// TestSecretStoreKeepsAKey: the release Secret is read and written one key at a
-// time, with the resourceVersion the read carried, and the rest of the Secret
-// is left alone.
 func TestSecretStoreKeepsAKey(t *testing.T) {
 	cs := fake.NewClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "s5n-keys", Namespace: "seedbox"},
@@ -198,8 +188,6 @@ func TestSecretStoreKeepsAKey(t *testing.T) {
 	}
 }
 
-// TestWiringRecordRoundTrips: owned.json is one ConfigMap key, and writing it
-// keeps the wiring.json the chart rendered beside it.
 func TestWiringRecordRoundTrips(t *testing.T) {
 	cs := fake.NewClientset(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "s5n-wiring", Namespace: "seedbox"},
@@ -225,10 +213,6 @@ func TestWiringRecordRoundTrips(t *testing.T) {
 	}
 }
 
-// TestGrantLocked: a rehearsal box's lock is the grant's flag, and a host with
-// no grant at all is not locked. A final snapshot never applies to a locked
-// box, so reading this correctly is what keeps a disposable rehearsal from
-// becoming a live one.
 func TestGrantLocked(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "absent.yaml")
@@ -251,9 +235,6 @@ func TestGrantLocked(t *testing.T) {
 	}
 }
 
-// TestRehearsalSourceHost: a rehearsal must not run on the host that holds the
-// source's data. Both the plan's source host and a non-empty data root say so,
-// and either alone is enough.
 func TestRehearsalSourceHost(t *testing.T) {
 	host, err := os.Hostname()
 	if err != nil {
@@ -291,8 +272,6 @@ func TestRehearsalSourceHost(t *testing.T) {
 	}
 }
 
-// TestEnabledApps: the refusal for a box that already runs something reads the
-// grant, which is what decides existence, and names every app it found.
 func TestEnabledApps(t *testing.T) {
 	dir := t.TempDir()
 	grant := filepath.Join(dir, "grant.yaml")
@@ -309,8 +288,6 @@ func TestEnabledApps(t *testing.T) {
 	}
 }
 
-// TestOpenSnapshotTakesARehearsal: apply runs a rehearsal now, so the mode is
-// no longer a refusal; a survey still is, because it holds nothing to rewrite.
 func TestOpenSnapshotTakesARehearsal(t *testing.T) {
 	dir := t.TempDir()
 	planYAML := []byte(`version: 2
@@ -351,10 +328,6 @@ apps:
 	}
 }
 
-// TestTheSnapshotIsNamedInTheLogAndNotOnTheScreen: which file a run read is the
-// kind of plumbing the log carries (rule 5). On screen it was a header line above
-// a refusal -- a run that stopped on a downgrade opened with "snapshot: ..." and
-// said its fact second, and the command the refusal prints names the file anyway.
 func TestTheSnapshotIsNamedInTheLogAndNotOnTheScreen(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "migrate-20261123T045038Z-final.tar.gz")
@@ -386,11 +359,6 @@ apps:
 	}
 }
 
-// TestGrantEditorKeepsTheMigratedDownloadCategory: a migrated instance's library
-// directory is box's own (tv), and the category its torrents are in is the
-// source's (TV). The switch-on writes both, so the release renders a root folder
-// at /data/media/tv and a qBittorrent category TV whose save path is where the
-// torrents already are.
 func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
 	dir := t.TempDir()
 	grantPath := filepath.Join(dir, "root.yaml")

@@ -8,12 +8,9 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// applySnapshots is `box apply`'s snapshot step: a values pin that moves an
-// app's image moves it over the same forward-only migration a release bump
-// does, and the copy is what `box rollback` restores afterwards.
-//
-// Only apply sets it. An update snapshots each step itself, and a rollback's
-// apply is the move back, so neither may inherit the step.
+// applySnapshots is apply's snapshot step: a pin moves an image over the same
+// migration a bump does. Only apply sets it; update and rollback snapshot their
+// own way.
 func applySnapshots(kubeconfig string) *update.ApplySnapshots {
 	return &update.ApplySnapshots{
 		OpenRelease: func(namespace string) (update.Release, error) {
@@ -23,8 +20,7 @@ func applySnapshots(kubeconfig string) *update.ApplySnapshots {
 			return update.NewWorkloads(kubeconfig, namespace, release.ReleaseName)
 		},
 		OpenSnapshots: func(root string, values map[string]any, chart release.Chart) (update.Snapshotter, error) {
-			// The catalog is the release this apply installs: what an image
-			// upgrade can rewrite is the chart's answer, not this box's.
+			// The installed release's catalog, not this box's.
 			globs, err := update.ChartGlobs(chart)
 			if err != nil {
 				return nil, err

@@ -24,8 +24,6 @@ func writeValues(t *testing.T, content string) string {
 	return path
 }
 
-// box reads the theme out of the values file it already edits, so a person
-// changes how box looks in the same file they tune the seedbox in.
 func TestThemeComesFromTheValuesFile(t *testing.T) {
 	name, err := themeName(writeValues(t, "theme: gruvbox\n"))
 	if err != nil {
@@ -36,8 +34,6 @@ func TestThemeComesFromTheValuesFile(t *testing.T) {
 	}
 }
 
-// A box that has never written a values file draws in the chart's default,
-// which is the empty name theme.Parse resolves to s5n.
 func TestNoValuesFileIsTheDefaultTheme(t *testing.T) {
 	name, err := themeName(writeValues(t, ""))
 	if err != nil {
@@ -48,9 +44,6 @@ func TestNoValuesFileIsTheDefaultTheme(t *testing.T) {
 	}
 }
 
-// A name box does not know is a startup error that lists every name that would
-// have worked: a typo in a theme must not become a whole run in colours nobody
-// chose.
 func TestAnUnknownThemeStopsWithTheList(t *testing.T) {
 	_, err := themeName(writeValues(t, "theme: amber\n"))
 	if err == nil {
@@ -67,8 +60,6 @@ func TestAnUnknownThemeStopsWithTheList(t *testing.T) {
 	}
 }
 
-// The palette the file names is the palette the reporter draws with: the values
-// key reaches the UI, not only the argument list.
 func TestTheValuesThemeReachesTheReporter(t *testing.T) {
 	path := writeValues(t, "theme: gruvbox\n")
 	out := newOutput(tui.Terminal{Stdin: true, Stdout: true, TERM: "xterm-256color"}, true, startupTheme(path))
@@ -86,9 +77,6 @@ func TestTheValuesThemeReachesTheReporter(t *testing.T) {
 	}
 }
 
-// The schema's enum and internal/theme's registry are one list: a name box
-// accepts that the chart does not is a values file box refuses, and the other
-// way round is a name nobody can use.
 func TestTheChartThemeEnumIsTheRegistry(t *testing.T) {
 	raw, err := os.ReadFile("../../charts/s5n/values.schema.json")
 	if err != nil {
@@ -119,8 +107,6 @@ func TestTheChartThemeEnumIsTheRegistry(t *testing.T) {
 	}
 }
 
-// The chart's own default is a name box accepts, and it is what a box with no
-// values file draws with.
 func TestTheChartDefaultThemeIsOneBoxKnows(t *testing.T) {
 	raw, err := os.ReadFile("../../charts/s5n/values.yaml")
 	if err != nil {

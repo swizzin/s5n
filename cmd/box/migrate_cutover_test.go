@@ -156,10 +156,6 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 	}
 }
 
-// TestCutoverCallsOutWhatItCouldNotSettle: the final snapshot is the plan plus
-// the report, so a value the checks could not settle travels with it: the
-// report names it, the plan carries the default, and the run's last screen says
-// the default was taken.
 func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	manifests, root := unsettledSource(t)
 	out := filepath.Join(t.TempDir(), "final.tar.gz")
@@ -211,9 +207,6 @@ func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	}
 }
 
-// TestCutoverRefusesASavedReadForTheStopProof: the proof is the reason cutover
-// exists, so a read with no pods behind it is refused rather than treated as
-// stopped.
 func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -227,14 +220,6 @@ func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 	}
 }
 
-// TestResetRecipeNamesTheSourcesNode: the teardown printed for the operator is
-// the one for the distribution the source's own nodes say installed it, and a
-// cluster box cannot place gets a line that says so. The versions are the shapes
-// k0s and k3s write, not a cluster this test ran against.
-//
-// The k0s recipe removes /etc/k0s/k0s.yaml, which `k0s reset` leaves behind and
-// the next bootstrap refuses over: the reset this screen prints has to end where
-// bootstrap can start.
 func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
 	tests := []struct {
 		name  string

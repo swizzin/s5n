@@ -1,20 +1,11 @@
 package main
 
-// migrate_install.go is `box migrate apply` on a host that has no box: the
-// installer (docs/box.md, "apply is the installer on a host with no box").
-//
-// It is not a second installer. The cluster is bootstrap's own decision and the
-// platform layer is bootstrap's own apply; the seedbox is init's own flow, with
-// the answers the plan already holds (the apps, the data root, the owner) and
-// only the four a plan cannot know asked or taken from flags: the domain, the
-// login, the password and the config path. On a host that already has a record,
-// none of this runs: apply adopts into the box that is there.
-//
-// The apps go in off, and the migration switches them on at its end. That is
-// the order apply's preflight requires -- it adopts into a seedbox whose apps
-// are off -- and it is also the only order that is correct: an app started
-// before its config is moved into place would run on an empty config and never
-// read the migrated one.
+// migrate_install.go is `box migrate apply` on a host with no box: bootstrap's
+// cluster decision, bootstrap's platform apply, and init's own flow with the
+// plan's answers plus the four a plan cannot know (domain, login, password,
+// config path). A host with a record adopts into its existing box instead. Apps
+// go in off: preflight requires it, and an app started before its config moves
+// would never read the migrated one (docs/box.md).
 
 import (
 	"context"
@@ -43,26 +34,18 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// installFlags are the answers a host with no box still has to be given: the
-// four a plan cannot know. Everything else comes from the plan.
+// installFlags are the four answers a plan cannot know.
 type installFlags struct {
 	domain     *string
 	login      *string
 	password   *string
 	configPath *string
 	namespace  *string
-	// record is where this host records its cluster decision, as
-	// `box bootstrap --record` names it. On a host with no box, migrate writes
-	// it here, and it is the file whose presence means "this host has a box".
+	// record is the cluster record whose presence means "this host has a box"..
 	record *string
-	// pathsInNode is the development-only storage switch (--paths-in-node),
-	// taken out of argv before the flags are parsed: the e2e's paths are inside
-	// its node, so init neither reports nor creates them.
+	// pathsInNode is the e2e's switch: its paths are inside the node.
 	pathsInNode bool
-	// unitDir is the timer's development switch (--unit-dir), taken out of argv
-	// the same way `box bootstrap` takes it: the two unit files land in a
-	// directory this run names and no systemctl runs, because the systemd they
-	// are for is not this host's.
+	// unitDir is where the timer units land; no systemctl runs.
 	unitDir string
 }
 
@@ -77,9 +60,8 @@ func addInstallFlags(fs *flag.FlagSet) *installFlags {
 	}
 }
 
-// boxInstalled reports whether this host has a box: a cluster record bootstrap
-// wrote. A record that cannot be read is an error, not "no box": installing over
-// what box cannot see is how a running seedbox gets a second one beside it.
+// boxInstalled: a record that cannot be read is an error, not "no box" --
+// installing over what box cannot see would put a second seedbox beside it.
 func boxInstalled(recordPath string) (bool, error) {
 	rec, err := bootstrap.FilesystemRecords{Path: recordPath}.Load()
 	if err != nil {
@@ -88,16 +70,10 @@ func boxInstalled(recordPath string) (bool, error) {
 	return rec != nil, nil
 }
 
-// installGuided says this run can ask: a terminal to ask on and no --yes. It is
-// the rule init uses to decide whether it asks, and the pre-install pass has to
-// ask it the same way, because the answers the plan cannot hold are init's own
-// questions.
+// installGuided is init's rule: a terminal and no --yes.
 func installGuided(o *migrateApplyFlags) bool { return !*o.yes && isTerminal(os.Stdin) }
 
-// installTarget is the box this run installs, as the question names it: the
-// namespace the flags decide, or the empty string when init will ask for the
-// login that names it. An empty answer is a question about "this box" rather
-// than a guess at a namespace the install has not chosen yet.
+// installTarget is the namespace, or "" when init will ask for the login.
 func installTarget(inst *installFlags) string {
 	if ns := strings.TrimSpace(*inst.namespace); ns != "" {
 		return ns
@@ -108,39 +84,27 @@ func installTarget(inst *installFlags) string {
 	}
 	ns, err := setup.NamespaceFor(login)
 	if err != nil {
-		// A login that cannot name a namespace is init's own refusal, asked
-		// where it belongs; this run's question does not need it.
+		// A bad login is init's refusal; this question does not need it.
 		return ""
 	}
 	return ns
 }
 
-// migrateInstallSteps is the half of `box migrate apply` a host with no box runs
-// before it adopts anything: the pre-install pass that decides what the run
-// would do, and the install that does it once the question is answered. They are
-// fields so a test can watch the order -- the one refusal, then the one question,
-// then the install -- without a host, a cluster or a registry.
+// migrateInstallSteps is a fresh host's pre-install half: decide, refuse, ask,
+// install. The fields let a test watch that order without a host or cluster.
 type migrateInstallSteps struct {
-	// versions is the confirm's version column, from the plan and the chart
-	// alone (planFacts): the one refusal this half makes on its own, and it is
-	// made before the survey, because a release older than the config it would
-	// move is a fact about two image references.
+	// versions is the confirm's column, refused before the survey.
 	versions []apply.AppVersion
-	// survey is the pre-install pass: the migration's summary from the snapshot,
-	// and the platform plan this run would install -- a read-only probe of the
-	// host and the cluster.
+	// survey is the summary and the read-only platform plan.
 	survey func(ctx context.Context) (apply.Summary, *platform.Plan, error)
-	// install is bootstrap, the platform and init: a host with no box becomes
-	// one, with the release's apps off.
+	// install is bootstrap, platform and init, with the apps off.
 	install func(ctx context.Context) error
-	// lead is the confirm's first line: what a yes installs, named only as far
-	// as this host has it to install.
+	// lead is the confirm's first line.
 	lead string
 }
 
-// beforeInstall is the order the whole run exists for: decide, refuse, show, ask
-// -- and only after the answer install anything. It returns the summary the
-// operator agreed to, which the adoption is then held to.
+// beforeInstall decides, refuses, shows and asks before installing; it returns
+// the summary the adoption is held to.
 func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts askOptions, target string, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
 	if err := refuseDowngrades(out, s.versions, opts.AllowDowngrades, screen.Snapshot); err != nil {
 		return nil, err
@@ -162,26 +126,18 @@ func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts 
 	return &summary, nil
 }
 
-// migrationStepsWith builds the pre-install half for one run: the summary from the
-// snapshot's plan and the release's files, and the install from the plan's
-// answers.
+// migrationStepsWith builds the pre-install half for one run.
 func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, charts *chartRelease, chart release.Chart, cat *catalog.Catalog, rehearsal bool, out say.Reporter) (migrateInstallSteps, error) {
-	// The answers a plan cannot hold come first: they are the cheapest refusal
-	// (a flag this run was not given) and nothing else here can run without them.
+	// The plan's missing answers are the cheapest refusal, so they come first.
 	answers, err := installAnswers(o, inst, p, installGuided(o))
 	if err != nil {
 		return migrateInstallSteps{}, err
 	}
-	// The apps the plan will switch on, and the peer port its qBittorrent
-	// announced: both are the box's rather than this run's app list, and both
-	// are read once here, before the install, so the install and the adoption
-	// cannot disagree about them.
+	// Read the apps and peer port once, so install and adoption cannot disagree.
 	switchesOn := sortedKeys(p.Apps)
 	sourcePort := sourceTorrentPort(p, opened)
-	// The plan and the chart against each other, before the host is probed for a
-	// platform: the version column and the refusal a plan this release cannot
-	// honour makes. values are the ones a fresh install would have, which is
-	// what the commit below renders and what the survey stages against.
+	// Plan against chart before probing: the version column and an
+	// unhonourable-plan refusal. values are a fresh install's.
 	values, err := pendingValues(o, chart)
 	if err != nil {
 		return migrateInstallSteps{}, err
@@ -190,10 +146,8 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	if err != nil {
 		return migrateInstallSteps{}, err
 	}
-	// The platform this run would install, decided without installing it: a
-	// cluster box would create, or the one it found, probed read-only. It comes
-	// before the snapshot is staged, so a platform this host cannot have is a
-	// refusal before anything is copied.
+	// Preview the platform read-only, before staging: one this host cannot have
+	// refuses before anything is copied.
 	preview, err := migratePlatform(ctx, o, inst, charts, chart, out)
 	if err != nil {
 		return migrateInstallSteps{}, err
@@ -211,19 +165,14 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	}, nil
 }
 
-// pendingValues is the values a host with no box would install from: the chart's
-// own defaults with the operator's file over them. There is no grant yet -- init
-// writes it -- so nothing else can be in it.
+// pendingValues is the chart's defaults with the operator's file; no grant yet.
 func pendingValues(o *migrateApplyFlags, chart release.Chart) (map[string]any, error) {
 	return seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, *o.valuesPath)
 }
 
-// sourceTorrentPort is the port the source's qBittorrent announced to peers, as
-// the snapshot's copy of its config holds it, or 0 when the plan has none or
-// the snapshot carries no config for it. A migrated box keeps it when this
-// cluster can use it, so trackers and any forward the operator set go on
-// working; the number is read from the snapshot rather than the source's own
-// directory because a snapshot applied on another host has only the copy.
+// sourceTorrentPort is the port the source announced, read from the snapshot
+// (another host has only the copy). Keeping it keeps trackers and forwards
+// working.
 func sourceTorrentPort(p *plan.Plan, opened *bundle.Opened) int {
 	for _, instance := range sortedKeys(p.Apps) {
 		dir, ok := opened.Configs[instance]
@@ -237,16 +186,10 @@ func sourceTorrentPort(p *plan.Plan, opened *bundle.Opened) int {
 	return 0
 }
 
-// migrateInstall takes a host with no box to one with a seedbox whose apps are
-// off, from the plan. It returns when init has installed the release, which is
-// the state the adoption then runs against -- and, last, when the update timer
-// for the files it installed is written, the way bootstrap ends.
-//
-// class is the GatewayClass the pre-install pass chose. It is handed back in, so
-// the second decision does not ask a question the first one already answered: the
-// two runs have to settle on one class, and choosing it twice is how a box's
-// routes move. switchesOn and sourcePort are init's torrent-port decision: the
-// plan's apps and the port their qBittorrent comes from.
+// migrateInstall installs a fresh host's box with the apps off, then the timer.
+// class is the GatewayClass the preview chose: asking twice, or choosing twice,
+// is how a box's routes move. switchesOn and sourcePort carry init's port
+// decision.
 func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, answers []string, switchesOn []string, sourcePort int, class string, out say.Reporter) error {
 	out.Phase("cluster")
 	if _, _, err := hostconf.Load(hostconf.Path(*inst.record)); err != nil {
@@ -272,9 +215,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	if err != nil {
 		return err
 	}
-	// The platform was the first half of the one confirm: it is not asked about
-	// here, and its plan is not printed here either, because the question came
-	// before anything was installed and showed it then.
+	// The platform was the confirm's first half: do not ask or reprint it.
 	out.Phase("platform")
 	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
 		return err
@@ -283,9 +224,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 		return err
 	}
 
-	// init's own flow, over init's own flags: the answers the plan holds are
-	// parsed as if they had been given on the command line, so init's
-	// first-run-or-re-run logic sees them exactly as it sees an operator's.
+	// Parse the plan's answers as init's flags, so its re-run logic sees them.
 	iflg, err := migrationInit(inst, charts, answers, switchesOn, sourcePort)
 	if err != nil {
 		return err
@@ -297,48 +236,30 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	return finish.run(ctx, inst, iflg, out)
 }
 
-// scheduler writes the update timer's two units for the files an install used.
-// It is bootstrap's own scheduleUpdates, and a field only so a test can watch
-// what the install hands it and when.
+// scheduler is bootstrap's scheduleUpdates, a field so a test sees its inputs.
 type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) []say.Row
 
-// installFinish is the last step of a host with no box: init's own flow over the
-// plan's answers, and then -- exactly as bootstrap puts it last -- the timer for
-// the files this run installed.
-//
-// The order is the point twice over. A box whose install never finished is never
-// on a schedule, so a failing adoption schedules nothing; and the timer has to
-// run after init wrote the grant and values, because the units it writes name
-// them.
-//
-// adopt and schedule are fields so a test drives both without a cluster, a host
-// or a systemd.
+// installFinish is init's flow and then the timer. A failed install schedules
+// nothing, and the timer follows init so the units name files that exist.
 type installFinish struct {
-	// adopt is init's flow: the seedbox's questions answered from the plan, its
-	// two files written, and the release installed with the apps off.
+	// adopt is init's flow with the plan's answers.
 	adopt func(context.Context) error
-	// schedule writes the timer's units for the record this run kept and the
-	// grant and values it installed from.
+	// schedule writes the timer's units.
 	schedule scheduler
 }
 
-// run is init's flow and then the timer, for the same three files `box
-// bootstrap` names: the record this host kept, and the grant and values this run
-// installed from. The timer's own failure is a warning the scheduler says, not
-// the install's: the seedbox is installed and serving either way.
+// run is init's flow then the timer; a timer failure is a warning, not the
+// install's.
 func (f installFinish) run(ctx context.Context, inst *installFlags, iflg *initFlags, out say.Reporter) error {
 	if err := f.adopt(ctx); err != nil {
 		return err
 	}
-	// The run's last block: what this install left a person, each with the
-	// command that clears it -- exactly as bootstrap ends.
+	// The run's final block, as bootstrap ends.
 	out.ToFinish(append(iflg.followUps, f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)...))
 	return nil
 }
 
-// migrationDecision is box bootstrap's own decision, built from this run's flags:
-// the same one `box bootstrap` makes, so a migrate install cannot pick a cluster
-// or a platform the other command would not.
+// migrationDecision is bootstrap's own decision, so migrate cannot pick another.
 func migrationDecision(inst *installFlags, charts *chartRelease, out say.Reporter) *bootstrap.Decision {
 	return &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
@@ -352,14 +273,9 @@ func migrationDecision(inst *installFlags, charts *chartRelease, out say.Reporte
 	}
 }
 
-// migratePlatform is the platform plan this run would install, decided without
-// installing anything: bootstrap's own cluster decision in preview mode (it
-// writes no k0s, no cluster record and no firewall change), turned into the plan
-// the migration's one confirm shows first.
-//
-// The class comes back with it because the install settles on it again: asking
-// the operator twice for one decision, or letting the two runs choose different
-// classes, is how a box's routes move.
+// migratePlatform previews the platform without installing: bootstrap's decision
+// in preview mode, turned into the plan the one confirm shows. The class returns
+// so the install does not choose a different one.
 func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, chart release.Chart, out say.Reporter) (platformPreview, error) {
 	d := migrationDecision(inst, charts, out)
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
@@ -385,26 +301,17 @@ func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFla
 	}, nil
 }
 
-// platformPreview is what the read-only decision settles for the run that
-// follows it: the plan it would apply, the class the second decision has to
-// arrive at again, and whether the cluster is this run's to install.
+// platformPreview is the plan, class and whether this run installs the cluster.
 type platformPreview struct {
 	plan  *platform.Plan
 	class string
-	// cluster says box installs k0s on this host: it has no cluster of its own.
+	// cluster says box installs k0s here.
 	cluster bool
 }
 
-// migrateSurvey is the pre-install pass: the migration's summary, from the same
-// plan and the same snapshot a run after the install reads, and from the values
-// the chart and the user's file already hold.
-//
-// It stages into a private directory beside the snapshot and removes it, so
-// nothing of this pass stays on the host: the run's own state directory under the
-// config root is not created until the answer is yes. The directory is beside the
-// snapshot and not in the system's temporary directory, because what it stages is
-// a seedbox's configs -- gigabytes of them on a real source -- and /tmp is a tmpfs
-// on a Fedora or an Arch host.
+// migrateSurvey is the pre-install pass: the same plan, snapshot and values the
+// post-install run reads. It stages into a private directory beside the snapshot
+// and removes it, never /tmp, which is a tmpfs on Fedora and Arch.
 func migrateSurvey(ctx context.Context, p *plan.Plan, opened *bundle.Opened, raw []byte, chart release.Chart, cat *catalog.Catalog, rehearsal bool, values map[string]any) (apply.Summary, error) {
 	dir, done, err := work.New(filepath.Dir(opened.Path))
 	if err != nil {
@@ -418,11 +325,8 @@ func migrateSurvey(ctx context.Context, p *plan.Plan, opened *bundle.Opened, raw
 	return apply.Survey(ctx, p, raw, env)
 }
 
-// surveyEnv is the environment the pre-install pass runs with: the plan, the
-// snapshot's configs, the values the chart and the user's file hold, and none of
-// the cluster. The config root is the caller's private directory, which is why
-// nothing here is owned as the seedbox's user: what this pass stages is measured
-// and thrown away.
+// surveyEnv is the pre-install environment without the cluster; its config root
+// is private, so nothing is owned as the seedbox user.
 func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, chart release.Chart, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
 	var env apply.Env
 	env.ConfigRoot = configRoot
@@ -430,8 +334,7 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, chart 
 		env.DataRoot = p.Data.Root
 	}
 	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
-	// The tree the extraction left in the snapshot: this pass counts it and
-	// stages none of it, and the run after the install writes it once.
+	// Count the tree extraction left; the post-install run stages it once.
 	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
 	env.Image = chartImage(chart, values)
@@ -440,20 +343,14 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, chart 
 		return env, err
 	}
 	env.Targets = targets
-	// Nothing is installed, so nothing is on: every planned instance is one this
-	// run switches on.
+	// Nothing is installed, so every planned instance is switched on later.
 	env.Enabled = func(string) bool { return false }
 	env.Rehearsal = rehearsal
 	return env, nil
 }
 
-// migrationInit is init's flags as a migration runs them: the plan's answers as
-// if they had been typed on the command line, the release this run has already
-// loaded (so bootstrap and init cannot ask the registry for two versions), and
-// the two things that are this flow's and no one else's -- Adopting, and the
-// apps the plan will switch on plus the peer port its qBittorrent announced.
-// The apps go in off and the migration switches on what it moved, so an empty
-// app list here is a box one step from running, and init says nothing about it.
+// migrationInit is init's flags with the plan's answers, the loaded release,
+// Adopting, and the apps and port the migration switches on later.
 func migrationInit(inst *installFlags, charts *chartRelease, answers []string, switchesOn []string, sourcePort int) (*initFlags, error) {
 	fs := flag.NewFlagSet("migrate install", flag.ContinueOnError)
 	iflg := addInitFlags(fs)
@@ -469,17 +366,10 @@ func migrationInit(inst *installFlags, charts *chartRelease, answers []string, s
 	return iflg, nil
 }
 
-// installAnswers is the plan's answers as init's command line, and, on an
-// unattended run, the refusal that names the four a plan cannot know when they
-// were not given.
-//
-// A guided run (a terminal, no --yes) asks only what it lacks: each of the four
-// that was not given is simply left off, and init asks for it with its own
-// question, its own help text and its own validation. Everything the plan does
-// hold -- the data root, the app list, the owner -- is handed over as an answer,
-// so init asks none of those (setup.Options.Adopting). An unattended run has
-// nobody to ask, so a missing one is a refusal naming every one at once rather
-// than one per run.
+// installAnswers is the plan's answers as init's command line; an unattended run
+// missing one of the four refuses naming all at once. A guided run leaves them
+// off and lets init ask with its own validation; the plan's answers mean init
+// asks none of those (setup.Options.Adopting).
 func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan, guided bool) ([]string, error) {
 	var missing []string
 	if strings.TrimSpace(*inst.domain) == "" {
@@ -497,12 +387,9 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan, guid
 	if len(missing) > 0 && !guided {
 		return nil, fmt.Errorf("this host has no box, so migrate installs one: it needs %s, the answers a plan cannot hold", strings.Join(missing, ", "))
 	}
-	// The login decides the seedbox's namespace (s5n-<login>), so a given one is
-	// checked here, before bootstrap installs anything: a name that could never
-	// be a namespace is a refusal, not a seedbox box cannot create. A login this
-	// run has to ask for is checked by init's own question, which is the same
-	// rule.
-	// With --box-namespace given, the login names nothing but the account.
+	// A given login decides the namespace, so check it before bootstrap: a name
+	// that cannot be one refuses here. With --box-namespace it names only the
+	// account.
 	if login := strings.TrimSpace(*inst.login); login != "" {
 		validate := setup.ValidateLogin
 		if strings.TrimSpace(*inst.namespace) != "" {
@@ -515,19 +402,15 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan, guid
 	if p.Data == nil || strings.TrimSpace(p.Data.Root) == "" {
 		return nil, errors.New("the plan names no data root, and a host with no box has no storage to adopt into: `box migrate cutover` writes a plan with one")
 	}
-	// The apps go in off; the migration switches on what it moved.
+	// Apps go in off; the migration switches on what it moved later.
 	answers := []string{
 		"--apps", "none",
-		// The two files are the ones this run already has: init writes them,
-		// and the adoption reads them back, so the install and the adoption
-		// cannot end up on different grants.
+		// The files this run already has: install and adoption share one grant.
 		"--grant", *o.grantPath,
 		"--values", *o.valuesPath,
 		"--data-path", p.Data.Root,
 	}
-	// The four a plan cannot know are passed only when this run has them: one
-	// that is missing is init's own question on a terminal, and the refusal
-	// above on an unattended run.
+	// Pass a missing one only when present: init asks, or the refusal above.
 	for _, given := range []struct {
 		flag  string
 		value string
@@ -541,15 +424,11 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan, guid
 			answers = append(answers, given.flag, v)
 		}
 	}
-	// --box-namespace is passed only when it was given: with none, init derives
-	// the seedbox's namespace from the login, the same way `box init` does.
+	// Pass --box-namespace only when given; init derives it from the login.
 	if ns := strings.TrimSpace(*inst.namespace); ns != "" {
 		answers = append(answers, "--namespace", ns)
 	}
-	// The owner is the plan's when the source recorded one: the copied configs
-	// are owned by the uid that owned them, and so is the data. Otherwise init
-	// settles it the way host foundations does -- the flag, the data path's
-	// owner, $SUDO_UID, the invoking user.
+	// Use the source's owner when recorded; otherwise init settles it.
 	if p.Source != nil && p.Source.Owner != nil {
 		answers = append(answers,
 			"--puid", strconv.Itoa(p.Source.Owner.UID),

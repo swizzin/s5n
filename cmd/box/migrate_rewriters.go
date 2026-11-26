@@ -1,9 +1,8 @@
 package main
 
-// Every app's rewriter registers itself from its package's init, and nothing
-// else in box refers to those packages, so without these imports the binary
-// links none of them: `box migrate apply` would then find no rewriter for any
-// app and refuse every plan. The test beside this file pins the set.
+// Rewriters register from their packages' init and nothing else imports them:
+// without these blank imports no rewriter is linked and every plan is refused.
+// The test beside this file pins the set.
 import (
 	_ "github.com/swizzin/s5n/internal/migrate/arr"
 	_ "github.com/swizzin/s5n/internal/migrate/autobrr"

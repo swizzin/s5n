@@ -1,11 +1,8 @@
-// Command box is the host CLI: swizzin's installer and operator UI.
-//
-// `box bootstrap` decides which cluster to use, installs the platform layer
-// the decision says is missing, and then runs init for root. `box init` asks a
-// seedbox's questions, edits its two files key by key and hands over to `box
-// apply`, whose diff and confirm are the review. `box apply` installs or
-// upgrades one seedbox from those files, using the Helm SDK. There is no `box
-// adduser` yet: init writes root's own seedbox, at the grant path it is given.
+// Command box is the host CLI: bootstrap decides the cluster and installs the
+// platform layer, then runs init; init asks a seedbox's questions, writes its
+// two files and hands over to apply, whose diff and confirm are the review;
+// apply installs or upgrades the seedbox through the Helm SDK. Init writes
+// root's own seedbox: there is no `box adduser` yet.
 package main
 
 import (
@@ -37,16 +34,13 @@ import (
 	"github.com/swizzin/s5n/internal/tui"
 )
 
-// isTerminal is the check a dialog needs. A character device is not enough:
-// /dev/null is one, and a form drawn on it would wait for keys nobody can
-// press.
+// isTerminal is the check a dialog needs: /dev/null is a character device, and
+// a form on it waits for keys nobody can press.
 func isTerminal(f *os.File) bool {
 	return term.IsTerminal(int(f.Fd()))
 }
 
-// terminalWidth is how many columns box draws into. A terminal that cannot
-// report its size gets zero, which the UI reads as the narrowest width init
-// supports: wrapping text to a width nobody measured is always safe.
+// terminalWidth is the drawing width; zero means the narrowest, which is safe.
 func terminalWidth(f *os.File) int {
 	w, _, err := term.GetSize(int(f.Fd()))
 	if err != nil || w <= 0 {
@@ -55,34 +49,24 @@ func terminalWidth(f *os.File) int {
 	return w
 }
 
-// version is the release box was built from: the tag its binaries are
-// published under (cmd/box's release workflow passes -X main.version). A build
-// without it is "dev", which is not a version a chart's box.s5n/min-box can be
-// compared against, so box says it is skipping that check rather than pretending
-// to meet it.
+// version is the release box was built from (-X main.version); "dev" cannot be
+// compared with min-box, so box says it skips that check.
 var version = "dev"
 
-// packaged names the package manager that installed box, when one did: a build a
-// distro ships passes -X main.packaged=<manager>, and the official binaries
-// leave it empty. A packaged box never replaces its own binary -- the package
-// owns the file, and its next upgrade would undo the replacement or leave the
-// package database describing a file that is not there -- so it names the
-// package command instead.
+// packaged names the package manager (-X main.packaged); a packaged box never
+// replaces its own binary, because the manager owns it and would undo that.
 var packaged string
 
 func main() {
-	// One context for the whole process. A signal cancels the step in flight
-	// through the error path that step already has, instead of killing box
-	// between a volume and its claim (which is how a first install ends up
-	// half-written and a re-run refuses).
+	// A signal cancels the step in flight, instead of killing box between a
+	// volume and its claim.
 	ctx, stop := signalContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	defer closeLog()
 	if len(os.Args) < 2 {
 		usage()
 	}
-	// `box --version` and `box -v` are the same question as `box version`: what
-	// a script asks is the version, not a usage screen.
+	// --version and -v mean the same as `box version`, not a usage screen.
 	if versionFlag(os.Args[1]) {
 		fmt.Println(version)
 		return
@@ -118,21 +102,15 @@ func versionFlag(arg string) bool {
 	return false
 }
 
-// closeLog finishes this run's transcript. It runs when a command returns
-// normally; a command that exits on a failure has already written every line it
-// had, because the log is not buffered.
+// closeLog finishes the transcript; a failing command already wrote every line.
 func closeLog() {
 	if runLog != nil {
 		_ = runLog.Close()
 	}
 }
 
-// signalContext cancels its context on the first signal, and stops handling
-// signals once it has. signal.NotifyContext leaves the handler registered
-// after the first signal, so a second one is swallowed by a channel nobody
-// reads -- exactly when the operator presses it again because box looks stuck.
-// Unregistering on cancellation restores Go's default behaviour: the second
-// Ctrl-C terminates the process.
+// signalContext cancels on the first signal and stops handling it, so a second
+// Ctrl-C terminates box, as it should when the first looked stuck.
 func signalContext(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
 	ctx, stop := signal.NotifyContext(parent, signals...)
 	context.AfterFunc(ctx, stop)
@@ -155,17 +133,13 @@ commands:
 	os.Exit(2)
 }
 
-// chartSource is where box reads the chart: a published release. box never
-// loads charts/ from its own tree (docs/box.md, "box only uses published
-// charts"), so even the e2e packages the chart from its commit and pushes it
-// to a registry, and box pulls it the way it pulls any release.
+// chartSource reads a published release; box never loads charts/ from its own
+// tree (docs/box.md, "box only uses published charts").
 func chartSource(r say.Reporter) release.ChartSource {
 	return &release.OCIChart{BoxVersion: version, Say: r}
 }
 
-// terminalSet is this process's own terminal, as tui.Decide reads it. Both the
-// reporter and the prompt are chosen from the same value, so one run cannot end
-// up half live and half plain.
+// terminalSet is read once, so a run cannot be half live and half plain.
 func terminalSet(plain bool) tui.Terminal {
 	return tui.Terminal{
 		Stdin:   isTerminal(os.Stdin),
@@ -176,10 +150,8 @@ func terminalSet(plain bool) tui.Terminal {
 	}
 }
 
-// newOutput picks the renderer for the whole command. The same tui.Decide that
-// chooses the prompt chooses this: a terminal that can carry a form gets the
-// live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
-// transcript. NO_COLOR keeps the live layout without colour.
+// newOutput picks the renderer: a form-capable terminal gets the live reporter;
+// --plain, TERM=dumb or a piped stdout gets the plain transcript.
 func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
 	runLog = openRunLog(logName())
 	plan := tui.Decide(t)
@@ -194,38 +166,25 @@ func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
 		})
 		return r
 	}
-	// Output only: a flow that asks builds its own question through
-	// confirmer, because --yes is that flow's policy (the platform layer
-	// treats "no terminal" as unattended, apply refuses) and this reporter
-	// has one.
+	// A flow that asks builds its own question: --yes is its policy, not this
+	// reporter's.
 	return &say.Plain{W: os.Stdout, Err: os.Stderr, Log: runLog, LogPath: logPath(runLog)}
 }
 
-// live returns the TUI reporter when this command has one. A plain run answers
-// through confirmer instead, and keeps the two unattended rules it had: the
-// platform flow auto-confirms without a terminal, apply refuses.
+// live returns the TUI reporter when the command has one.
 func live(r say.Reporter) (*tui.Reporter, bool) {
 	tr, ok := r.(*tui.Reporter)
 	return tr, ok
 }
 
-// asker is the one question release.Confirmer and platform.Confirmer both ask.
-// def is the answer a bare enter gives, and the flow chooses it per question:
-// the one guided install and init's own "create this path?" are asked with yes,
-// every question about a box that is already serving with no.
+// asker is the one question both confirmers ask; the flow chooses def.
 type asker interface {
 	Ask(question string, def bool) (bool, error)
 }
 
-// confirmer is what a flow asks its one question with: the live reporter, which
-// draws the same form init's questions use, or the plain transcript's line
-// prompt.
-//
-// yes is the caller's unattended policy, not cmd/box's: the platform layer
-// treats "there is no terminal to ask on" as unattended, while apply refuses
-// there, so each flow passes its own answer. The plain prompt gets a reader
-// only from a real terminal -- a character device is not enough, because
-// /dev/null is one and a question asked on it fails with an EOF nobody typed.
+// confirmer asks with the live reporter or the plain line prompt. yes is the
+// flow's unattended policy. The plain prompt gets a reader only from a real
+// terminal: /dev/null is a character device, and an EOF nobody typed would fail.
 func confirmer(out say.Reporter, yes bool) asker {
 	if tr, ok := live(out); ok {
 		tr.SetYes(yes)
@@ -238,33 +197,24 @@ func confirmer(out say.Reporter, yes bool) asker {
 	return p
 }
 
-// answered is the confirm a flow hands an apply it has already asked about: the
-// operator said yes to this run before anything moved, so a second form partway
-// through would be asking after the first step had already written. confirmer
-// cannot be it -- on a terminal it hands back the one live reporter, whose
-// answer is a field the flow's own question sets, so an inner apply would draw
-// the form again.
+// answered is the confirm for an apply a flow already asked about: a second form
+// would come after the first step had written.
 type answered struct{}
 
 func (answered) Ask(string, bool) (bool, error) { return true, nil }
 
-// chartFlags are the two flags that name a published release. Every command
-// that loads a chart takes them from here, so bootstrap, init and apply cannot
-// drift into asking for different releases.
+// chartFlags are the two release flags every chart-loading command shares.
 type chartFlags struct {
 	repo    *string
 	version *string
 }
 
-// --chart-version means two different things, so its help text comes from the
-// command: bootstrap, init and update choose the release to install (or move
-// to), while apply applies the release the box is already on. One flag set
-// serves all of them; a second copy is what would drift.
+// --chart-version means install for bootstrap/init/update and apply for apply,
+// so one flag set serves all of them and a second copy cannot drift.
 const (
 	// chartVersionInstalls is bootstrap's, init's and update's.
 	chartVersionInstalls = "chart release to install (default: the newest released version this box can use)"
-	// chartVersionApplies is apply's: the release is the box's, not the
-	// operator's, to choose (cmd/box/installed.go).
+	// chartVersionApplies is apply's: the release is the box's to choose.
 	chartVersionApplies = "chart release to apply (default: the one installed; the newest this box can use when nothing is installed)"
 )
 
@@ -275,43 +225,30 @@ func addChartFlags(fs *flag.FlagSet, versionUsage string) *chartFlags {
 	}
 }
 
-// ref is the reference the chart source is asked for. It is one function on
-// purpose: a field dropped here is invisible in every other test, which is how
-// the init path once lost --chart-version.
+// ref is the reference the chart source is asked for.
 func (c *chartFlags) ref() release.ChartRef {
 	return release.ChartRef{Repo: *c.repo, Version: *c.version}
 }
 
-// load reads the release the flags name. init reads the chart before it asks
-// anything, and the apply it hands over to installs that same value rather
-// than pulling a second time and risking a different release.
+// load reads the named release; init hands the same value to its apply.
 func (c *chartFlags) load(ctx context.Context, src release.ChartSource) (release.Chart, error) {
 	return src.Load(ctx, c.ref())
 }
 
-// chartRelease is the one chart release a box command works with, pulled at
-// most once.
-//
-// bootstrap reads the platform pins it installs k0s at, the platform half reads
-// the chart versions it installs, init reads the questions from it and apply
-// installs it. All four are the same release by construction: a bootstrap that
-// pulls its own copy and then hands over to an init that pulls the newest again
-// could settle two different versions, and the platform it installed would be
-// one nobody tested against the seedbox.
+// chartRelease is the one release a box command works with, pulled at most
+// once: bootstrap's k0s pin, the platform's chart versions, init's questions and
+// apply's install must all be one version, never two.
 type chartRelease struct {
 	flags *chartFlags
 	out   say.Reporter
-	// source is the registry. Nil means chartSource(out); a test gives the
-	// one source every load of the command must go through.
+	// source is the registry; nil means chartSource(out).
 	source release.ChartSource
 	once   sync.Once
 	chart  release.Chart
 	err    error
 }
 
-// load is the release the flags name, pulled on the first call and remembered
-// after it. The error is remembered too: a registry that refused once is not
-// asked again in the same run.
+// load pulls once and remembers the error too.
 func (c *chartRelease) load(ctx context.Context) (release.Chart, error) {
 	c.once.Do(func() {
 		source := c.source
@@ -323,8 +260,7 @@ func (c *chartRelease) load(ctx context.Context) (release.Chart, error) {
 	return c.chart, c.err
 }
 
-// pins is that release's platform.yaml, the versions everything box installs
-// comes from.
+// pins is that release's platform.yaml.
 func (c *chartRelease) pins(ctx context.Context) (release.Versions, error) {
 	chart, err := c.load(ctx)
 	if err != nil {
@@ -334,30 +270,23 @@ func (c *chartRelease) pins(ctx context.Context) (release.Versions, error) {
 }
 
 func runBootstrap(ctx context.Context, args []string) {
-	// The ACME server override is a development and e2e switch, not operator
-	// surface: flag.PrintDefaults lists every registered flag even with an
-	// empty usage, so the only way to keep it off --help is to take it out of
-	// the arguments before the FlagSet parses them. Its removal (and the
-	// e2e's switch to a test issuer of its own) is a follow-up.
+	// --acme-server is a dev switch: taking it out before parsing is what keeps
+	// it off --help, which lists every registered flag.
 	acmeServer, args, err := takeDevFlag(args, "acme-server")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --unit-dir is the timer's development switch, out of the arguments the same
-	// way: it writes the two unit files into a directory this run names and runs
-	// no systemctl, which is how a test host sees what bootstrap installs.
+	// --unit-dir writes the units and runs no systemctl; a test host sees what
+	// bootstrap would install.
 	unitDir, args, err := takeDevFlag(args, "unit-dir")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --dns-file, --ca-file and --paths-in-node are init's dev switches and come
-	// out the same way: bootstrap runs init in this process, so it accepts them
-	// or the e2e's bootstrap line would be the one place they fail. The DNS
-	// override exists because an e2e cannot write the test host's /etc/hosts,
-	// and moving a name from "no record" to "a public one" between two runs is
-	// exactly what the certificate card has to prove.
+	// init's dev switches come out too: bootstrap runs init in this process, and
+	// the DNS override lets a certificate test move a name from no record to a
+	// public one.
 	dev, args, err := takeInitDevFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -377,10 +306,7 @@ func runBootstrap(ctx context.Context, args []string) {
 	}
 
 	initFlags.takeDev(dev)
-	// init reads root's config beside the record, and on a terminal it asks for
-	// the one answer that file holds (the notice address). The record is
-	// bootstrap's flag, so init is handed it here: without this init looks for
-	// the file at a path of its own and never asks.
+	// Hand init the record path, so root's config beside it is read and asked.
 	initFlags.recordPath = *recordPath
 
 	palette := startupTheme(*initFlags.valuesPath)
@@ -392,20 +318,14 @@ func runBootstrap(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// Root's config is read before the cluster decision, from the same flags:
-	// an unknown key, a malformed line or a bad value stops the run naming the
-	// file, the line and the key, so nothing is probed and nothing is written.
-	// A missing file is the defaults -- bootstrap writes it once the platform is
-	// up. A dry run says it the same way, because this comes before the run
-	// knows which kind it is.
+	// Parse root's config before any probe: a bad key stops the run naming file,
+	// line and key. Missing is the defaults; a dry run reports it too.
 	if _, _, err := hostconf.Load(hostconf.Path(*recordPath)); err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 
-	// One chart release for the whole command: the k0s bootstrap installs, the
-	// platform layer it applies and root's seedbox init installs all come from
-	// it.
+	// One release for k0s, the platform and root's seedbox.
 	charts := &chartRelease{flags: initFlags.chart, out: out}
 	initFlags.charts = charts
 
@@ -414,24 +334,20 @@ func runBootstrap(ctx context.Context, args []string) {
 		records = bootstrap.ReadOnlyRecords{Inner: records}
 	}
 
-	// Choosing between several implementations is a question, and only a
-	// terminal can answer it: --yes, no terminal, or a dry run leaves the
-	// class unset, and the decision then refuses by naming the setting.
+	// Choosing a GatewayClass needs a terminal; --yes or a dry run leaves it and
+	// the decision names the setting.
 	var chooser bootstrap.ClassChooser
 	if !*dryRun && !*yes && isTerminal(os.Stdin) {
 		chooser = classChooser{prompt: newPrompt(term, palette)}
 	}
 
-	// A dry run reaches the same clean-host branch as a real run, and the only
-	// honest installer it can have is one that says what it would do: nothing
-	// is probed or written, so there is no host to change.
+	// A dry run uses an installer that only says what it would do.
 	var install bootstrap.Installer = bootstrap.K0sInstaller{Say: out}
 	if *dryRun {
 		install = bootstrap.DryRunInstaller{Say: out}
 	}
 
-	// The section header comes before the first probe: on a clean host the
-	// installer's own steps are the first thing a person sees.
+	// The header comes before the first probe.
 	out.Phase("cluster")
 
 	d := &bootstrap.Decision{
@@ -462,27 +378,21 @@ func runBootstrap(ctx context.Context, args []string) {
 	case bootstrap.ActionStop:
 		os.Exit(1)
 	case bootstrap.ActionInstall:
-		// A clean host that box has just installed k0s on now has a cluster:
-		// fall through to the same platform apply and init every other path
-		// runs, over the kubeconfig k0s wrote.
+		// A fresh k0s host now has a cluster: fall through to platform and init.
 	}
 	if *dryRun {
 		return
 	}
 
-	// The platform's chart versions are the same release's pins. It is already
-	// loaded on the clean-host path, where bootstrap needed the k0s pin.
+	// The platform's versions are the same release's pins, already loaded.
 	chart, err := charts.load(ctx)
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 
-	// A guided fresh install asks once, for the platform and the seedbox
-	// together (bootstrap_one.go): the platform plan is the review, init asks its
-	// own questions, and the answer installs both halves in that order. The plan
-	// is built read-only, from the same decision that said every component is
-	// one box writes.
+	// A guided fresh install asks once for the platform and seedbox together
+	// (bootstrap_one.go), installing both in that order.
 	one := guidedFresh(*yes, isTerminal(os.Stdin), res.Platform)
 	wroteBoxConf := false
 	if one {
@@ -493,10 +403,8 @@ func runBootstrap(ctx context.Context, args []string) {
 		}
 		out.Phase("platform")
 		platform.PrintPlan(out, plan)
-		// Root's config goes in before init asks: the notice address is the one
-		// answer it holds, and init only asks for it when the file is there. A
-		// run that stops before the answer takes the file back below, so a
-		// cancelled install still leaves the host as it was.
+		// Write root's config before init asks for its notice address; a cancel
+		// takes it back below.
 		if wroteBoxConf, err = hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
 			out.Error(err)
 			os.Exit(1)
@@ -509,8 +417,7 @@ func runBootstrap(ctx context.Context, args []string) {
 			out: out,
 		}
 		initFlags.beforeWrite = oneQ.beforeWrite
-		// The release this init installs was in the plan a person agreed to:
-		// asking again inside the apply would be the second form.
+		// The release was in the agreed plan: the inner apply asks no second time.
 		initFlags.confirmed = true
 	} else {
 		out.Phase("platform")
@@ -521,30 +428,23 @@ func runBootstrap(ctx context.Context, args []string) {
 			out.Error(err)
 			os.Exit(1)
 		}
-		// Root's config is written here, before init, because init asks for the
-		// one answer it holds (the notice address) and every later run reads the
-		// rest. box writes it once: an existing file is root's, and never
-		// rewritten.
+		// Write root's config before init, which asks its notice address; an
+		// existing file is root's and never rewritten.
 		if wroteBoxConf, err = hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
 			out.Error(err)
 			os.Exit(1)
 		}
 	}
 	if wroteBoxConf {
-		// The file is a row and its path is the log's: what a person needs is
-		// that root's settings now have a home (rule 5).
+		// A row for the file, its path in the log (rule 5).
 		out.Rows([]say.Row{{Mark: say.MarkNote, Name: "config", State: "new", Facts: []string{"updates and notices"}}})
 		out.Detail("wrote " + hostconf.Path(*recordPath))
 	}
 
-	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
-	// here in the same process, over the same cluster, with the flags bootstrap
-	// was given -- and stays runnable on its own (`box init`).
+	// init runs here over the same cluster and flags, and stays runnable alone.
 	if err := initFlags.run(ctx, res.Kubeconfig, *yes, *plain, out); err != nil {
-		// A question somebody declined stops the run before init writes
-		// anything, so the one file this flow wrote early -- root's config, so
-		// the notice address could be asked -- goes back: the host is the one
-		// the run found.
+		// A declined question stops before init writes, so take back the early
+		// root's config.
 		if one && errors.Is(err, setup.ErrCancelled) {
 			dropBoxConf(hostconf.Path(*recordPath), wroteBoxConf)
 		}
@@ -555,20 +455,14 @@ func runBootstrap(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// The timer comes last: it runs `box update --timer` for the files this run
-	// just installed, so a seedbox that never finished is never on a schedule.
-	// What it could not do, and any record still missing, are the run's last
-	// block: one label and one row each, with the command that clears it.
+	// The timer comes last, for the files this run installed; its misses and any
+	// missing record are the final block.
 	out.ToFinish(append(initFlags.followUps, scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)...))
 }
 
-// applyPlatform applies the platform layer the decision says install. confirm is
-// the one question, and holdPlan says this package keeps quiet about the plan
-// because the caller showed it in its own confirm -- a migration asks once, for
-// the platform and its apps together, before it installs any of it. The section
-// heading is the caller's too: a flow that shows the plan before its question
-// puts the heading there, and one that lets this package show the plan puts it
-// where the plan is.
+// applyPlatform applies the platform layer. holdPlan means the caller showed the
+// plan in its own confirm -- a migration asks once for platform and apps -- so
+// this package stays quiet and the caller places the heading.
 func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) error {
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
@@ -576,15 +470,11 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		Pins:         pins,
 		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
 		Releases:     platform.NewHelm(kubeconfig),
-		// The LoadBalancer question is settled by the Gateway's own status, so
-		// the probe is built only once the plan asks for it: after the confirm,
-		// once the Gateway exists.
+		// The probe is built only after the confirm, when the Gateway exists.
 		Probe:   func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
 		Confirm: confirm,
 		Say:     out,
-		// The host's packet filter is the one thing in the plan that is not in
-		// the cluster: bootstrap found it, and only a host box installed k0s
-		// on is changed through it.
+		// The packet filter is bootstrap's host finding, not a cluster object.
 		Firewall:       firewall,
 		HostFirewall:   bootstrap.Firewalld{},
 		CallerConfirms: holdPlan,
@@ -593,26 +483,18 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	return err
 }
 
-// dropBoxConf removes root's config when this run wrote it and then stopped
-// before the answer. A guided fresh install writes it before init asks, because
-// the notice address is the one answer that file holds; a "no" or a question
-// somebody cancelled then leaves a host with no box and no file, which is what it
-// found.
+// dropBoxConf removes root's config a cancelled guided install wrote early.
 func dropBoxConf(path string, wrote bool) {
 	if !wrote {
 		return
 	}
-	// A file box cannot remove is the one it should not have written; the run is
-	// already stopping, so this is best effort and says nothing.
+	// Best effort: the run is already stopping.
 	_ = os.Remove(path)
 }
 
-// boxValues is what `box apply` reads from the cluster rather than from either
-// file. The NetworkPolicy peer follows the Gateway implementation in use: box
-// asks the Gateway's own address which Service holds it, and admits that
-// Service's namespace. With Envoy Gateway, the only implementation box
-// supports, that is envoy-gateway-system; asking the cluster keeps it a fact
-// rather than a guess.
+// boxValues reads cluster-derived values. gatewayFrom follows the Gateway's own
+// address to the Service holding it, so the namespace is a fact, never a guess
+// at envoy-gateway-system.
 func boxValues(kubeconfig string) func(context.Context) (map[string]any, error) {
 	return func(ctx context.Context) (map[string]any, error) {
 		peers, err := platform.GatewayFrom(ctx, kubeconfig)
@@ -623,9 +505,7 @@ func boxValues(kubeconfig string) func(context.Context) (map[string]any, error) 
 	}
 }
 
-// classChooser adapts bootstrap's class question onto setup.Prompter, so
-// choosing between Accepted Envoy Gateway classes is the same dialog init asks
-// with. The classes are listed by name with their controller as the help line.
+// classChooser asks bootstrap's class question with init's dialog.
 type classChooser struct {
 	prompt setup.Prompter
 }
@@ -646,18 +526,14 @@ func (c classChooser) ChooseGatewayClass(classes []bootstrap.GatewayClass) (stri
 	})
 }
 
-// newPrompt builds the interactive prompt box uses on a terminal: huh when the
-// terminal can carry a form, the line prompt otherwise. Unattended runs do not
-// call it at all.
+// newPrompt is huh on a form-capable terminal, the line prompt otherwise.
 func newPrompt(t tui.Terminal, palette string) setup.Prompter {
 	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
 		return tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout), Theme: palette})
 	}
 	line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
-	// A secret question is masked on a terminal, and only there: without a
-	// terminal there is nobody to hide it from, and --set-transient is the
-	// unattended form anyway.
+	// Mask only on a terminal; --set-transient is the unattended form.
 	line.Mask = func() (string, error) {
 		b, err := term.ReadPassword(int(os.Stdin.Fd()))
 		return string(b), err
@@ -665,17 +541,13 @@ func newPrompt(t tui.Terminal, palette string) setup.Prompter {
 	return line
 }
 
-// applyFlags are `box apply`'s flags, including the chart reference. They are
-// a value rather than locals in runApply so the mapping from flags to the
-// options the release client receives is testable without a cluster.
+// applyFlags are apply's flags, a value so the mapping is testable.
 type applyFlags struct {
 	chart      *chartFlags
 	grantPath  *string
 	valuesPath *string
 	kubeconfig *string
-	// pathsInNode is the dev switch (--paths-in-node): not a registered
-	// flag, so apply's --help cannot offer it, and set from
-	// takePathsInNode before the FlagSet parses what is left.
+	// pathsInNode is the dev switch, taken out before parsing.
 	pathsInNode bool
 	yes         *bool
 }
@@ -693,9 +565,8 @@ func addApplyFlags(fs *flag.FlagSet) *applyFlags {
 	return o
 }
 
-// options is what this invocation hands the Applier. The chart flags become
-// the ChartRef the chart source is asked for; BoxValues is added by the caller
-// once it has a kubeconfig.
+// options is what this invocation hands the Applier; BoxValues is added by the
+// caller once it has a kubeconfig.
 func (o *applyFlags) options() release.Options {
 	ref := o.chart.ref()
 	return release.Options{
@@ -708,19 +579,14 @@ func (o *applyFlags) options() release.Options {
 }
 
 func runApply(ctx context.Context, args []string) {
-	// --paths-in-node is the e2e's switch, not operator surface: it is taken
-	// out of the arguments before the FlagSet sees them so --help cannot
-	// list it. See takePathsInNode.
+	// --paths-in-node is the e2e's switch, out of --help. See takePathsInNode.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --dns-file is the resolver override for the per-host step: apply
-	// DNS-checks an app host's name against the box's domain before it writes
-	// that host's listener and Certificate, and the e2e's names answer only in
-	// CoreDNS. The anchor takes no DNS answer at all -- it follows the
-	// Certificate the host is served with.
+	// --dns-file overrides the resolver the per-host step checks names with; the
+	// anchor follows the Certificate, not DNS.
 	dnsFile, args, err := takeDevFlag(args, "dns-file")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -749,18 +615,15 @@ func runApply(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// The cluster decision belongs to `box bootstrap`; apply reuses it and
-	// never probes or re-detects a cluster of its own.
+	// The cluster decision is bootstrap's; apply reuses it.
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 
-	// apply keeps the release the box is on, so it has to read which one that
-	// is before it can say what it installs. The grant names the namespace and
-	// the release lives in it; both are reads, and the apply below loads the
-	// two files again itself, which is the one place that refuses them.
+	// Read the installed release before saying what is installed; the apply
+	// below loads the files again and is the one place that refuses them.
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
 		out.Error(err)
@@ -799,23 +662,17 @@ func runApply(ctx context.Context, args []string) {
 	}
 
 	opts.BoxValues = boxValues(kc)
-	// Root's per-host TLS: a values file that enables an app served at a host
-	// of its own gets that host's listener and Certificate before the release
-	// moves, so no apply leaves the app unreachable (docs/box.md,
-	// "No run leaves an app host without its listener").
+	// Per-host TLS writes a listener before the release moves, so no apply
+	// leaves an app host unreachable (docs/box.md).
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
-	// An app an update rolled back stays on the image it ran until a release
-	// pins another: an apply is what renders that hold, and the run that lapses
-	// it says so.
+	// Render the hold that keeps a rolled-back app on its image.
 	holds := newBoxHolds(out)
 	opts.Holds = holds.values
-	// A values pin that moves an app's image is stopped and copied before the
-	// release moves, the way a step's is: the copy is what `box rollback`
-	// restores, and an apply has no automatic rollback of its own.
+	// Copy a pin-moved app before the release, as a step does: `box rollback`
+	// restores it, and apply has no automatic rollback.
 	opts.Snapshots = applySnapshots(kc)
-	// No host-CA step here: the anchor follows the Certificate the box's host
-	// is served with, and this run neither writes that Certificate nor may read
-	// cert-manager's namespace. `box init` is the run that keeps it right.
+	// No host-CA step: this run writes no Certificate and must not read
+	// cert-manager's namespace. init keeps the anchor right.
 	res, err := applyThenSettle(ctx, app.Apply, opts, holds)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
@@ -831,8 +688,7 @@ func runApply(ctx context.Context, args []string) {
 }
 
 func runInit(ctx context.Context, args []string) {
-	// init's dev switches are stripped before the FlagSet parses: they are
-	// e2e-only, and --help must not offer them. See takeInitDevFlags.
+	// init's dev switches are e2e-only and stripped before parsing.
 	dev, args, err := takeInitDevFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -861,9 +717,7 @@ func runInit(ctx context.Context, args []string) {
 	out.ToFinish(initFlags.followUps)
 }
 
-// initFlags are init's questions as flags. `box bootstrap` accepts the same
-// ones and hands them to init for root once the platform is ready, so the two
-// commands cannot drift apart; `box init` on its own parses exactly these.
+// initFlags are init's questions as flags; bootstrap accepts the same ones.
 type initFlags struct {
 	fs         *flag.FlagSet
 	chart      *chartFlags
@@ -879,55 +733,30 @@ type initFlags struct {
 	puid       *int
 	pgid       *int
 	transient  *transientAnswers
-	// dnsFile is the development-only resolver override (--dns-file): a
-	// hosts-style file init resolves through instead of the system resolver.
-	// Empty means the real one.
+	// dnsFile is the dev resolver override; empty is the system resolver.
 	dnsFile string
-	// caFile is the development-only host-CA source (--ca-file): a PEM file
-	// the anchor ConfigMap is written from instead of the box root's Secret.
-	// An ACME-issued certificate has no ca.crt to copy, so an e2e that proves
-	// the anchor with Pebble has to hand box the root it would otherwise read.
-	// Empty means the real source.
+	// caFile is the dev host-CA source: an ACME certificate has no ca.crt, so
+	// the e2e hands box the root it would otherwise read.
 	caFile string
-	// pathsInNode is the development-only storage switch (--paths-in-node):
-	// the paths are inside a test node (kind), not on this host, so init
-	// neither reports nor creates them and the apply it hands over to skips
-	// its directory check. A field rather than a registered flag, so
-	// --help cannot offer it. Set from takeInitDevFlags.
+	// pathsInNode skips the host checks for a kind node's paths.
 	pathsInNode bool
-	// adopting is set by the one flow that runs init as its own step: `box
-	// migrate apply` on a host with no box installs the plan's apps off and
-	// switches them on once their configs are moved, so init must not say
-	// "nothing runs yet" about a box that is one step from running.
+	// adopting is set by migrate apply, so init does not say "nothing runs yet"
+	// about a box one step from running.
 	adopting bool
-	// switchesOn are the apps that flow turns on after this install, by
-	// instance name. init installs them off, so a decision that belongs to the
-	// box rather than to the app list this run writes -- the torrent port -- is
-	// still decided for them.
+	// switchesOn are the apps migrate turns on afterwards, by instance name.
 	switchesOn []string
-	// sourceTorrentPort is the peer port the source install's qBittorrent
-	// announced, when a migration read one from the snapshot. init keeps it
-	// when this cluster can use it; zero means the source named none.
+	// sourceTorrentPort is the port a migration read; zero means none.
 	sourceTorrentPort int
-	// recordPath is where bootstrap recorded the cluster decision. init has no
-	// --record flag of its own (it applies through the default), so each caller
-	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
-	// the default. Root's config is read and written beside it.
+	// recordPath is bootstrap's record; init has no --record flag, so each
+	// caller sets it. Root's config sits beside it.
 	recordPath string
-	// followUps are the rows the run ends with: what it left for a person,
-	// each with the command that clears it. init collects them as it goes, and
-	// the command that ran it prints them as one block after its last step.
+	// followUps are what the run leaves a person, each with its command.
 	followUps []say.Row
-	// charts is the release to install, when the command already has one:
-	// `box bootstrap` loads it for its k0s pin and hands the same value here,
-	// so bootstrap and init cannot ask the registry for two versions.
+	// charts is bootstrap's already-loaded release, so init asks for no second.
 	charts *chartRelease
-	// beforeWrite is the one hook a flow uses to ask about the platform and the
-	// seedbox together (bootstrap_one.go). Nil asks nothing there.
+	// beforeWrite asks about platform and seedbox together; nil asks nothing.
 	beforeWrite func(ctx context.Context, a setup.Answers) error
-	// confirmed says the question about this release was already answered by the
-	// flow that runs init: the release's own confirm is the second form then, so
-	// the apply takes the answer rather than asking.
+	// confirmed means the flow already asked: the apply takes that answer.
 	confirmed bool
 }
 
@@ -953,37 +782,28 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	return o
 }
 
-// takeDev applies the development switches the command already took out of
-// argv. None of them is registered with o.fs: flag.PrintDefaults lists every
-// registered flag even with an empty usage, so --help would otherwise offer
-// switches that only work against a test node.
+// takeDev applies the switches already taken out of argv; none is registered,
+// so --help cannot offer a test-node switch.
 func (o *initFlags) takeDev(d initDevFlags) {
 	o.dnsFile = d.dnsFile
 	o.pathsInNode = d.pathsInNode
 	o.caFile = d.caFile
 }
 
-// run asks a seedbox's questions, writes its two files and hands over to apply.
-// The kubeconfig is the one bootstrap decided on, when bootstrap calls this;
-// `box init` alone passes its flag, and apply resolves the record when it is
-// empty.
+// run asks the questions, writes the files and hands over to apply. The
+// kubeconfig is bootstrap's decision; apply resolves the record when empty.
 func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool, out say.Reporter) error {
 	if *o.valuesPath == "" {
 		return errors.New("no values file: pass --values")
 	}
-	// Where box keeps its own files comes before the chart or the first
-	// question: a host that still has them where box kept them before 0.5 is
-	// refused, not installed over.
+	// Check box's old file locations before the chart or the first question.
 	if err := hostFiles(out, o.recordPath, *o.grantPath); err != nil {
 		return err
 	}
 
-	// The chart is read before anything is asked: its catalog is where the
-	// questions come from, and its values are what every default is prefilled
-	// from, so a registry that cannot be reached or a broken manifest is a
-	// refusal, not a half-finished dialog. The same value is handed to the
-	// apply at the end, so the release init asked about is the release box
-	// installs.
+	// Read the chart before asking: its catalog is the questions and its values
+	// the defaults. The same value goes to the apply, so one release is asked
+	// about and installed.
 	source := chartSource(out)
 	charts := o.charts
 	if charts == nil {
@@ -1001,13 +821,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		out.Chart(chart.Name, chart.Version, chart.Ref)
 	}
 
-	// Which prompt: huh when the terminal can carry a form, the line prompt
-	// otherwise. Unattended asks nothing, but the path report still needs a
-	// renderer: on a terminal it goes through the same TUI as the questions,
-	// so a `--yes` run is not a fancy transcript with one raw block in it.
-	// Falling back rather than using huh's accessible mode is deliberate: that
-	// one returns an empty secret without a terminal, which would silently
-	// install a box with an empty claim token.
+	// huh on a form-capable terminal, the line prompt otherwise. Never huh's
+	// accessible mode: it returns an empty secret without a terminal, which
+	// would install a box with an empty claim token.
 	unattended := yes || !isTerminal(os.Stdin)
 	prompt := newPrompt(terminalSet(plain), startupTheme(*o.valuesPath))
 
@@ -1018,8 +834,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if o.dnsFile != "" {
 		resolver = setup.FileResolver{Path: o.dnsFile}
 	}
-	// applied is the apply init hands over to: its result is where the one
-	// Jellyfin password is, when this run is the one that made it.
+	// applied carries the one Jellyfin password when this run made it.
 	var applied release.Result
 	d := &setup.Decision{
 		Host:     setup.LinuxPathHost{},
@@ -1028,10 +843,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Say:      out,
 		Resolver: resolver,
 		Login:    loginStep(kubeconfig, o.pathsInNode, out, chart),
-		// The web login's default is the account that owns the box's files, so
-		// the name beside "files core (uid 1000, gid 1000)" is "core" unless the
-		// operator says otherwise. This reads the host's account database and
-		// creates nothing.
+		// The login defaults to the account that owns the files; this reads the
+		// account database and creates nothing.
 		UserLookup: osUserName,
 		HasLogin:   hasLogin(o.pathsInNode),
 		GatewayIP:  gatewayProxyIP(kubeconfig),
@@ -1039,9 +852,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		NodePorts:  nodePorts(kubeconfig),
 		Schema:     chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
-			// The cluster decision belongs to `box bootstrap`; apply reuses it.
-			// It is resolved here, after init has written the files, so a host
-			// without a cluster yet still gets its two files written.
+			// Resolve bootstrap's cluster here, after the files are written, so a
+			// host without one still gets them.
 			kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 			if err != nil {
 				return err
@@ -1054,8 +866,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				Open: func(namespace string) (release.ReleaseClient, error) {
 					return release.NewHelm(kc, namespace, release.ReleaseName)
 				},
-				// A re-run of init is a re-run of apply: a box claimed since
-				// the last run has its Plex token written the same way.
+				// A re-run of init is a re-run of apply, Plex token included.
 				OpenSecret: func(namespace string) (release.SecretKeys, error) {
 					return release.NewSecret(kc, namespace)
 				},
@@ -1072,35 +883,23 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
-				// An app an update rolled back stays on the image it ran: a
-				// re-run of init applies the chart too, and without the hold it
-				// would move that app onto the image its rollback avoided.
+				// Without the hold, a re-run would move a rolled-back app onto
+				// the image it avoided.
 				Holds:  holds.values,
 				Anchor: hostCA(kc, out, o.caFile),
-				// The per-host step, inside the apply: init decided every
-				// name, and this writes each one's listener and Certificate
-				// after the confirm and before the release moves. Running it
-				// afterwards is a deadlock the OIDC clients found: Helm's wait
-				// holds the apply open for an app that cannot start until it
-				// can dial the issuer, and the issuer is served on the 443
-				// listener this step has not written yet.
-				//
-				// installs: init installs the login after the confirm
-				// (req.Login, in afterConfirm below), so the plan may read a
-				// cluster that has none yet and still have something to show.
+				// The per-host step runs inside the apply: after the confirm and
+				// before the release, because Helm's wait would otherwise hold an
+				// app that cannot dial an issuer whose 443 listener does not
+				// exist yet. installs: the login comes after the confirm.
 				Hosts: applyHosts{kubeconfig: kc, out: out, resolver: resolver, installs: true},
-				// Every name init decided, not only the ones nothing answers
-				// on: re-issuing a self-signed host under the box root is work
-				// an existing host still has.
+				// Every name init decided: a serving self-signed host still has
+				// work to re-issue.
 				HostsAll: true,
-				// The issuer this run's per-host step writes the box's own
-				// Certificate with: the anchor follows it, and on a first init
-				// there is no Certificate in the cluster to read instead.
+				// The anchor follows this run's issuer; a first init has no
+				// Certificate to read.
 				AnchorIssuer: req.Issuer,
-				// Every name's own decision, so the plan compares each
-				// Certificate that already answers with the issuer this run
-				// will write for it -- not with tls.issuer, which is empty
-				// when DNS decided, and not with a second resolution.
+				// Each name's own issuer, not tls.issuer, which is empty when DNS
+				// decided.
 				HostIssuers: req.HostIssuers,
 			}, holds)
 			return portRangeHint(err)
@@ -1139,23 +938,19 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if res.Domain != "" {
 		out.Banner("seedbox ready", res.Domain)
 	}
-	// The login is the one answer a person has to write down: the account, and
-	// a password only when box made it. It is printed here and nowhere else.
+	// The login is printed here and nowhere else, password only when box made it.
 	if res.Login != "" {
 		out.Line("login: " + res.Login + " at https://" + res.Domain + "/auth/")
 	}
 	if res.GeneratedPassword != "" {
-		// The one secret a run prints is also the one a transcript must never
-		// keep: the line is on screen, and the log says a password was shown.
+		// The line is on screen; the log records that a password was shown.
 		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
-	// The second credential a person has to know, on the one run that made it.
+	// The second credential, only on the run that made it.
 	showJellyfinPassword(out, applied)
-	// What a name with no DNS record leaves a person: the records to add, and
-	// the command that moves the certificates once they exist. It is one row
-	// of the run's to-finish block, so a bootstrap that also could not install
-	// its update timer says both things in one place.
+	// A name with no DNS record leaves the records to add and the command that
+	// moves the certificates, in the run's final block.
 	if row, ok := noDNSFollowUp(res.Hosts); ok {
 		if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
 			out.Detail(warning)
@@ -1165,11 +960,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	return nil
 }
 
-// showJellyfinPassword prints the person's Jellyfin password on the one run
-// that made it: the chart generates the key and keeps it, so apply only has it
-// when this run created it, and a later run has nothing to show. The line is on
-// screen for the person, and the run log keeps the fact instead of the value --
-// the board this is read from is a terminal someone may scroll back through.
+// showJellyfinPassword prints the password only on the run that made it; the log
+// keeps the fact, not the value, because a terminal may be scrolled back.
 func showJellyfinPassword(out say.Reporter, res release.Result) {
 	if res.JellyfinPassword == "" {
 		return
@@ -1178,10 +970,8 @@ func showJellyfinPassword(out say.Reporter, res release.Result) {
 	out.Line("jellyfin password: " + res.JellyfinPassword + "  (shown once; sign in to Jellyfin as " + res.JellyfinLogin + ", and change it there if you like)")
 }
 
-// noDNSFollowUp is the one thing a run whose names have no record leaves a
-// person: which names, and the command that moves them to Let's Encrypt once
-// their records exist. The sentence that says why their certificates are
-// self-signed is the run log's (rule 2).
+// noDNSFollowUp names the hosts without records and the command that moves them
+// to Let's Encrypt; the why is the run log's (rule 2).
 func noDNSFollowUp(hosts []setup.Host) (say.Row, bool) {
 	var names []string
 	for _, h := range hosts {
@@ -1200,13 +990,8 @@ func noDNSFollowUp(hosts []setup.Host) (say.Row, bool) {
 	}, true
 }
 
-// initApplyConfirmer is what init's hand-over asks its release question with.
-// It is init's own question on a box a person installed, and no question at all
-// when another flow runs init as one step: a migration asks once, at its own
-// confirm, which covers the empty release this install writes and the apps it is
-// about to move, and a guided fresh install asks once for the platform and the
-// seedbox together (bootstrap_one.go). A second form there would ask after the
-// first step had already written.
+// initApplyConfirmer is init's own release question; when another flow runs init
+// as one step it already asked once, and a second form would come too late.
 func initApplyConfirmer(alreadyAnswered bool, out say.Reporter, yes bool) asker {
 	if alreadyAnswered {
 		return answered{}
@@ -1214,10 +999,8 @@ func initApplyConfirmer(alreadyAnswered bool, out say.Reporter, yes bool) asker 
 	return confirmer(out, yes)
 }
 
-// afterConfirm is the one hook apply runs after its confirm and before its
-// first write. The login goes first: a release behind a login that is not
-// answering would be served unauthenticated, and a login Envoy Gateway refuses
-// has to stop the run before the apps exist.
+// afterConfirm runs after apply's confirm and before its first write. The login
+// goes first: a release behind a broken login would be served unauthenticated.
 func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any, error) {
 	if req.Login == nil && req.AfterConfirm == nil {
 		return nil
@@ -1235,11 +1018,9 @@ func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any,
 	}
 }
 
-// gatewayProxyIP is the Gateway's proxy address for the grant, read from the
-// cluster by root's run. The kubeconfig is resolved inside the closure because
-// init may be handed none: bootstrap's record answers then, and resolving it
-// here would make `box init` on a host with no cluster fail before its files are
-// written.
+// gatewayProxyIP reads the Gateway's proxy address. The kubeconfig is resolved
+// inside the closure: init may have none, and resolving early would fail before
+// its files are written.
 func gatewayProxyIP(kubeconfig string) func(context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
@@ -1250,9 +1031,8 @@ func gatewayProxyIP(kubeconfig string) func(context.Context) (string, error) {
 	}
 }
 
-// podCIDRs reads the cluster's pod network for the one app that has to trust
-// the Gateway's forwarded address, resolving the cluster the same way the
-// address step does: a refusal at the confirm must not have opened a client.
+// podCIDRs reads the pod network for the app trusting the forwarded address,
+// resolved like the address step so a refusal opens no client.
 func podCIDRs(kubeconfig string) func(context.Context) ([]string, error) {
 	return func(ctx context.Context) ([]string, error) {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
@@ -1263,9 +1043,8 @@ func podCIDRs(kubeconfig string) func(context.Context) ([]string, error) {
 	}
 }
 
-// loginStep installs root's login. It resolves the cluster the same way apply
-// and the certificate step do, and it does so inside the hook: a run that is
-// refused at the confirm never opens a client.
+// loginStep installs root's login, resolving the cluster inside the hook so a
+// refusal opens no client.
 func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter, chart release.Chart) setup.LoginFunc {
 	return func(ctx context.Context, l setup.Login) error {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
@@ -1283,11 +1062,8 @@ func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter, chart rele
 	}
 }
 
-// loginOptions is what installs root's login: the answers init asked for, and
-// the image the chart release pins. The image is the release's, not a constant
-// here, because box writes the login's Deployment itself -- so the pin is the
-// whole reference, tag and digest, and a bump is a chart release rather than a
-// new box.
+// loginOptions is init's answers and the chart's pinned login image: box writes
+// the Deployment, so a bump is a chart release.
 func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Options {
 	return login.Options{
 		Host:        l.Host,
@@ -1304,10 +1080,9 @@ func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Op
 	}
 }
 
-// hasLogin answers whether the users database already holds this account. It
-// is init's first-run-or-re-run question: an empty password keeps an existing
-// row and makes one when there is none. A file inside a test node is not
-// visible from here, which is why the kind e2e always passes --password-file.
+// hasLogin says whether the users database holds the account: an empty password
+// keeps an existing row and makes one when absent. A kind node's file is
+// invisible, so the e2e passes --password-file.
 func hasLogin(pathsInNode bool) setup.HasLoginFunc {
 	return func(name string) bool {
 		if pathsInNode {
@@ -1326,10 +1101,8 @@ func hasLogin(pathsInNode bool) setup.HasLoginFunc {
 	}
 }
 
-// osUserName names the OS account behind a uid, by reading the host's own
-// account database. init asks for it once the file owner is settled, to offer
-// the account the files belong to as the login's default; box never creates an
-// account, and a uid with no account is not a name.
+// osUserName names the account behind a uid for the login default; box creates
+// no account, and a uid without one has no name.
 func osUserName(uid int) (string, bool) {
 	u, err := user.LookupId(strconv.Itoa(uid))
 	if err != nil || strings.TrimSpace(u.Username) == "" {
@@ -1338,10 +1111,8 @@ func osUserName(uid int) (string, bool) {
 	return u.Username, true
 }
 
-// defaultLogin is what init offers when no --login was given and the file owner
-// has no account of its own: the account of the person who ran sudo, because
-// that is whose box this is. A root shell has no such answer and init asks (or
-// refuses, unattended).
+// defaultLogin is the sudo or invoking user; a root shell has no answer, so init
+// asks or refuses.
 func defaultLogin() string {
 	if user := strings.TrimSpace(os.Getenv("SUDO_USER")); user != "" && user != "root" {
 		return user
@@ -1352,10 +1123,8 @@ func defaultLogin() string {
 	return ""
 }
 
-// takeDevFlag removes one development-only flag from args before a FlagSet
-// parses them, in either --name=value or --name value form. It is how a
-// switch that is not operator surface stays off --help: registering it would
-// list it there even with an empty usage.
+// takeDevFlag removes one dev flag (either form) before parsing, so it stays
+// off --help.
 func takeDevFlag(args []string, name string) (value string, rest []string, err error) {
 	rest = make([]string, 0, len(args))
 	found := false
@@ -1382,20 +1151,12 @@ func takeDevFlag(args []string, name string) (value string, rest []string, err e
 	return value, rest, nil
 }
 
-// pathsInNodeFlag is the storage switch the kind e2e passes to all three
-// commands: its paths are inside the node, so box skips the checks this host
-// cannot answer.
+// pathsInNodeFlag is the kind e2e's switch: paths inside the node, unchecked.
 const pathsInNodeFlag = "paths-in-node"
 
-// takePathsInNode is takeDevFlag's boolean sibling and the only switch of that
-// shape: a boolean carries its own answer, so the spelling alone means true and
-// there is no value to be missing. Every form a FlagSet would parse is taken
-// out of the arguments -- one dash or two, with `=true`/`=false` or without --
-// because the e2e writes it bare and a caller that spells it any other way must
-// not get "flag provided but not defined" for a switch box accepts. The last one
-// wins, as it does for a registered flag. Taking it out also removes the reason
-// Go's parser stops reading: a stray positional cannot swallow the dev switch
-// that follows it, and box takes no positionals to want it.
+// takePathsInNode accepts every boolean spelling (one dash or two, with or
+// without =true/false), last wins, so the e2e's bare switch cannot fail as
+// undefined and a stray positional cannot swallow it.
 func takePathsInNode(args []string) (set bool, rest []string, err error) {
 	rest = make([]string, 0, len(args))
 	for _, arg := range args {
@@ -1416,13 +1177,9 @@ func takePathsInNode(args []string) (set bool, rest []string, err error) {
 	return set, rest, nil
 }
 
-// initDevFlags are init's development switches as the command line asked for
-// them: --dns-file's value, --ca-file's value and --paths-in-node's presence.
-// They are fields on initFlags, never registered with its FlagSet, because
-// flag.PrintDefaults lists every registered flag even with an empty usage and
-// the usage an operator reads must not offer a switch that only works against a
-// test node. bootstrap takes these three plus --acme-server; apply takes
-// --dns-file and --paths-in-node, because its per-host step resolves names too.
+// initDevFlags are init's dev switches, never registered so --help cannot offer
+// a test-node switch. bootstrap takes these plus --acme-server; apply takes
+// --dns-file and --paths-in-node.
 type initDevFlags struct {
 	dnsFile     string
 	pathsInNode bool
@@ -1444,8 +1201,7 @@ func takeInitDevFlags(args []string) (initDevFlags, []string, error) {
 	return d, args, nil
 }
 
-// transientAnswers is a repeatable --set-transient key=value, the unattended
-// form of a question that has no file to live in.
+// transientAnswers is a repeatable --set-transient key=value.
 type transientAnswers map[string]string
 
 func (t transientAnswers) String() string {
@@ -1468,11 +1224,8 @@ func (t transientAnswers) Set(v string) error {
 	return nil
 }
 
-// defaultPUID and defaultPGID are what init offers when the flag was not given.
-// sudo keeps the invoking user's ids in the environment, which is what a
-// seedbox's files should belong to; root's own ids are never a good answer (the
-// apps run unprivileged), so a root shell falls back to 1000, the first ordinary
-// uid in the images.
+// defaultPUID and defaultPGID use sudo's invoking ids; root's are never good
+// (the apps run unprivileged), so a root shell falls back to 1000.
 func defaultPUID() int { return defaultID("SUDO_UID", os.Geteuid) }
 
 func defaultPGID() int { return defaultID("SUDO_GID", os.Getegid) }

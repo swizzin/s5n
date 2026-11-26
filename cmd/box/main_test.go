@@ -42,14 +42,6 @@ users:
     user: {}
 `
 
-// TestTheUpdatesHelmWaitOutlastsTheStartupBudget: a migration may run for the
-// chart's whole thirty-minute startup budget, and Helm's own fifteen-minute
-// default would fail the apply in the middle of it. Update's Helm gets the health
-// gate's budget; `box apply` keeps Helm's default.
-//
-// It also waits for hooks only. Helm's resource wait reads a crashlooping pod as
-// failed and stops waiting on it, so the StatefulSet holds it for the whole
-// budget: the step would never reach the gate that rolls the app back.
 func TestTheUpdatesHelmWaitOutlastsTheStartupBudget(t *testing.T) {
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 	if err := os.WriteFile(kubeconfig, []byte(testKubeconfig), 0o600); err != nil {
@@ -97,9 +89,6 @@ func parse(t *testing.T, name string, add func(*flag.FlagSet), args ...string) {
 	}
 }
 
-// TestBootstrapAndInitPassTheirChartFlagsToTheSource: bootstrap hands its flags
-// to init in the same process, so both commands must ask for the release the
-// operator named. A field dropped here is invisible until an e2e fails.
 func TestBootstrapAndInitPassTheirChartFlagsToTheSource(t *testing.T) {
 	for _, name := range []string{"bootstrap", "init"} {
 		t.Run(name, func(t *testing.T) {
@@ -119,9 +108,6 @@ func TestBootstrapAndInitPassTheirChartFlagsToTheSource(t *testing.T) {
 	}
 }
 
-// TestApplyPassesItsChartFlagsToTheOptions: apply loads its chart inside the
-// Applier, and release.Options.ChartRef is the one mapping that reaches the
-// source (pinned from the other side in the release package).
 func TestApplyPassesItsChartFlagsToTheOptions(t *testing.T) {
 	var flags *applyFlags
 	parse(t, "apply", func(fs *flag.FlagSet) { flags = addApplyFlags(fs) },
@@ -133,11 +119,6 @@ func TestApplyPassesItsChartFlagsToTheOptions(t *testing.T) {
 	}
 }
 
-// TestApplyAndRollbackInstallWithTheChartsHooks: moving a release without its
-// hooks is the update step's own order -- its gate reads the moved apps before
-// the chart's wiring Job can pass -- and it belongs to that step alone. `box
-// apply` and `box rollback` install the release with the hooks, because nothing
-// else gates them and the wiring is what makes the release work.
 func TestApplyAndRollbackInstallWithTheChartsHooks(t *testing.T) {
 	var apply *applyFlags
 	parse(t, "apply", func(fs *flag.FlagSet) { apply = addApplyFlags(fs) })
@@ -152,12 +133,6 @@ func TestApplyAndRollbackInstallWithTheChartsHooks(t *testing.T) {
 	}
 }
 
-// TestAStepsApplyIsTheOptionsUpdateRuns: every step applies the options built
-// for it -- apply's own plus the claim names, the host work and the hold -- and
-// the run keeps the plan's --check. Handing the Updater apply's bare options
-// instead installs a release the box is not: the chart's default claims, a host
-// with no listener, and the image the rollback avoided, because the hold is what
-// renders the image the app was put back on.
 func TestAStepsApplyIsTheOptionsUpdateRuns(t *testing.T) {
 	var flags *updateFlags
 	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) }, "--check")
@@ -178,9 +153,6 @@ func TestAStepsApplyIsTheOptionsUpdateRuns(t *testing.T) {
 	}
 }
 
-// TestUpdatePassesItsFlagsToTheOptions: update runs apply for every step, so
-// losing a chart, grant or values flag here would install a different release
-// from the one the plan named, or apply somebody else's file.
 func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
 	var flags *updateFlags
 	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) },
@@ -199,11 +171,6 @@ func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
 	}
 }
 
-// TestUpdateKeepsItsRecordBesideTheClusterRecord: update writes update.json into
-// the directory the cluster decision was recorded in, so --record moves both
-// files together. Without it, a box whose record is not at bootstrap's default
-// path (any box driven from somewhere other than /etc/s5n) plans the whole
-// update and then fails writing its own bookkeeping, before the first step.
 func TestUpdateKeepsItsRecordBesideTheClusterRecord(t *testing.T) {
 	var defaults *updateFlags
 	parse(t, "update", func(fs *flag.FlagSet) { defaults = addUpdateFlags(fs) })
@@ -219,9 +186,6 @@ func TestUpdateKeepsItsRecordBesideTheClusterRecord(t *testing.T) {
 	}
 }
 
-// TestChartFlagsDefaultToTheNewestRelease: with neither flag, the reference is
-// the default repository and no version, which is what makes box pick the
-// newest release it can install. The e2e's bootstrap runs this path.
 func TestChartFlagsDefaultToTheNewestRelease(t *testing.T) {
 	var initF *initFlags
 	parse(t, "init", func(fs *flag.FlagSet) { initF = addInitFlags(fs) })
@@ -236,9 +200,6 @@ func TestChartFlagsDefaultToTheNewestRelease(t *testing.T) {
 	}
 }
 
-// TestTakeDevFlag: a development switch is taken out of the arguments before
-// the FlagSet sees them, in both forms, and never reaches --help. A missing
-// value is a refusal rather than an empty override.
 func TestTakeDevFlag(t *testing.T) {
 	cases := []struct {
 		name string
@@ -270,11 +231,6 @@ func TestTakeDevFlag(t *testing.T) {
 	}
 }
 
-// TestDevFlagsAreNotInAnyHelp: the dev switches are e2e-only, so no command's
-// usage may offer them. What could register them are the shared flag sets:
-// bootstrap and init both take addInitFlags, apply takes addApplyFlags, and a
-// registered flag shows in flag.PrintDefaults even with an empty usage. This
-// is the registration the e2e's `--paths-in-node` had in both places.
 func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
 	commands := []struct {
 		name string
@@ -304,11 +260,6 @@ func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
 	}
 }
 
-// TestTakePathsInNode: --paths-in-node carries its own answer, so its spelling is
-// the whole flag. Every form hack/e2e-box.sh writes and every form a FlagSet
-// would have parsed is taken out of the arguments, the rest is left exactly as
-// it was, and a value that is not a boolean is a refusal rather than a silent
-// false -- a mistyped switch must not turn into a skipped path check.
 func TestTakePathsInNode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -344,12 +295,6 @@ func TestTakePathsInNode(t *testing.T) {
 	}
 }
 
-// TestPathsInNodeReachesTheDecisions: the e2e passes the switch on bootstrap,
-// init and apply, and hack/ cannot change, so each spelling it writes has to
-// arrive where the skip happens -- init's login decision and storage creation,
-// and apply's directory check. The two flag sets are built here the way the
-// commands build them, so a registered flag re-entering one of them, or a
-// stripped switch no longer being applied, fails this test rather than an e2e.
 func TestPathsInNodeReachesTheDecisions(t *testing.T) {
 	spellings := [][]string{
 		{"--paths-in-node"},
@@ -412,11 +357,6 @@ func withStdin(t *testing.T, f *os.File) {
 	t.Cleanup(func() { os.Stdin = old })
 }
 
-// `box apply < /dev/null` runs with a stdin that is a character device but not a
-// terminal. The old check treated the device as enough, so it printed the
-// prompt and failed with "read the answer: EOF" instead of the documented
-// refusal. The confirmer reads the terminal, so a redirection cannot answer a
-// question nobody was asked.
 func TestConfirmerRefusesAStdinThatIsNotATerminal(t *testing.T) {
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -448,10 +388,6 @@ func TestConfirmerRefusesAStdinThatIsNotATerminal(t *testing.T) {
 	}
 }
 
-// The platform layer's unattended rule is the opposite one and stays: with no
-// terminal to ask on it does not refuse, because the caller passed yes for it.
-// apply is the command that refuses, which is the policy difference the two
-// call sites of confirmer keep.
 func TestConfirmerAutoConfirmsWhenTheCallerSaysYes(t *testing.T) {
 	withStdin(t, mustOpen(t, os.DevNull))
 	confirm := confirmer(&say.Plain{W: io.Discard}, true)
@@ -474,10 +410,6 @@ func mustOpen(t *testing.T, path string) *os.File {
 	return f
 }
 
-// The login's image is the chart release's pin. box writes the Deployment
-// itself, so this mapping is the only place the reference is chosen: a chart
-// release that moves the login moves it here, and a constant in this file would
-// fail this test.
 func TestLoginImageComesFromTheChartRelease(t *testing.T) {
 	image := "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("e", 64)
 	chart := release.Chart{Name: "s5n", Version: testChartVersion, Pins: release.Versions{Authelia: image}}
@@ -506,10 +438,6 @@ func TestLoginImageComesFromTheChartRelease(t *testing.T) {
 	}
 }
 
-// One command pulls one release. bootstrap reads the k0s pin, the platform half
-// reads the chart versions and init installs the seedbox from the same value, so
-// the registry must be asked once: a second pull could settle on a newer
-// release than the platform that was just installed.
 func TestOneCommandPullsOneRelease(t *testing.T) {
 	var f *initFlags
 	parse(t, "bootstrap", func(fs *flag.FlagSet) { f = addInitFlags(fs) },
@@ -529,10 +457,6 @@ func TestOneCommandPullsOneRelease(t *testing.T) {
 	}
 }
 
-// TestOnlyApplySetsTheSnapshotStep: an apply copies the apps its values pins
-// move, but an update snapshots each step itself and a rollback's apply is the
-// move back. Either one inheriting the step would stop and copy an app twice, or
-// copy it back over the state the rollback is restoring.
 func TestOnlyApplySetsTheSnapshotStep(t *testing.T) {
 	var applyF *applyFlags
 	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) })
@@ -560,10 +484,6 @@ func TestOnlyApplySetsTheSnapshotStep(t *testing.T) {
 	}
 }
 
-// TestEveryVersionSpellingPrintsTheVersion: `box --version` and `box -v` are
-// what a script asks, and they print what `box version` prints. Before this the
-// two flags fell through to the usage screen and exited 2, so the answer to
-// "which box is this" was an error.
 func TestEveryVersionSpellingPrintsTheVersion(t *testing.T) {
 	for _, arg := range []string{"version", "--version", "-v"} {
 		if !versionFlag(arg) {

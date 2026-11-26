@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// The one error an operator can act on: the API server refused the port box
-// picked because its range is not the default, and the raw message names no
-// setting at all.
 func TestPortRangeHintNamesTheFlag(t *testing.T) {
 	raw := errors.New(`release s5n failed: Service "qbittorrent-peers" is invalid: ` +
 		`spec.ports[0].nodePort: Invalid value: 30042: provided port is not in the valid range. ` +
@@ -33,8 +30,6 @@ func TestPortRangeHintNamesTheFlag(t *testing.T) {
 	}
 }
 
-// Everything else comes back exactly as it was: this is a translation for one
-// message, not a wrapper that rewrites apply's failures.
 func TestPortRangeHintLeavesOtherErrorsAlone(t *testing.T) {
 	raw := errors.New("release s5n failed: context deadline exceeded")
 	if got := portRangeHint(raw); got != raw {
@@ -45,8 +40,6 @@ func TestPortRangeHintLeavesOtherErrorsAlone(t *testing.T) {
 	}
 }
 
-// Applying the hint twice is not two hints: the sentence box adds already names
-// the flag, so a caller that wraps an already-wrapped error changes nothing.
 func TestPortRangeHintIsNotDoubled(t *testing.T) {
 	raw := errors.New("provided port is not in the valid range. The range of valid ports is 30000-32767")
 	once := portRangeHint(raw)

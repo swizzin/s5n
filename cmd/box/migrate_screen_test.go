@@ -34,10 +34,6 @@ func screenReporter(t *testing.T) (say.Reporter, func() string) {
 	return &say.Plain{W: buf, Err: buf}, buf.String
 }
 
-// TestTheDiscoverScreenIsCountsAndTheReport: a read writes the report and says
-// only how much it read, what it decided, and where the file is. Every list that
-// used to be on this screen -- the apps, the addresses, the called-out decisions,
-// the notes -- is in the report, which is the same text the snapshot carries.
 func TestTheDiscoverScreenIsCountsAndTheReport(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()
@@ -88,10 +84,6 @@ func TestTheDiscoverScreenIsCountsAndTheReport(t *testing.T) {
 	}
 }
 
-// TestTheCutoverStopListIsOneCommand: a source that still runs is refused with
-// one line of state and one command that stops everything of a kind, written for
-// the cluster box found, and nothing trailing it. The read is kept first, so
-// running what it prints is always safe.
 func TestTheCutoverStopListIsOneCommand(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()
@@ -129,9 +121,6 @@ func TestTheCutoverStopListIsOneCommand(t *testing.T) {
 	}
 }
 
-// TestACutoverStopCommandWrapsLikeAShell: a source with enough apps to overflow
-// the column gets a command a person can copy: continued with a trailing
-// backslash, never broken inside a name, and every line inside 80 columns.
 func TestACutoverStopCommandWrapsLikeAShell(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)

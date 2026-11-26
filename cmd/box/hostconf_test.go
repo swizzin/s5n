@@ -16,17 +16,6 @@ import (
 // process on a config it cannot parse, which would take the test binary with it.
 const bootstrapStrictChildEnv = "BOX_BOOTSTRAP_CONF_CHILD"
 
-// TestBootstrapRefusesAFilesTypoBeforeTheCluster: every run that reads root's
-// config parses it strictly, and a line box cannot parse stops bootstrap before
-// the cluster decision -- naming the file, the line and the key -- so nothing is
-// probed, nothing is written, and a typo cannot leave a box that quietly
-// stopped updating. --dry-run reports it the same way, because the read happens
-// before the run knows which kind it is.
-//
-// The child is the command itself: the assertion is an exit code and a
-// transcript, and the discriminator is that "decision:" -- the first line every
-// bootstrap that got that far prints, whatever it decides on that host -- is
-// absent.
 func TestBootstrapRefusesAFilesTypoBeforeTheCluster(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("box runs on Linux hosts")
@@ -51,8 +40,6 @@ func TestBootstrapRefusesAFilesTypoBeforeTheCluster(t *testing.T) {
 	}
 }
 
-// TestBootstrapStrictChild is the body of
-// TestBootstrapRefusesAFilesTypoBeforeTheCluster's child process.
 func TestBootstrapStrictChild(t *testing.T) {
 	if os.Getenv(bootstrapStrictChildEnv) == "" {
 		t.Skip("child process, run by TestBootstrapRefusesAFilesTypoBeforeTheCluster")

@@ -33,9 +33,6 @@ func holdFor(app string) snapshot.Hold {
 	}
 }
 
-// TestALapsedHoldIsForgottenOnlyAfterASuccessfulApply: the file is box's only
-// record of an app held back. A run whose apply failed must leave it alone, or
-// the next apply moves the app onto the image the rollback avoided.
 func TestALapsedHoldIsForgottenOnlyAfterASuccessfulApply(t *testing.T) {
 	root := t.TempDir()
 	lapsed := holdFor("sonarr")
@@ -84,9 +81,6 @@ func TestALapsedHoldIsForgottenOnlyAfterASuccessfulApply(t *testing.T) {
 	}
 }
 
-// TestBoxHoldsReadsTheFileBesideTheGrant: the config root is the grant's, so the
-// holds file is found from the seedbox apply loaded rather than from a flag or a
-// default.
 func TestBoxHoldsReadsTheFileBesideTheGrant(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config")

@@ -1,14 +1,8 @@
 package main
 
-// migrate_report.go builds the migration report: the page a person reads in full
-// (docs/output.md, rule 7), and the short digest the screen keeps of it.
-//
-// The report is written twice from the same bytes: as the snapshot's report.txt
-// entry, which travels with the one file an operator carries between hosts and is
-// what a later run reads out of the archive, and as a file beside the snapshot,
-// which is what the operator opens with `less` without extracting anything. One
-// builder, so the two can never disagree; the entry is why the report survives
-// the host, the file beside it is why it is readable where it was taken.
+// migrate_report.go builds the migration report (docs/output.md, rule 7) and the
+// screen's digest. The same bytes are the snapshot's report.txt and the file
+// beside it, from one builder, so they cannot disagree.
 
 import (
 	"fmt"
@@ -25,20 +19,14 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// The two words a report and the settle screen both say: a row's name for where
-// the data root is, and the decision that leaves a stored value alone.
+// Two words shared with the settle screen.
 const (
 	rowRoot    = "root"
 	leftAsItIs = "left as it is"
 )
 
-// readReport is the report of one read of a source: what the plan holds, every
-// address and path it settles, what box decided and nobody answered, its notes,
-// and what is not coming.
-//
-// failure is the error the read stopped on, when it stopped: a report that is
-// not going to be written still says why, and still says what was read before
-// it.
+// readReport is one read's page. failure is why a read stopped; a report never
+// written still says why and what was read.
 func readReport(read migrationRead, mode archive.Mode, snapshot string, taken time.Time, box string, failure error) report.Doc {
 	d := report.Doc{
 		Kind:     string(mode),
@@ -73,8 +61,7 @@ func readReport(read migrationRead, mode archive.Mode, snapshot string, taken ti
 	return d
 }
 
-// readCounts is the summary at the top: the numbers a person takes in before
-// deciding whether to read the rest.
+// readCounts is the summary numbers.
 func readCounts(p *plan.Plan, read migrationRead) []report.Count {
 	rewritten, left := 0, 0
 	for _, r := range p.Hosts {
@@ -104,9 +91,7 @@ func readCounts(p *plan.Plan, read migrationRead) []report.Count {
 	}
 }
 
-// appReportRows is one row per planned app: what it was called, where its config
-// is, the library directory it is laid out in, and how much of its config
-// travels.
+// appReportRows is one row per app: name, config, library and carry.
 func appReportRows(p *plan.Plan) []report.Row {
 	rows := make([]report.Row, 0, len(p.Apps))
 	for _, name := range sortedKeys(p.Apps) {
@@ -130,9 +115,7 @@ func appReportRows(p *plan.Plan) []report.Row {
 	return rows
 }
 
-// dataReportRows is where the source kept its data and what it becomes: the
-// directories renamed to box's names, and the library's own directories renamed
-// onto the categories that hold them.
+// dataReportRows is the data root and its renamed directories.
 func dataReportRows(p *plan.Plan) []report.Row {
 	if p.Data == nil {
 		return nil
@@ -162,9 +145,7 @@ func pairs(list [][2]string) string {
 	return strings.Join(out, " · ")
 }
 
-// pathReportRows is every path rule the plan carries, per app: what the app
-// stored, and what it reads now. A rule that leaves a path where it was says so,
-// because that is the decision a person is being asked to trust.
+// pathReportRows is every path rule; an unchanged path says so.
 func pathReportRows(p *plan.Plan) []report.Row {
 	var rows []report.Row
 	for _, name := range sortedKeys(p.Apps) {
@@ -182,8 +163,7 @@ func pathReportRows(p *plan.Plan) []report.Row {
 	return rows
 }
 
-// addressReportRows is every address rule: the Service or host the source stored,
-// and the app it means on this box, or that it is left as it was.
+// addressReportRows is every address rule and its app or leave.
 func addressReportRows(p *plan.Plan) []report.Row {
 	var rows []report.Row
 	for _, r := range p.Hosts {
@@ -209,8 +189,7 @@ func addressReportRows(p *plan.Plan) []report.Row {
 	return rows
 }
 
-// checkReportRows is what the checks could not settle, grouped the way Settle
-// grouped it: the decision, the value, the reason, and where it is held.
+// checkReportRows is unsettled checks, grouped as Settle grouped them.
 func checkReportRows(settled apply.Settled) []report.Row {
 	var rows []report.Row
 	for _, g := range settled {
@@ -228,8 +207,7 @@ func checkReportRows(settled apply.Settled) []report.Row {
 	return rows
 }
 
-// noteReportRows is the read's own notes: what discovery decided and a person
-// should know.
+// noteReportRows is the read's own notes.
 func noteReportRows(rep discover.Report) []report.Row {
 	rows := make([]report.Row, 0, len(rep.Notes))
 	for _, n := range rep.Notes {
@@ -238,9 +216,8 @@ func noteReportRows(rep discover.Report) []report.Row {
 	return rows
 }
 
-// leftReportRows is what the migration does not bring: the source's workloads box
-// has no app for, what it skipped and why, and every mount that did not become a
-// path rule.
+// leftReportRows is what the migration leaves: unknown workloads, skips and
+// mounts without a path rule.
 func leftReportRows(p *plan.Plan, rep discover.Report) []report.Row {
 	var rows []report.Row
 	byNamespace := map[string][]string{}
@@ -279,8 +256,7 @@ func splitWorkload(raw string) (string, string) {
 	return ns, name
 }
 
-// reasonOf is a rule's why without the action a rule writes in front of it: the
-// decision is the line's own, and repeating it in the reason reads twice.
+// reasonOf drops the action a rule already writes in front of its reason.
 func reasonOf(why string) string {
 	for _, action := range []string{"left as it is: ", "rewrite to "} {
 		rest, ok := strings.CutPrefix(why, action)
@@ -298,8 +274,7 @@ func reasonOf(why string) string {
 	return why
 }
 
-// readDigest is the screen's rows for one read: what it read, what it decided,
-// and where the report is. A screen is counts and a pointer (rule 7); the rest is
+// readDigest is the screen's rows: counts and a pointer (rule 7); the rest is the
 // in the file.
 func readDigest(d report.Doc, out say.Reporter) {
 	if len(d.Sections) == 0 {

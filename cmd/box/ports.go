@@ -13,18 +13,9 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// nodePorts reads every nodePort the cluster's Services already hold, so the
-// torrent port can be picked from the part of the range nothing else has.
-//
-// It is one LIST of Services in every namespace. That is a cluster-wide read:
-// it needs `list` on `services` with no namespace, which is what k0s's
-// admin.conf -- root's kubeconfig, `system:masters` -- already grants. A user's
-// kubeconfig is bound to their own namespace and does not have it, which is the
-// design: the port is root's, assigned once at init and read out of the grant
-// from then on, so a user's run never lists anything.
-//
-// The kubeconfig is resolved inside the closure, like apply's other cluster
-// reads, so a run that never needs the port never opens a client.
+// nodePorts lists Services in every namespace, a cluster-wide read only root's
+// kubeconfig has. The port is root's and read from the grant afterwards, so a
+// user's run never lists anything. The kubeconfig resolves inside the closure.
 func nodePorts(kubeconfig string) func(context.Context) ([]setup.NodePort, error) {
 	return func(ctx context.Context) ([]setup.NodePort, error) {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
@@ -47,21 +38,14 @@ func nodePorts(kubeconfig string) func(context.Context) ([]setup.NodePort, error
 	}
 }
 
-// portRangeHint turns the API server's own refusal of the picked torrent port
-// into the setting that caused it.
-//
-// box assumes the default NodePort range because an apiserver does not publish
-// its --service-node-port-range through the API. A cluster narrowed to, say,
-// 31000-32000 therefore refuses the port box picked, and the raw error
-// ("provided port is not in the valid range") names no setting an operator
-// could change. This adds the one sentence that does.
+// portRangeHint names --service-node-port-range, which the API server does not
+// publish: a narrowed cluster otherwise refuses the port with no setting named.
 func portRangeHint(err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	// The wording is pkg/registry/core/service/portallocator's ErrNotInRange,
-	// which the API server returns inside the Service's validation error.
+	// pkg/registry/core/service/portallocator's ErrNotInRange wording.
 	if !strings.Contains(msg, "provided port is not in the valid range") {
 		return err
 	}

@@ -55,10 +55,6 @@ func applyFlagsFor(t *testing.T, args ...string) *applyFlags {
 	return flags
 }
 
-// TestBareApplyKeepsTheInstalledRelease: apply keeps the release the box is on,
-// so the chart source is asked for that release's version and not for the
-// newest one -- a move is `box update`'s job, with the floors, the copies and
-// the gate an apply does not have.
 func TestBareApplyKeepsTheInstalledRelease(t *testing.T) {
 	flags := applyFlagsFor(t, "--chart-repo", testChartRepo)
 	order := &applyOrder{}
@@ -80,9 +76,6 @@ func TestBareApplyKeepsTheInstalledRelease(t *testing.T) {
 	}
 }
 
-// TestBareApplyWithNothingInstalledAsksForTheNewest: a first apply has no
-// release to keep and no installed version to name, so it keeps asking for the
-// newest release this box can use.
 func TestBareApplyWithNothingInstalledAsksForTheNewest(t *testing.T) {
 	flags := applyFlagsFor(t)
 	order := &applyOrder{}
@@ -103,9 +96,6 @@ func TestBareApplyWithNothingInstalledAsksForTheNewest(t *testing.T) {
 	}
 }
 
-// TestApplyAcceptsTheInstalledReleaseItNames: --chart-version naming the release
-// that is installed is not a move, so it is accepted and the chart source is
-// asked for the installed version. The e2e's apply runs this way.
 func TestApplyAcceptsTheInstalledReleaseItNames(t *testing.T) {
 	flags := applyFlagsFor(t, "--chart-repo", testChartRepo, "--chart-version", "0.5.0")
 	order := &applyOrder{}
@@ -124,10 +114,6 @@ func TestApplyAcceptsTheInstalledReleaseItNames(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesAChartVersionThatWouldMoveTheRelease: naming another release
-// is a move, and a move is `box update`'s, with its floors, its copies and its
-// gate. It is refused before the chart is loaded, so nothing is planned, asked
-// or written.
 func TestApplyRefusesAChartVersionThatWouldMoveTheRelease(t *testing.T) {
 	flags := applyFlagsFor(t, "--chart-repo", testChartRepo, "--chart-version", "0.6.0")
 	order := &applyOrder{}
@@ -147,10 +133,6 @@ func TestApplyRefusesAChartVersionThatWouldMoveTheRelease(t *testing.T) {
 	}
 }
 
-// TestApplyReportsAReleaseItCouldNotRead: a cluster that cannot say which
-// release is installed is not "nothing installed". Installing the newest over a
-// release box could not read is the move this decision exists to stop, so the
-// read's error is the run's.
 func TestApplyReportsAReleaseItCouldNotRead(t *testing.T) {
 	flags := applyFlagsFor(t)
 	order := &applyOrder{}
@@ -164,11 +146,6 @@ func TestApplyReportsAReleaseItCouldNotRead(t *testing.T) {
 	}
 }
 
-// TestChartVersionHelpIsTheCommands: --chart-version means the release to
-// install to bootstrap and init, the release to move to for an update, the
-// release that is installed for an apply, and nothing to a rollback. The text
-// is what tells an operator which command moves a release, so each is pinned
-// byte for byte.
 func TestChartVersionHelpIsTheCommands(t *testing.T) {
 	cases := []struct {
 		name string
@@ -208,10 +185,6 @@ func TestChartVersionHelpIsTheCommands(t *testing.T) {
 	}
 }
 
-// TestUpdateAndRollbackStillChooseTheirOwnRelease: apply keeps the installed
-// release, but the two commands that end in an apply are the ones that choose
-// another one. They take apply's flags, so the version has to keep reaching
-// their options; the release each step installs is pinned in internal/update.
 func TestUpdateAndRollbackStillChooseTheirOwnRelease(t *testing.T) {
 	var updateF *updateFlags
 	parse(t, "update", func(fs *flag.FlagSet) { updateF = addUpdateFlags(fs) }, "--chart-version", "0.6.0")

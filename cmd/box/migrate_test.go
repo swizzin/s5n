@@ -341,9 +341,6 @@ func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	}
 }
 
-// TestMigrateDiscoverDefaultsToTheSnapshotDirectory: with no --out the snapshot
-// goes where apply looks for it, under a name that says when it was taken and
-// what it is.
 func TestMigrateDiscoverDefaultsToTheSnapshotDirectory(t *testing.T) {
 	at := time.Date(2026, 11, 17, 9, 5, 3, 0, time.UTC)
 	o := discoverOptions{Now: func() time.Time { return at }}
@@ -360,17 +357,6 @@ func TestMigrateDiscoverDefaultsToTheSnapshotDirectory(t *testing.T) {
 	}
 }
 
-// TestMigrateDiscoverReadsAQuotedSavePath is a defect in
-// internal/migrate/discover, kept here as a failing test because that package
-// belongs to another lane and this one may not change it.
-//
-// qBittorrent's settings are QSettings, and QSettings quotes a value it has to
-// escape: a save path holding a space is written as
-// `Session\DefaultSavePath="/srv/My Downloads"`. Read verbatim, the quoted text
-// covers no host mount and refuses the whole plan with a message that names
-// neither the quotes nor the file. The rewriter in
-// internal/migrate/qbit unquotes its own values, and discovery now reads the
-// value through the same qbtconf.Unquote, so the two agree on the path.
 func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
 	manifests, root := discoverySource(t)
 	// The same source, with the downloads one directory deeper so the path
@@ -400,10 +386,6 @@ func sourceKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// TestMigrateDiscoverMapsImagesOntoTheChartsVariants: a read is handed the
-// release's variants.yaml, so a source image the chart ships maps onto that
-// variant in the plan. Without it every app keeps the chart's default image and
-// nothing says so.
 func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
@@ -437,9 +419,6 @@ func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
 	}
 }
 
-// TestMigrateDiscoverRefusesAChartWithNoVariants: the file is the chart's, and
-// a read that cannot map an image to a variant would plan a migration that
-// silently keeps the chart's default image for every app.
 func TestMigrateDiscoverRefusesAChartWithNoVariants(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
@@ -484,11 +463,6 @@ func plexSourceTree(t *testing.T, root string) {
 	}
 }
 
-// TestWriteSnapshotCarriesPlexsStateOrItsWholeData: the plan says how much of a
-// Plex config directory the snapshot takes, and the snapshot carries exactly that
-// -- its state alone, or its whole data less the caches Plex rebuilds -- while
-// every other app's config travels whole. The one line about it is what the
-// report and the confirm read, and it is a different line for each.
 func TestWriteSnapshotCarriesPlexsStateOrItsWholeData(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

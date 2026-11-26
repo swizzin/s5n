@@ -34,10 +34,6 @@ func checkFiles(t *testing.T, d hostDisk, record, grant string) (string, error) 
 	return buf.String(), err
 }
 
-// TestHostFilesRefusesAOldBoxOnANewBox: this is the upgrade 0.5 does not
-// support. A record at the old root and none at the new one must stop the
-// command before it reads "no record" and decides to install over a box that
-// is already there, and it says the move as a command to check first.
 func TestHostFilesRefusesAOldBoxOnANewBox(t *testing.T) {
 	said, err := checkFiles(t, oldBox("cluster.yaml"), hostroot.RecordPath, seedbox.GrantPath("root"))
 	if err == nil {
@@ -53,9 +49,6 @@ func TestHostFilesRefusesAOldBoxOnANewBox(t *testing.T) {
 	}
 }
 
-// TestHostFilesWarnsWhenBothRootsHaveIt: a box that did the move reads the new
-// files and runs. The old copy is named once, because it is the file somebody
-// would go on editing.
 func TestHostFilesWarnsWhenBothRootsHaveIt(t *testing.T) {
 	d := oldBox("cluster.yaml")
 	d[hostroot.RecordPath] = true
@@ -71,8 +64,6 @@ func TestHostFilesWarnsWhenBothRootsHaveIt(t *testing.T) {
 	}
 }
 
-// TestHostFilesIsSilentOnAFreshHost: a host box has never run on says nothing
-// about the old root.
 func TestHostFilesIsSilentOnAFreshHost(t *testing.T) {
 	said, err := checkFiles(t, hostDisk{}, hostroot.RecordPath, seedbox.GrantPath("root"))
 	if err != nil || said != "" {
@@ -80,9 +71,6 @@ func TestHostFilesIsSilentOnAFreshHost(t *testing.T) {
 	}
 }
 
-// TestHostFilesIgnoresTheRunsOwnPaths: an e2e (or an operator) that passes
-// --record and --grant somewhere else is not reading the default root, so an
-// old box on the machine is none of its business.
 func TestHostFilesIgnoresTheRunsOwnPaths(t *testing.T) {
 	said, err := checkFiles(t, oldBox("cluster.yaml", "box.yaml", "seedboxes"), "/srv/e2e/cluster.yaml", "/srv/e2e/root.yaml")
 	if err != nil || said != "" {

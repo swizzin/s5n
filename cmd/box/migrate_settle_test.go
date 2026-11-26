@@ -40,9 +40,6 @@ func unsettledSource(t *testing.T) (manifests, root string) {
 	return manifests, root
 }
 
-// TestMigrateDiscoverTakesAndNamesEveryDefault: with nobody to ask, every
-// default Settle took is taken, said out loud with the same lines the report
-// carries, and listed again as the last thing the run prints.
 func TestMigrateDiscoverTakesAndNamesEveryDefault(t *testing.T) {
 	manifests, root := unsettledSource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
@@ -127,9 +124,6 @@ func (f *fakeSelect) Select(q setup.Select) (string, error) {
 	return answer, nil
 }
 
-// TestMigrateDiscoverAsksEachDefault: with somebody to ask, the run asks once
-// per address, offers the default first, and writes the answer into the plan as
-// the operator's own decision.
 func TestMigrateDiscoverAsksEachDefault(t *testing.T) {
 	manifests, root := unsettledSource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
@@ -167,8 +161,6 @@ func TestMigrateDiscoverAsksEachDefault(t *testing.T) {
 	}
 }
 
-// TestMigrateDiscoverAsksAboutAnUnsettledAddress: one address no rule settles
-// is one question, with box's answer first and the plan's apps as the rest.
 func TestMigrateDiscoverAsksAboutAnUnsettledAddress(t *testing.T) {
 	manifests, root := unsettledSource(t)
 	// PeerBanHelper's downloader points at a public name with a path, which no
