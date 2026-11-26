@@ -12,33 +12,27 @@ import (
 	autheliaassets "github.com/swizzin/s5n/install/platform/authelia"
 )
 
-// Instance is one workload the chart serves on this host: one URL prefix on
-// the seedbox's host name. It mirrors `s5n.instances` in the chart, because
-// the prefix access_control has to talk about is the route's own
-// (`/<name>`), and a rule list box typed by hand would drift from the routes
-// the release actually creates.
+// Instance is one workload the chart serves on this host: one URL prefix on the
+// seedbox's domain. It mirrors `s5n.instances`, because the prefix
+// access_control talks about is the route's own, not a hand-typed rule list.
 type Instance struct {
-	// Name is the workload name -- an app's name, or an Arr's with its
-	// instance suffix -- and therefore the URL prefix.
+	// Name is the workload name -- an app's, or an Arr's with its instance
+	// suffix -- and therefore the URL prefix.
 	Name string
 	// App is the values key it came from.
 	App string
-	// Arr is whether it is one of the Arrs (or Prowlarr): an app that
-	// authenticates its own API with a key and declares its own environment
-	// prefix in the chart. Their `/api` and `/ping` carry their own
-	// credentials; their UI does not.
+	// Arr is whether it is one of the Arrs (or Prowlarr): their /api and /ping
+	// carry their own key, their UI does not.
 	Arr bool
 }
 
-// InstancesFromValues is the chart's `s5n.instances` list, rebuilt from the
-// values document box already has. The chart derives an instance name from
-// `apps.<app>.instances[].suffix` and treats a values entry without
-// `instances` as a single workload named after the app; an enabled instance of
-// an Arr with suffix "4k" is `sonarr-4k`, which is also its URL prefix.
+// InstancesFromValues is the chart's `s5n.instances` list, rebuilt from the values
+// document box already has: an enabled instance of an Arr with suffix "4k" is
+// `sonarr-4k`, which is also its URL prefix.
 //
-// It reads the merged values (chart defaults, then the user's file, then the
-// grant), which is the same document Helm renders, so a 4K instance that
-// exists has its own rules and one that does not is never mentioned.
+// It reads the merged values (defaults, the user's file, the grant), the same
+// document Helm renders, so a 4K instance that exists has its own rules and one
+// that does not is never mentioned.
 func InstancesFromValues(values map[string]any) []Instance {
 	apps, _ := values["apps"].(map[string]any)
 	out := make([]Instance, 0, len(apps))
@@ -81,16 +75,15 @@ func InstancesFromValues(values map[string]any) []Instance {
 }
 
 // hasEnvPrefix is the chart's own test for "this app is an Arr": every Arr and
-// Prowlarr declares the environment prefix its settings are read from, and
-// nothing else does.
+// Prowlarr declares the environment prefix its settings are read from.
 func hasEnvPrefix(cfg map[string]any) bool {
 	_, ok := cfg["envPrefix"]
 	return ok
 }
 
-// The three policies a rule can carry. Authelia's own vocabulary: bypass means
-// the request carries its own credential (or the app signs the user in), and
-// one_factor asks the portal for the session with that one user.
+// The three policies a rule can carry, in Authelia's vocabulary: bypass means the
+// request carries its own credential (or the app signs the user in), and
+// one_factor asks the portal for the session.
 const (
 	PolicyBypass    = "bypass"
 	PolicyDeny      = "deny"
@@ -99,9 +92,8 @@ const (
 
 // Rule is one access_control rule, in the order Authelia evaluates them.
 type Rule struct {
-	// Domain is the host the rule applies to. Every rule names one: the edge
-	// asks Authelia about a request by its host, and an app served at a name
-	// of its own is a second domain for the same seedbox.
+	// Domain is the host the rule applies to: the edge asks Authelia by host,
+	// and an app served at a name of its own is a second domain for the box.
 	Domain string
 	// Policy is bypass, deny or one_factor.
 	Policy string
@@ -114,26 +106,17 @@ type Rule struct {
 
 // Rules is the access-control list for one seedbox host: the portal first, then
 // the paths that carry their own credentials, then the one login for everything
-// else. hosted names the apps the chart serves at a name of their own; their
-// rule is the whole of <app>.<host> rather than a path on it, because the app
-// is not served under the path any more and a path rule would leave the name
-// with no rule at all (default_policy deny, which is a login nobody can get
-// past). ownLogin names the apps the chart's catalog says sign their users in
-// themselves: their whole host or path prefix bypasses the login, because a
-// second password in front of an app that already has one is a password nobody
-// is asked for.
+// else. hosted names the apps served at a name of their own, whose rule is the
+// whole <app>.<host>; a path rule would leave the name with no rule and
+// default_policy deny. ownLogin names the apps that sign their users in
+// themselves: their whole host or path bypasses the login.
 //
-// The order is the whole design. Authelia takes the first rule that matches, so
-// the portal comes first (the login page has to be reachable by someone who is
-// not logged in), and each app's API and ping before the Arrs' UI -- a reverse
-// proxy or an API client that presents a key must never be asked for a form.
+// The order is the design: Authelia takes the first matching rule, and a client
+// presenting a key must never be asked for a form.
 //
-// There is deliberately no bypass for the ACME challenge. It never reaches
-// Authelia: cert-manager's HTTP-01 request arrives on the host's own port-80
-// listener, which carries no login at all, and Authelia would refuse an http://
-// target before it read any rule ("has an insecure scheme 'http'", 4.39). A
-// bypass here would be dead config that reads as if the challenge could pass
-// through the login.
+// There is deliberately no bypass for the ACME challenge: it arrives on the
+// host's port-80 listener, which carries no login, and Authelia refuses an http://
+// target before reading any rule ("has an insecure scheme 'http'", 4.39).
 func Rules(host, login string, instances []Instance, hosted, ownLogin []string) []Rule {
 	rules := []Rule{
 		// The portal itself. Without this the redirect to /auth/ would be
@@ -148,18 +131,16 @@ func Rules(host, login string, instances []Instance, hosted, ownLogin []string) 
 	for _, app := range ownLogin {
 		selfAuth[app] = true
 	}
-	// loginHosts are the domains the one login has to cover: the box's own,
-	// and any app host the catalog does not mark as signing its users in. A
-	// hosted app without a rule would fall into default_policy deny, which is
-	// a login nobody can get past, so the name is always one or the other.
+	// loginHosts are the domains the one login covers: the box's own, and any app
+	// host the catalog does not mark as signing its users in. A hosted app without
+	// a rule would fall into default_policy deny.
 	loginHosts := []string{host}
 	for _, inst := range instances {
 		if ownHost[inst.App] {
 			appHost := inst.App + "." + host
 			if selfAuth[inst.App] {
-				// An app that signs its users in itself does so on whatever
-				// name it is served at: the whole app host bypasses the
-				// login, just as the whole path did.
+				// An app that signs its users in itself does so on whatever name it
+				// is served at.
 				rules = append(rules, Rule{Domain: appHost, Policy: PolicyBypass})
 				continue
 			}
@@ -169,9 +150,8 @@ func Rules(host, login string, instances []Instance, hosted, ownLogin []string) 
 		prefix := regexpQuote("/" + inst.Name)
 		switch {
 		case inst.Arr:
-			// The API key is the credential: the Arrs and Prowlarr all answer
-			// /api and /ping without a session, and every integration box
-			// wires up uses them.
+			// The API key is the credential: the Arrs and Prowlarr answer /api and
+			// /ping without a session, and every integration box wires uses them.
 			rules = append(rules, Rule{Domain: host, Policy: PolicyBypass, Resources: []string{
 				"^" + prefix + `/api([/?].*)?$`,
 				"^" + prefix + `/ping$`,
@@ -186,19 +166,12 @@ func Rules(host, login string, instances []Instance, hosted, ownLogin []string) 
 	return rules
 }
 
-// HasRule reports whether a rendered configuration carries an access_control
-// rule for domain.
+// HasRule reports whether a rendered configuration carries an access_control rule
+// for domain.
 //
-// It reads the file box itself writes, so the shape it parses is the
-// template's: one rule per domain, the domain written as a list. A domain is
-// what the edge asks Authelia about, and a host with no rule falls through to
-// default_policy deny -- a 403 nobody can get past -- which is why the per-host
-// step counts a host as served only when its rule is in this file.
-//
-// A rule with no domain at all is not a match for anything (Authelia refuses
-// the file, so it cannot be serving anyone either), and a domain written as one
-// string rather than a list is read the same way: a hand-edited configuration
-// should answer this question rather than look rule-less.
+// A host with no rule falls through to default_policy deny -- a 403 nobody can get
+// past -- so a host counts as served only when its rule is in this file. A domain
+// written as one string rather than a list is read the same way.
 func HasRule(configuration, domain string) bool {
 	var doc struct {
 		AccessControl struct {
@@ -250,9 +223,7 @@ func regexpQuote(s string) string {
 	return b.String()
 }
 
-// Configuration is what the configuration template needs: the host, the one
-// login, the encryption key from the Secret, the theme the operator chose, and
-// the rules derived from the chart's instances.
+// Configuration is what the configuration template needs.
 type Configuration struct {
 	Host          string
 	Login         string
@@ -260,14 +231,12 @@ type Configuration struct {
 	Argon2        Argon2
 	// Theme is Authelia's own setting, from ResolveTheme: light or dark.
 	Theme string
-	// AssetPath is the directory the rendered logo.png and favicon.ico are
-	// mounted at: server.asset_path, which is how the login page carries the
-	// mark instead of Authelia's own picture.
+	// AssetPath is server.asset_path, where the rendered logo and favicon are
+	// mounted so the page carries the mark instead of Authelia's picture.
 	AssetPath string
 	Rules     []Rule
-	// OIDC is the identity provider, when this box has an app that signs in
-	// through the login. Nil (or no clients) renders no identity_providers
-	// block at all: Authelia registers no provider routes, and a discovery
+	// OIDC is the identity provider when this box has an app that signs in
+	// through the login. Nil renders no identity_providers block: a discovery
 	// request is a 404 rather than an issuer nobody uses.
 	OIDC *OIDC
 }
@@ -286,14 +255,13 @@ func RenderConfiguration(c Configuration) ([]byte, error) {
 	if strings.TrimSpace(c.Login) == "" {
 		return nil, fmt.Errorf("%w: no login name", ErrConfiguration)
 	}
-	// Authelia refuses an encryption key shorter than 20 characters, and the
-	// key is the one thing in this file that is a secret: a short one here
-	// would be a login that never starts.
+	// Authelia refuses an encryption key shorter than 20 characters, and this is
+	// the one secret in the file: a short one is a login that never starts.
 	if len(c.EncryptionKey) < 20 {
 		return nil, fmt.Errorf("%w: the storage encryption key is %d characters, and Authelia requires at least 20", ErrConfiguration, len(c.EncryptionKey))
 	}
-	// A theme Authelia does not know stops its startup, and a seedbox with no
-	// login is every app behind it served by nothing.
+	// A theme Authelia does not know stops its startup, and a seedbox with no login
+	// is every app behind it served by nothing.
 	if !validBase(c.Theme) {
 		return nil, fmt.Errorf("%w: theme %q is not one of %s or %s", ErrConfiguration, c.Theme, BaseLight, BaseDark)
 	}
@@ -308,10 +276,8 @@ func RenderConfiguration(c Configuration) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)
 	}
 	if c.OIDC != nil && c.OIDC.Enabled() {
-		// The provider's block goes last because it is about the apps rather
-		// than about this host: everything above it is the page, the rules and
-		// the session, and a reader looking for "who may get a token" finds it
-		// at the end rather than in the middle of the cookie settings.
+		// The provider's block goes last: everything above is the page, the rules
+		// and the session, and "who may get a token" is found at the end.
 		block, err := RenderOIDC(*c.OIDC)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)

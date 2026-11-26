@@ -25,11 +25,11 @@ func testConfiguration() Configuration {
 	}
 }
 
-// TestRenderConfiguration is what Authelia has to be able to start with: the
-// portal on /auth of the seedbox's own host, a file backend watching the claim,
-// no self-service, the filesystem notifier it insists on, and one session
-// cookie covering the host. Every key here was checked against 4.39.28's own
-// validator; a key that moved would be a login that never becomes Ready.
+// What Authelia has to be able to start with: the portal on /auth of the box's own
+// host, a file backend watching the claim, no self-service, the filesystem
+// notifier it insists on, and one session cookie covering the host. Every key was
+// checked against 4.39.28's validator; a key that moved would be a login that never
+// becomes Ready.
 func TestRenderConfiguration(t *testing.T) {
 	got, err := RenderConfiguration(testConfiguration())
 	if err != nil {
@@ -60,9 +60,9 @@ func TestRenderConfiguration(t *testing.T) {
 			t.Errorf("configuration does not contain %q:\n%s", want, text)
 		}
 	}
-	// The rules keep their order: the portal before the login. Rendering sorts
-	// nothing, and no rule mentions the ACME challenge any more: it is
-	// answered on the host's port-80 listener, which carries no login.
+	// The rules keep their order: the portal before the login. Nothing is sorted,
+	// and no rule mentions the ACME challenge: it is answered on port 80, which
+	// carries no login.
 	portal := strings.Index(text, `^/auth([/?].*)?$`)
 	login := strings.Index(text, `policy: 'one_factor'`)
 	if portal < 0 || portal >= login {
@@ -73,9 +73,8 @@ func TestRenderConfiguration(t *testing.T) {
 	}
 }
 
-// A change to the host changes the configuration, and therefore the pod
-// template's hash annotation: a box reached at a new name must not keep
-// serving the old cookie domain.
+// A change to the host changes the configuration, and therefore the pod template's
+// hash: a box reached at a new name must not keep serving the old cookie domain.
 func TestRenderConfigurationFollowsTheHost(t *testing.T) {
 	a, err := RenderConfiguration(testConfiguration())
 	if err != nil {
@@ -111,8 +110,8 @@ func TestRenderConfigurationRefusesWhatAutheliaWould(t *testing.T) {
 	}
 }
 
-// The rendered configuration is YAML Authelia reads, so it must not contain
-// Go template leftovers or an unquoted value that would change meaning.
+// The rendered configuration is YAML Authelia reads, so it must not contain Go
+// template leftovers or an unquoted value that would change meaning.
 func TestRenderConfigurationHasNoTemplateLeftovers(t *testing.T) {
 	got, err := RenderConfiguration(testConfiguration())
 	if err != nil {
@@ -125,12 +124,9 @@ func TestRenderConfigurationHasNoTemplateLeftovers(t *testing.T) {
 	}
 }
 
-// The Deployment box writes names the image the pin names, repository and all.
-// The pin is the only place that reference is written, so this is where a
-// dropped repository shows up -- and containerd reads a bare
-// "4.39.28@sha256:..." as docker.io/library/4.39.28, which is a pod that never
-// starts. The version is not repeated here: the assertion is on the shape and on
-// the repository, so a Renovate bump of the pin cannot fail this test.
+// The Deployment names the image the pin names, repository and all: containerd
+// reads a bare "4.39.28@sha256:..." as docker.io/library/4.39.28. The version is
+// not repeated here, so a Renovate bump of the pin cannot fail this test.
 func TestRenderedDeploymentCarriesThePinnedImage(t *testing.T) {
 	pin := releasetest.Pins(t).Authelia
 	manifests, err := RenderManifests(Manifests{
@@ -179,8 +175,7 @@ func TestRenderedDeploymentCarriesThePinnedImage(t *testing.T) {
 	if image != pin {
 		t.Fatalf("Deployment image %q is not the pin %q: something between versions.yaml and the template rewrote it", image, pin)
 	}
-	// Repository:tag@digest, the form containerd resolves without guessing a
-	// registry or a repository.
+	// Repository:tag@digest, the form containerd resolves without guessing.
 	qualified := regexp.MustCompile(`^docker\.io/authelia/authelia:[^@]+@sha256:[0-9a-f]{64}$`)
 	if !qualified.MatchString(image) {
 		t.Fatalf("Deployment image %q is not <registry>/<repository>:<tag>@sha256:<digest>", image)
@@ -204,11 +199,10 @@ func testManifests() Manifests {
 	}
 }
 
-// The portal has to exist at https://<host>/auth/, which is where Authelia's
-// 302 sends the browser; without the route the login page is a 404 and the
-// whole flow stops there. The route names the host, the Gateway the
-// SecurityPolicy targets and the Service the policy calls, so a rename in one
-// place fails here instead of in a browser.
+// The portal has to exist at https://<host>/auth/, where Authelia's 302 sends the
+// browser; without the route the login page is a 404. The route names the host, the
+// Gateway and the Service, so a rename in one place fails here instead of in a
+// browser.
 func TestRenderedPortalRoute(t *testing.T) {
 	manifests, err := RenderManifests(testManifests())
 	if err != nil {
@@ -276,8 +270,7 @@ func TestRenderedPortalRoute(t *testing.T) {
 	}
 }
 
-// A login without a host cannot publish a portal: the route would have no
-// hostname, and Authelia's redirect would point at a name box never wrote.
+// A login without a host cannot publish a portal: the route would have no hostname.
 func TestRenderManifestsRefusesNoHost(t *testing.T) {
 	m := testManifests()
 	m.Host = ""
@@ -286,11 +279,10 @@ func TestRenderManifestsRefusesNoHost(t *testing.T) {
 	}
 }
 
-// TestRenderedLoginIsReachableOnlyThroughTheGateway is the hole the research
-// measured: s5n-system had no NetworkPolicy at all, so any pod in the cluster
-// could call 9091 and forge X-Forwarded-Proto/Host there. The policy admits the
-// Gateway's proxy pods on 9091 and nothing else, and it names the owning
-// Gateway so a second Gateway's proxy does not inherit the admission.
+// The hole research measured: s5n-system had no NetworkPolicy, so any pod could
+// call 9091 and forge X-Forwarded-Proto/Host. The policy admits the Gateway's proxy
+// pods on 9091 and names the owning Gateway, so a second Gateway's proxy does not
+// inherit the admission.
 func TestRenderedLoginIsReachableOnlyThroughTheGateway(t *testing.T) {
 	manifests, err := RenderManifests(testManifests())
 	if err != nil {
@@ -364,9 +356,8 @@ func TestRenderedLoginIsReachableOnlyThroughTheGateway(t *testing.T) {
 	}
 }
 
-// A policy with no proxy namespace would name a namespace called "", which the
-// API server accepts and which admits nobody: the login would answer the
-// Gateway with a timeout and the release would never be served.
+// A policy with no proxy namespace would name a namespace called "", which admits
+// nobody: the login would answer the Gateway with a timeout.
 func TestRenderManifestsRefusesNoProxyNamespace(t *testing.T) {
 	m := testManifests()
 	m.ProxyNamespace = ""
@@ -408,10 +399,9 @@ func TestGeneratePassword(t *testing.T) {
 	}
 }
 
-// TestHasRuleReadsTheRenderedConfiguration: the read that decides whether a host
-// is served asks this file, so it has to find a rule exactly where the template
-// writes one -- and must not answer yes for a name the file never mentions,
-// which is the 403 the per-host step exists to prevent.
+// The read that decides whether a host is served asks this file, so it must find a
+// rule exactly where the template writes one -- and not answer yes for a name the
+// file never mentions, which is the 403 the per-host step prevents.
 func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
 	c := testConfiguration()
 	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"}, selfLogin)
@@ -433,8 +423,8 @@ func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
 	}
 }
 
-// TestHasRuleReadsASingleDomainToo: Authelia accepts one string or a list, and a
-// hand-edited configuration is still the login that is running.
+// Authelia accepts one string or a list, and a hand-edited configuration is still
+// the login that is running.
 func TestHasRuleReadsASingleDomainToo(t *testing.T) {
 	configuration := "access_control:\n  default_policy: 'deny'\n  rules:\n    - domain: 'box.example.com'\n      policy: 'one_factor'\n"
 	if !HasRule(configuration, "box.example.com") {

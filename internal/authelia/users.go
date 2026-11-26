@@ -7,10 +7,9 @@ import (
 	"strings"
 )
 
-// UsersDBFile is the users database's file name inside the claim. Authelia
-// opens exactly this path (configuration.yml's authentication_backend.file.path)
-// and refuses to start when it is missing, so box writes it before the
-// Deployment exists.
+// UsersDBFile is the users database inside the claim. Authelia opens exactly this
+// path (configuration.yml's authentication_backend.file.path) and refuses to start
+// without it, so box writes it before the Deployment exists.
 const UsersDBFile = "users_database.yml"
 
 // User is one row of the users database: the subset of Authelia's row schema
@@ -20,9 +19,8 @@ type User struct {
 	DisplayName string
 	// Password is the PHC digest, never a password.
 	Password string
-	// Groups is preserved when a row has them; box writes none of its own.
-	// They matter only to access_control rules that name a group, and box's
-	// rules name a user.
+	// Groups is preserved when a row has them; box writes none, because its
+	// access_control rules name a user.
 	Groups []string
 }
 
@@ -67,11 +65,9 @@ var ErrUsersFormat = errors.New("users database")
 
 // ParseUsers reads the file box writes.
 //
-// It is deliberately a small reader for one shape rather than a YAML
-// dependency: the file is box's, the two fields that matter are a scalar map,
-// and a row box cannot read is a row Authelia would refuse to load. A file
-// written in flow style or with anchors is refused by name instead of being
-// half-understood and rewritten.
+// It is a small reader for one shape rather than a YAML dependency: the file is
+// box's, and a row it cannot read is a row Authelia would refuse. Flow style or
+// anchors are refused by name rather than half-understood and rewritten.
 func ParseUsers(data []byte) (*Users, error) {
 	out := NewUsers()
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
@@ -176,21 +172,18 @@ func parseField(current *User, body string, lineNo int) error {
 	case "groups":
 		current.Groups = flowList(value)
 	case "email", "disabled":
-		// Accepted and dropped: box writes neither, and Authelia does
-		// not require them for a password login. Dropping one is why
-		// this parser is only for a file box wrote.
+		// Accepted and dropped: box writes neither and Authelia requires neither
+		// for a password login; dropping one is why this parser is only for a
+		// file box wrote.
 	default:
 		return fmt.Errorf("%w: line %d: field %q is not one box writes", ErrUsersFormat, lineNo, key)
 	}
 	return nil
 }
 
-// Render writes the database back.
-//
-// A login's row is its display name and its digest, in that order, as
-// single-quoted scalars where a YAML reader would otherwise have to guess
-// (a digest starts with `$`, which is not special but reads badly bare).
-// Sorting makes a file box rewrote byte-identical across runs.
+// Render writes the database back: display name then digest, single-quoted where
+// a YAML reader would have to guess (a digest starts with `$`), sorted so a file
+// box rewrote is byte-identical across runs.
 func (u *Users) Render() []byte {
 	logins := u.Logins()
 	sort.Strings(logins)
@@ -211,8 +204,8 @@ func (u *Users) Render() []byte {
 	return []byte(b.String())
 }
 
-// yamlKey quotes a login only when it has to be: Authelia's usernames are
-// plain in practice, and quoting every one makes the file harder to read.
+// yamlKey quotes a login only when it has to be: quoting every one makes the file
+// harder to read.
 func yamlKey(s string) string {
 	if s == "" {
 		return "''"
@@ -226,9 +219,8 @@ func yamlKey(s string) string {
 	return s
 }
 
-// yamlScalar single-quotes a value: a digest holds `$` and `,` and a display
-// name may hold anything, and single quotes are the one YAML form that needs
-// no escaping except the quote itself.
+// yamlScalar single-quotes a value: single quotes need no escaping except the
+// quote itself.
 func yamlScalar(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
@@ -243,8 +235,8 @@ func unquote(s string) string {
 	return s
 }
 
-// flowList reads Authelia's own `groups: [a, b]` spelling, which is the only
-// list form a box-written file has.
+// flowList reads Authelia's `groups: [a, b]` spelling, the only list form a
+// box-written file has.
 func flowList(s string) []string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "[")
