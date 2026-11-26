@@ -105,10 +105,6 @@ func TestRunHandsEveryPathOfAStagedConfigToTheSeedboxUser(t *testing.T) {
 	}
 }
 
-// TestOwnHandsEveryEntryOverAndNeverFollowsALink: the pass itself, with the
-// pair a seedbox really uses and the entries a config tree really holds -- a
-// rewritten file, a directory, a link inside the tree, and a link out of it
-// that stage.go could not have carried but the walk must still not follow.
 func TestOwnHandsEveryEntryOverAndNeverFollowsALink(t *testing.T) {
 	root := t.TempDir()
 	p, err := plan.Parse([]byte(`version: 2
@@ -165,9 +161,6 @@ apps:
 	}
 }
 
-// TestOwnReportsWhatItCouldNotHandOver: a failed chown stops the run before
-// anything is moved into place, naming the path -- a half-owned config tree is
-// the bug this pass exists to prevent.
 func TestOwnReportsWhatItCouldNotHandOver(t *testing.T) {
 	root := t.TempDir()
 	p, err := plan.Parse([]byte(`version: 2

@@ -22,8 +22,6 @@ import (
 	"github.com/swizzin/s5n/internal/wiring"
 )
 
-// TestRunAdoptsASonarrAndQbittorrent is the whole thing: stage, check, write,
-// rename, move, adopt, enable, and every tree afterwards.
 func TestRunAdoptsASonarrAndQbittorrent(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -199,8 +197,6 @@ func assertStagingClean(t *testing.T, f *fixture, res Result) {
 	}
 }
 
-// TestRunAgainIsANoOp is the second run of a plan that finished: nothing is
-// renamed, moved, adopted or enabled twice, and the file mode says so.
 func TestRunAgainIsANoOp(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -236,9 +232,6 @@ func TestRunAgainIsANoOp(t *testing.T) {
 	sameTree(t, "the config root", before, hashTree(t, filepath.Join(f.root, "config")))
 }
 
-// TestRunFinishesAHalfDonePlan interrupts a run in its last step (the values
-// edit) and proves the second run picks up where the first stopped: the
-// renames and the moves are recorded, so they are not done twice.
 func TestRunFinishesAHalfDonePlan(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -278,11 +271,6 @@ func TestRunFinishesAHalfDonePlan(t *testing.T) {
 	}
 }
 
-// TestRunRenamesOverTheBoxsOwnEmptyDirectories is the target a real box hands
-// migrate: the release's wiring Job has already made /data/downloads/<category>
-// for the Arr it runs, so the rename's target is a tree of empty directories. It
-// is not the operator's data -- the rename removes it and renames the source
-// into the name, keeping the source's files as they were.
 func TestRunRenamesOverTheBoxsOwnEmptyDirectories(t *testing.T) {
 	f := newFixture(t)
 	for _, dir := range []string{"downloads/movies", "downloads/tv/subdir"} {
@@ -313,8 +301,6 @@ func TestRunRenamesOverTheBoxsOwnEmptyDirectories(t *testing.T) {
 	}
 }
 
-// TestRunWritesNothingOutsideStagingWhenCheckBlocks pins the promise the whole
-// order exists for: an uncovered path stops the run before its first write.
 func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 	f := newFixture(t)
 	// A series outside every rule the plan has.
@@ -352,8 +338,6 @@ func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 	}
 }
 
-// TestRunRefusesWhenTheOperatorSaysNo: a no leaves every tree as it was, with
-// the staged copy kept for the next look.
 func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -378,8 +362,6 @@ func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	}
 }
 
-// TestRunAdoptsAConnectionIntoAnExistingRecord: the record keeps what wiring
-// already owns (another app's client) and gains this run's.
 func TestRunAdoptsAConnectionIntoAnExistingRecord(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -406,9 +388,6 @@ func TestRunAdoptsAConnectionIntoAnExistingRecord(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAnOwnedConflict: a record that already names another id for the
-// same object is someone else's wiring, and applying over it would make the
-// Job update a client it does not own.
 func TestRunRefusesAnOwnedConflict(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -426,9 +405,6 @@ func TestRunRefusesAnOwnedConflict(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAnAppWhoseKeyCannotBeRead: the ruling is that every app keeps
-// the key it has today, so an app with none cannot be migrated -- a fresh key
-// would answer a key none of its clients know.
 func TestRunRefusesAnAppWhoseKeyCannotBeRead(t *testing.T) {
 	f := newFixture(t)
 	// An Arr that has never started has no key yet.
@@ -459,8 +435,6 @@ func TestRunRefusesAnAppWhoseKeyCannotBeRead(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAKeyWithNowhereToGo: a run without a release Secret cannot keep
-// an app's key, which the preflight says before anything is staged.
 func TestRunRefusesAKeyWithNowhereToGo(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -475,7 +449,6 @@ func TestRunRefusesAKeyWithNowhereToGo(t *testing.T) {
 	}
 }
 
-// TestAPIKeyReaders: the two config shapes the kept keys come from.
 func TestAPIKeyReaders(t *testing.T) {
 	key, ok, err := xmlAPIKey([]byte(sonarrConfigXML))
 	if err != nil || !ok || key != testAPIKey {
@@ -497,11 +470,6 @@ func TestAPIKeyReaders(t *testing.T) {
 	}
 }
 
-// TestRehearsalRenamesNothingAndStopsTheTorrents is the apply half of the
-// rehearsal lock: the plan's data is not adopted (a different data root is
-// fine, and no rename happens), and qBittorrent comes out with its torrents
-// stopped and the two settings written. The summary says both, because the
-// operator confirmed that summary.
 func TestRehearsalRenamesNothingAndStopsTheTorrents(t *testing.T) {
 	f := newFixture(t)
 	// One torrent, in the state a seeding source would leave it: the stop pass

@@ -1,16 +1,10 @@
 package apply
 
-// chart.go is what migrate knows about the chart it adopts into: which instance
-// names the values switch on, the endpoint each one answers on inside the
-// release, and the image an app runs.
-//
-// None of it comes from the plan. The plan describes the install being left
-// behind; the release is described by the chart release this box is about to
-// apply, and a rewriter hands every rewritten address to an endpoint from here
-// (internal/migrate/rewrite, Endpoint). The templates are the one authority:
-// charts/s5n/templates/workloads.yaml names each Service after its instance and
-// gives it the app's port, so both are read statically here and pinned by a
-// test that loads the chart's own files.
+// chart.go is what migrate knows of the chart it adopts into: instance names, each
+// endpoint inside the release, and the app's image. None comes from the plan, which
+// describes the install left behind; a rewriter hands rewritten addresses to these
+// endpoints. The templates are the authority (workloads.yaml names each Service
+// after its instance), read statically and pinned by a test.
 
 import (
 	"fmt"
@@ -23,11 +17,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// The catalog app names this package names at all. They are constants because
-// two of the three tables here key on them (urlBase and apiKeys), and a typo in
-// one of those would silently stop a rewrite or a kept key rather than fail:
-// the strings come from the chart's catalog and are checked against it by
-// TestTargetsCoverEveryCatalogApp.
+// The catalog app names, constants because urlBase and apiKeys key on them; a typo
+// would silently stop a rewrite, so TestTargetsCoverEveryCatalogApp checks them.
 const (
 	appSonarr      = "sonarr"
 	appRadarr      = "radarr"
@@ -47,15 +38,8 @@ const (
 	appJellyfin    = "jellyfin"
 )
 
-// CatalogApp is the catalog app an instance name belongs to: "sonarr-4k" is
-// sonarr, "prowlarr" is prowlarr.
-//
-// The same rule discovery names instances by (internal/migrate/discover,
-// instanceName), read backwards: an app that takes instances is named
-// `<app>` or `<app>-<suffix>`, and no other app's name can start the same way
-// because a suffix is lower-case letters and digits. The catalog is the chart's
-// list, so a chart that adds an app is a box that can migrate it without a
-// table here.
+// CatalogApp is an instance's app ("sonarr-4k" is sonarr), discovery's naming read
+// backwards; the catalog is the chart's list, so a new app needs no table here.
 func CatalogApp(instance string, catalog []string) string {
 	best := ""
 	for _, app := range catalog {
@@ -65,8 +49,8 @@ func CatalogApp(instance string, catalog []string) string {
 		if !strings.HasPrefix(instance, app+"-") {
 			continue
 		}
-		// The longest app name wins: an app called "sonarr" and one called
-		// "sonarr-4k" would both prefix an instance called "sonarr-4k-hd".
+		// The longest name wins: "sonarr" and "sonarr-4k" both prefix
+		// "sonarr-4k-hd".
 		if len(app) > len(best) {
 			best = app
 		}
@@ -74,9 +58,8 @@ func CatalogApp(instance string, catalog []string) string {
 	return best
 }
 
-// Suffix is the instance's own part of its name: "4k" for sonarr-4k, empty for
-// the app's first instance. It is what the chart's instances list keys an entry
-// by (charts/s5n/templates/_helpers.tpl, s5n.instances).
+// Suffix is the instance's own part ("4k" for sonarr-4k), the chart's list key
+// (s5n.instances).
 func Suffix(instance, app string) string {
 	if app == "" || instance == app {
 		return ""
@@ -84,10 +67,8 @@ func Suffix(instance, app string) string {
 	return strings.TrimPrefix(instance, app+"-")
 }
 
-// CatalogRuns is every instance the plan has of each catalog app, by catalog
-// app name. It is what a rewriter answers Sole from (internal/migrate/rewrite,
-// Input.Sole): a proposal points an address at an app only when the box runs
-// exactly one instance of it.
+// CatalogRuns is the plan's instances by catalog app, what a rewriter answers Sole
+// from.
 func CatalogRuns(p *plan.Plan, catalog []string) map[string][]string {
 	out := make(map[string][]string, len(p.Apps))
 	for _, name := range sortedPlanApps(p) {
@@ -111,14 +92,8 @@ func sortedPlanApps(p *plan.Plan) []string {
 	return out
 }
 
-// Instances is every instance the values switch on, sorted, named the way the
-// chart names it: the app itself, or `<app>-<suffix>` for an entry under an
-// app that takes instances.
-//
-// It is s5n.instances read a second time, and deliberately so: migrate hands a
-// rewriter the endpoint of every running app, which is exactly the Service list
-// the chart renders, and deriving it from anything else (the plan alone, or the
-// values' app names) would miss the instance a run before this one switched on.
+// Instances is every instance the values switch on, that is the chart's Service
+// list; the plan alone would miss what an earlier run switched on.
 func Instances(values map[string]any) []string {
 	apps, _ := values["apps"].(map[string]any)
 	var out []string
@@ -154,11 +129,8 @@ func joinInstance(app, suffix string) string {
 	return app + "-" + suffix
 }
 
-// Categories is every instance's library directory, by box's instance name:
-// the `category` the values give it. It is every entry of an app that takes
-// instances, on or off, because a migration switches its own instances on after
-// the read: the plan has to name the directory the release will lay out, and
-// that is the one its values already say.
+// Categories is each instance's library directory from the values, on or off: a
+// migration switches its instances on after the read.
 func Categories(values map[string]any) map[string]string {
 	apps, _ := values["apps"].(map[string]any)
 	out := map[string]string{}
@@ -181,9 +153,8 @@ func Categories(values map[string]any) map[string]string {
 	return out
 }
 
-// EnabledIn reports whether the values switch one instance on. Every instance
-// of an app has to exist as an entry *and* be enabled: an app that is on with
-// its 4K entry off runs one Sonarr, not two.
+// EnabledIn reports whether an instance is both present and on; an app on with its
+// 4K entry off runs one Sonarr.
 func EnabledIn(values map[string]any, instance string) bool {
 	for _, name := range Instances(values) {
 		if name == instance {
@@ -193,25 +164,10 @@ func EnabledIn(values map[string]any, instance string) bool {
 	return false
 }
 
-// urlBase is the URL base the chart gives one app's pod, per instance:
-//
-//	/<instance>   the Arrs (workloads.yaml:248, <PREFIX>__SERVER__URLBASE), qui
-//	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH),
-//	              Tautulli, whose own http_root the init container seals to this
-//	              prefix (:123, --http-root), Bazarr, whose
-//	              general.base_url the same kind of init container seals, and
-//	              FileBrowser Quantum, whose http.baseURL is in the ConfigMap the
-//	              chart writes
-//	/<instance>/  autobrr (:330), whose router mounts at base URL *plus* the
-//	              rest of the path, so the trailing slash is what puts its API
-//	              at /autobrr/api
-//	none          qBittorrent, Plex and Seerr, whose route strips the prefix
-//	              instead (values.yaml, rewritePath), and PeerBanHelper, which
-//	              is served at a host of its own with no base path
-//
-// ok is false for an app this box knows nothing about: guessing "" would hand a
-// rewriter an address that answers at the wrong path, so Targets refuses
-// instead.
+// urlBase is the chart's base per app: /<instance> for most, /<instance>/ for
+// autobrr, whose router mounts at base plus the rest, and none for qBittorrent,
+// Plex, Seerr and PeerBanHelper. ok is false for an unknown app, since guessing ""
+// would answer at the wrong path.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
 	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli, appSabnzbd, appFilebrowser:
@@ -226,13 +182,8 @@ func urlBase(app, instance string) (string, bool) {
 	return "", false
 }
 
-// Targets is where every instance answers inside the release, by instance name:
-// the Service the chart renders for it, the app's port, and its URL base.
-//
-// names is every instance a rewriter may meet an address for: the plan's own,
-// plus every one the values already switch on. The port comes from the values
-// rather than a constant here, because it is a chart value an operator may have
-// changed.
+// Targets is where every instance answers: the chart's Service, its port and base.
+// The port comes from the values, which an operator may have changed.
 func Targets(values map[string]any, catalog, names []string) (map[string]rewrite.Endpoint, error) {
 	apps, _ := values["apps"].(map[string]any)
 	out := make(map[string]rewrite.Endpoint, len(names))
@@ -255,11 +206,8 @@ func Targets(values map[string]any, catalog, names []string) (map[string]rewrite
 	return out, nil
 }
 
-// Image is the image a release renders for one app, resolved the way
-// charts/s5n/templates/_helpers.tpl resolves it: the variant the values select,
-// a pinned digest replacing the variant's, a pinned tag replacing its tag and
-// dropping its digest. It is the reference a Job has to run, so it is the same
-// string the pod gets, tag and digest together.
+// Image is the app's rendered image, resolved as _helpers.tpl does: variant, then a
+// pinned digest or tag. It is the exact reference the pod gets.
 func Image(variants []byte, values map[string]any, app string) (string, error) {
 	images, err := admission.Images(variants)
 	if err != nil {
@@ -291,10 +239,7 @@ func Image(variants []byte, values map[string]any, app string) (string, error) {
 	return v.Repository + ":" + tag, nil
 }
 
-// intValue reads an integer out of a values document. The documents box holds
-// carry Go ints (both the chart's values.yaml and a seedbox's files are parsed
-// by the YAML library), and a float is what a chart value that came through
-// JSON looks like, so both are read.
+// intValue reads an integer, which the YAML library may give as int or float.
 func intValue(v any) (int, bool) {
 	switch n := v.(type) {
 	case int:
@@ -313,8 +258,7 @@ func intValue(v any) (int, bool) {
 	return 0, false
 }
 
-// sortStrings sorts in place. It exists so this file needs no import for one
-// call in Instances and stays readable beside the tables above.
+// sortStrings sorts in place, avoiding an import beside the tables.
 func sortStrings(s []string) {
 	for i := 1; i < len(s); i++ {
 		for j := i; j > 0 && s[j] < s[j-1]; j-- {
@@ -323,15 +267,9 @@ func sortStrings(s []string) {
 	}
 }
 
-// WiringImage resolves the s5n image a release runs its own Job and probe pods
-// with, the way the chart's template does: the blessed variant names the
-// repository, the chart's appVersion is the tag the variant does not carry, and
-// a pinned tag or digest in the values narrows it inside that repository.
-//
-// It exists because the rehearsal's probe pods run the image the release
-// already pulls: a probe is a pod in a seedbox namespace, so it has to be an
-// image the blessed-image policy admits, and the s5n image is the one this box
-// knows the release carries.
+// WiringImage resolves the s5n image the release's Job and probe pods run, as the
+// template does; a probe is a pod in a seedbox namespace, so it must be an image
+// the blessed-image policy admits.
 func WiringImage(variants []byte, appVersion string, values map[string]any) (string, error) {
 	images, err := admission.Images(variants)
 	if err != nil {

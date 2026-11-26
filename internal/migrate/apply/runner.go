@@ -1,22 +1,11 @@
 package apply
 
-// runner.go is rewrite.Runner for the one format only an app's own binary may
-// write: Plex's library database, which stock SQLite cannot touch (its
-// full-text tables carry tokenizers compiled into Plex's libsqlite3, see
-// internal/migrate/plex).
-//
-// The runner is a one-shot Job in the seedbox's namespace, running the pinned
-// image of the app, with the *staged* copy of the config mounted at /config --
-// never the source, and never the release's own claim directory. The Job talks
-// to box through files on the config claim, which is a host directory box can
-// see: box writes the script's stdin before the Job starts and reads its
-// stdout, stderr and exit status after it ends. Nothing has to be streamed into
-// a pod, and nothing about the pod is trusted.
-//
-// The pod is what Pod Security "restricted" admits and what the blessed-image
-// policy admits, because it is a pod in a seedbox namespace like every other:
-// the release's uid, no privilege escalation, every capability dropped, a
-// read-only root filesystem, and an image from the chart's variants.yaml.
+// runner.go is rewrite.Runner for the one format only an app's own binary may write:
+// Plex's library database (internal/migrate/plex). It is a one-shot Job running the
+// app's pinned image with the *staged* config at /config -- never the source -- and
+// talking to box through files on the claim: box writes stdin before the Job and
+// reads stdout, stderr and status after. The pod passes restricted and the
+// blessed-image policy like every other seedbox pod.
 
 import (
 	"context"
@@ -38,30 +27,24 @@ import (
 	"github.com/swizzin/s5n/internal/wait"
 )
 
-// The runner's two directories inside the plan's staging tree, as subPaths of
-// the config claim: the app's staged config, and the files box and the Job pass
-// each other.
+// The runner's two staging directories, as subPaths: the staged config and the
+// exchange.
 const (
 	runnerDir = ".runner"
-	// The one volume's two mounts: the staged config at /config, which is
-	// where the chart mounts an app's claim, and the exchange directory at
-	// /runner.
+	// The volume's two mounts: the config at /config and the exchange at /runner.
 	volumeConfig  = "config"
 	volumeScratch = "tmp"
 	mountConfig   = "/config"
 	mountRunner   = "/runner"
 	mountScratch  = "/tmp"
-	// runnerTimeout bounds one tool run, and is the Job's own deadline so the
-	// cluster kills a hung container before box stops waiting on it.
+	// runnerTimeout is the Job's deadline, so the cluster kills a hung container.
 	runnerTimeout = 10 * time.Minute
 	// runnerPoll is how often the Job's status is read.
 	runnerPoll = 250 * time.Millisecond
 )
 
-// RunnerConfig is what one JobRunner needs, all of it decided by the caller:
-// the release's namespace and config claim, the plan the staging tree belongs
-// to, the image the values select, and the uid every file on a seedbox belongs
-// to.
+// RunnerConfig is what a JobRunner needs: namespace, claim, staging tree, image
+// and the seedbox's uid.
 type RunnerConfig struct {
 	Client     kubernetes.Interface
 	Namespace  string
@@ -76,9 +59,8 @@ type RunnerConfig struct {
 	Timeout time.Duration
 }
 
-// JobRunner runs tools through one-shot Jobs. It is safe for the two passes of
-// one rewriter to call it one after the other, and numbers each call so two
-// runs' files never meet.
+// JobRunner runs tools through one-shot Jobs, numbering calls so files never
+// meet.
 type JobRunner struct {
 	cfg RunnerConfig
 	mu  sync.Mutex
@@ -88,10 +70,8 @@ type JobRunner struct {
 // NewRunner builds the runner cmd/box hands apply for the Plex rewriter.
 func NewRunner(cfg RunnerConfig) *JobRunner { return &JobRunner{cfg: cfg} }
 
-// Run implements rewrite.Runner: argv[0] is a command inside the image, argv[1:]
-// its arguments, and the staged config is at /config. It returns the command's
-// stdout; a non-zero exit is an error carrying what it wrote to stderr, because
-// that text is the only account of why the app's own tool refused.
+// Run returns the command's stdout; a non-zero exit carries stderr, the only
+// account of why the app's tool refused.
 func (r *JobRunner) Run(ctx context.Context, app string, argv []string, stdin []byte) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("%s: no command to run", app)
@@ -129,12 +109,8 @@ func (r *JobRunner) Run(ctx context.Context, app string, argv []string, stdin []
 	return r.collect(ctx, app, name, argv[0], dir, job)
 }
 
-// own hands one entry of the exchange directory to the pod's user. The Job runs
-// as PUID:PGID and box does not -- on the host it is root -- so a directory box
-// created for itself is one the pod cannot write its result into, and an input
-// file it wrote 0600 for itself is one the pod cannot read at all. The mode is
-// the exchange's own contract: the pod writes in the directory, and reads the
-// script it was written.
+// own hands the exchange to the pod's user: box runs as root, and what it writes
+// 0600 for itself the PUID:PGID pod cannot read or write.
 func (r *JobRunner) own(path string, mode os.FileMode) error {
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("set the mode of %s: %w", path, err)
@@ -145,7 +121,7 @@ func (r *JobRunner) own(path string, mode os.FileMode) error {
 	return nil
 }
 
-// start creates the Job, and the caller deletes it whatever happens next.
+// start creates the Job; the caller deletes it whatever happens.
 func (r *JobRunner) start(ctx context.Context, app, name string, argv []string) (*batchv1.Job, error) {
 	job := r.job(app, name, argv)
 	created, err := r.cfg.Client.BatchV1().Jobs(r.cfg.Namespace).Create(ctx, job, metav1.CreateOptions{})
@@ -155,8 +131,7 @@ func (r *JobRunner) start(ctx context.Context, app, name string, argv []string) 
 	return created, nil
 }
 
-// collect waits for the Job, reads what it wrote and turns a non-zero status
-// into an error.
+// collect waits for the Job, reads its files, and errors on a non-zero status.
 func (r *JobRunner) collect(ctx context.Context, app, name, command, dir string, job *batchv1.Job) ([]byte, error) {
 	finished := false
 	waited, err := wait.Until(ctx, r.timeout(), r.poll(), func(ctx context.Context) (bool, error) {
@@ -241,13 +216,11 @@ func (r *JobRunner) job(app, name string, argv []string) *batchv1.Job {
 			Labels:       labels,
 		},
 		Spec: batchv1.JobSpec{
-			// One attempt: the tool either answers or it does not, and a
-			// retry against a half-written database is worse than a refusal.
+			// One attempt: a retry against a half-written database is worse than a
+			// refusal.
 			BackoffLimit: ptr.To[int32](0),
-			// The cluster's deadline is the fixed one, whatever this run's own
-			// budget is: box waiting less than the pod may run only means box
-			// deletes it early, and a shortened deadline would tell the
-			// cluster to kill a long Plex query that is still working.
+			// The cluster's deadline is fixed whatever this run's budget: box waiting
+			// less only means it deletes the Job early.
 			ActiveDeadlineSeconds: ptr.To[int64](int64(runnerTimeout.Seconds())),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -291,15 +264,13 @@ func (r *JobRunner) job(app, name string, argv []string) *batchv1.Job {
 	}
 }
 
-// delete removes the Job it created, and everything a Job cascades to. A
-// foreground or background delete needs the Job gone before a re-run can reuse
-// its files, so the call is not cancellable: a cancelled run still cleans up.
+// delete removes the Job and what it cascades to; the call is not cancellable, so a
+// cancelled run still cleans up.
 func (r *JobRunner) delete(ctx context.Context, job *batchv1.Job) {
 	background := metav1.DeletePropagationBackground
 	err := r.cfg.Client.BatchV1().Jobs(r.cfg.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{PropagationPolicy: &background})
 	if err != nil && !apierrors.IsNotFound(err) {
-		// Nothing to do about it here: the Job is labelled and its pod is
-		// harmless. A failed run's error is what the operator needs.
+		// The Job is labelled and its pod harmless; the run's error is what matters.
 		return
 	}
 }
@@ -326,8 +297,7 @@ func (r *JobRunner) poll() time.Duration {
 	return runnerPoll
 }
 
-// dnsLabel lowercases name and keeps only what a label may hold, so an instance
-// name is always a legal file and label stem.
+// dnsLabel lowercases a name to what a label may hold.
 func dnsLabel(name string) string {
 	var b strings.Builder
 	for _, c := range strings.ToLower(name) {

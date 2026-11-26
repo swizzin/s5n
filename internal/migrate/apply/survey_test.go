@@ -193,10 +193,6 @@ const uncoveredRows = `@tables|section_locations
 @end|1
 `
 
-// TestSurveyDefersTheAppThatNeedsItsImage: the pre-install pass checks every app
-// it can and leaves Plex's row to the run after the install, saying so on the
-// row. The Arr is checked, the shell is not run, and everything the pass writes
-// is inside the directory the caller throws away.
 func TestSurveyDefersTheAppThatNeedsItsImage(t *testing.T) {
 	w := newPlexWorld(t)
 	p, raw := w.plan()
@@ -252,9 +248,6 @@ func TestSurveyDefersTheAppThatNeedsItsImage(t *testing.T) {
 	}
 }
 
-// TestSurveyHoldsTheRunToWhatWasShown: the summary the run after the install
-// shows is the one the operator agreed to, once Plex's row is filled in; a
-// difference anywhere else is refused, naming it.
 func TestSurveyHoldsTheRunToWhatWasShown(t *testing.T) {
 	w := newPlexWorld(t)
 	p, raw := w.plan()
@@ -296,10 +289,6 @@ func TestSurveyHoldsTheRunToWhatWasShown(t *testing.T) {
 	}
 }
 
-// TestThePostInstallCheckStopsBeforeAnythingIsEnabled: Plex's check is the last
-// one, and a path its plan does not settle stops the run there. Nothing of the
-// snapshot is in the seedbox's config root, no key is written, no connection is
-// adopted and nothing is switched on -- and the refusal names the path.
 func TestThePostInstallCheckStopsBeforeAnythingIsEnabled(t *testing.T) {
 	w := newPlexWorld(t)
 	p, raw := w.plan()
@@ -338,9 +327,6 @@ func TestThePostInstallCheckStopsBeforeAnythingIsEnabled(t *testing.T) {
 	}
 }
 
-// TestACleanPostInstallCheckAsksItsOneQuestion: with Plex's check clean, the run
-// goes on, and the question it asks is the one it asked before the install --
-// once, with Plex's row filled in rather than deferred.
 func TestACleanPostInstallCheckAsksItsOneQuestion(t *testing.T) {
 	w := newPlexWorld(t)
 	p, raw := w.plan()
@@ -376,9 +362,6 @@ func TestACleanPostInstallCheckAsksItsOneQuestion(t *testing.T) {
 	}
 }
 
-// TestCheckedRowsAreTheOnesTheQuestionDeferred: after the install the deferred
-// rows come back with what the check found, in the shape the confirm showed
-// them, and no other app's row is repeated.
 func TestCheckedRowsAreTheOnesTheQuestionDeferred(t *testing.T) {
 	agreed := Summary{Instances: []InstanceSummary{
 		{App: "plex", Staged: Staged{App: "plex", Files: 7, Bytes: 2 << 20}, Deferred: "its databases are checked once Plex's image runs", Enable: true},

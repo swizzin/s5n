@@ -1,20 +1,11 @@
 package apply
 
-// owned.go is step 9: the connections a rewriter pointed at the box are handed
-// to wiring's ownership record.
-//
-// Wiring adopts an object by name on its first run and by id afterwards, so a
-// download client or a Prowlarr application that already exists under another
-// name would otherwise get a second one created beside it (AGENTS.md, invariant
-// 11; docs/box.md, "Migrated connections are adopted by ID"). A rewriter reports
-// those objects as Report.Owned, and this file puts them where
-// internal/wiring looks them up.
-//
-// The record is `<release>-wiring`'s owned.json, a key Helm never renders and
-// the wiring Job upserts at run time. It is seeded here, before the apply that
-// first runs the Job, which is why migrate only works against a release that is
-// already installed: the ConfigMap is Helm's, and its install-time adopt patch
-// would drop a key it never rendered.
+// owned.go is step 9: the connections a rewriter pointed at the box go into
+// wiring's record, so wiring adopts them by id instead of creating a second one
+// (AGENTS.md, invariant 11; docs/box.md, "Migrated connections are adopted by ID").
+// The record is `<release>-wiring`'s owned.json, seeded before the Job first runs,
+// which is why migrate needs an installed release: the ConfigMap is Helm's and its
+// install-time patch would drop an unrendered key.
 
 import (
 	"context"
@@ -26,25 +17,16 @@ import (
 	"github.com/swizzin/s5n/internal/wiring"
 )
 
-// OwnedStore is the wiring ownership record of the release being migrated into:
-// the `owned.json` key of `<release>-wiring`.
-//
-// Read returns the raw value, nil when the key is absent (a release whose Job
-// has never run). Write replaces it. The implementation owns reading the
-// ConfigMap twice and updating it with the resourceVersion it read, so two
-// writers cannot silently drop each other's ids.
+// OwnedStore is the record's `owned.json` key: Read returns it (nil when absent),
+// Write replaces it; the implementation updates with the resourceVersion it read.
 type OwnedStore interface {
 	Read(ctx context.Context) ([]byte, error)
 	Write(ctx context.Context, data []byte) error
 }
 
-// seedOwned merges every connection this run's reports adopted into the
-// release's record.
-//
-// An entry that already names a different id for the same key stops the run:
-// the object was wired by someone else, and adopting this run's id would make
-// wiring update an object it does not own while the one it created is left
-// behind.
+// seedOwned merges this run's adopted connections into the record. An entry
+// already naming another id stops the run: wiring would update an object it does
+// not own and leave behind the one it made.
 func seedOwned(data []byte, reports []rewrite.Report, apps map[string]string) (*wiring.OwnedRecord, []rewrite.Owned, error) {
 	rec, err := wiring.ParseOwnedRecord(data)
 	if err != nil {
@@ -53,8 +35,8 @@ func seedOwned(data []byte, reports []rewrite.Report, apps map[string]string) (*
 	var seeded []rewrite.Owned
 	for _, rep := range reports {
 		for _, o := range rep.Owned {
-			// The holder is the app that stores the connection, which is the
-			// app this report came from; Target is what it now points at.
+			// Holder is the app storing the connection; Target is what it now points
+			// at.
 			if err := place(rec, rep.App, o, apps); err != nil {
 				return nil, nil, err
 			}
@@ -70,10 +52,8 @@ func seedOwned(data []byte, reports []rewrite.Report, apps map[string]string) (*
 	return rec, seeded, nil
 }
 
-// place files one adopted connection under the key wiring looks it up by
-// (internal/wiring/wiring.go): an Arr's download client and a Prowlarr
-// application are both keyed by the instance that stores them, and PBH's
-// downloader is one string id on the app itself.
+// place files one connection under wiring's key: the storing instance, or PBH's
+// string id (internal/wiring/wiring.go).
 func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[string]string) error {
 	app := apps[holder]
 	switch o.Kind {
@@ -90,8 +70,7 @@ func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[str
 		if app != appProwlarr {
 			return fmt.Errorf("%s (%s): a Prowlarr application can only be recorded on Prowlarr, not on %s", holder, app, app)
 		}
-		// The application lives in Prowlarr and is keyed by the Arr it reaches,
-		// which is the box instance the rewrite pointed it at.
+		// Keyed by the Arr it reaches, not the Prowlarr that stores it.
 		if !isArr(o.Target, apps) {
 			return fmt.Errorf("%s: the application %q now points at %q, which is not an Arr instance this migration adopts", holder, o.Name, o.Target)
 		}

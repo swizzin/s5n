@@ -13,8 +13,6 @@ import (
 	"testing"
 )
 
-// TestTheCopyACheckReadsIsTheStateAndNotItsLibrary: a Plex config directory is a
-// library of artwork as well as a state, and a check reads the state alone.
 func TestTheCopyACheckReadsIsTheStateAndNotItsLibrary(t *testing.T) {
 	src := t.TempDir()
 	home := filepath.Join(src, "Library", "Application Support", "Plex Media Server")
@@ -73,9 +71,6 @@ func TestTheCopyACheckReadsIsTheStateAndNotItsLibrary(t *testing.T) {
 	}
 }
 
-// TestSettleRefusesNoWorkingDirectory: a directory is where the copies go, and
-// there is no default, because the default would be the system's temporary
-// directory.
 func TestSettleRefusesNoWorkingDirectory(t *testing.T) {
 	r := newRehearsal(t, "", true)
 	in := r.settleInput()
@@ -86,9 +81,6 @@ func TestSettleRefusesNoWorkingDirectory(t *testing.T) {
 	}
 }
 
-// TestSettleCopiesBesideTheSnapshotAndNotInTmp: a read-only $TMPDIR does not stop
-// the pass, because the copies it checks are made in the directory its caller
-// names.
 func TestSettleCopiesBesideTheSnapshotAndNotInTmp(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a directory it cannot write, so the read-only $TMPDIR would prove nothing")

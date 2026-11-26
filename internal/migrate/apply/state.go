@@ -13,19 +13,12 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// State is `<config>/.box/migrate/<plan-id>/state.json`: what one plan has
-// already done.
-//
-// Apply writes to a running box's config root and its data root, two trees a
-// crash can leave half-changed: a config moved into place but the release not
-// yet applied, or the downloads renamed and the instances not moved. The file
-// is what makes the second run skip exactly the steps the first one finished
-// instead of renaming a directory that is no longer there or moving a config
-// over the app that already runs it.
+// State is `<config>/.box/migrate/<plan-id>/state.json`: what one plan has done. A
+// crash can leave the config and data roots half-changed, so this file makes the
+// second run skip exactly the finished steps.
 type State struct {
-	// Plan is the sha256 hex of the plan file this state belongs to. The
-	// directory is named by the first 12 hex of the same digest, so a
-	// mismatch means the directory was written by hand.
+	// Plan is the plan's sha256; the directory is its first 12 hex, so a mismatch
+	// means a hand-written directory.
 	Plan string `json:"plan"`
 	// Renamed are the data directories renamed under the data root, by their
 	// source name.
@@ -38,17 +31,13 @@ type State struct {
 	// Owned says the adopted connections were seeded into the release's
 	// owned.json.
 	Owned bool `json:"owned"`
-	// Values says the instances were switched on in the seedbox's files.
-	// It is the last step before apply, so a state with this set has nothing
-	// left to do; one without it is a migration that must be finished before
-	// another can start.
+	// Values says the instances were switched on, the last step: a state with it has
+	// nothing left, and one without must be finished before another starts.
 	Values bool `json:"values"`
 }
 
-// PlanID is the plan's short name: the first 12 hex of its sha256, which is
-// the directory under `<config>/.box/migrate` a run stages in and records to.
-// Short because it ends up in paths a person reads, long enough that two plans
-// never collide.
+// PlanID is the first 12 hex of the plan's sha256: short for paths, long enough
+// not to collide.
 func PlanID(planBytes []byte) string { return PlanDigest(planBytes)[:12] }
 
 // PlanDigest is the full sha256 hex of the plan file, which is what State

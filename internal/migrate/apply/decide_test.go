@@ -24,10 +24,6 @@ func settleFixture(t *testing.T) (*plan.Plan, Settled) {
 	return p, called
 }
 
-// TestDecideAsksAboutThePlansOwnDefaults: a default discovery wrote -- a pod
-// address it proposed for one app -- is a decision the plan already carries, so
-// the read calls it out and a guided run asks about it exactly like the ones the
-// checks made.
 func TestDecideAsksAboutThePlansOwnDefaults(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false)+`  - host: 10.244.0.7
     port: 8081
@@ -86,8 +82,6 @@ func TestDecideAsksAboutThePlansOwnDefaults(t *testing.T) {
 	}
 }
 
-// TestDecideWritesTheAnswerIntoThePlan: an address box defaulted to one Arr is
-// pointed at the other when the operator says so, and the rule says who decided.
 func TestDecideWritesTheAnswerIntoThePlan(t *testing.T) {
 	p, called := settleFixture(t)
 	var asked []Choice
@@ -143,8 +137,6 @@ func TestDecideWritesTheAnswerIntoThePlan(t *testing.T) {
 	}
 }
 
-// TestDecideLeavesWhatTheOperatorLeaves: an address box proposed an app for is
-// left as stored when the operator says so, and the rule becomes a leave.
 func TestDecideLeavesWhatTheOperatorLeaves(t *testing.T) {
 	p, called := settleFixture(t)
 	decided, err := Decide(p, called, func(c Choice) (string, error) {
@@ -177,9 +169,6 @@ func TestDecideLeavesWhatTheOperatorLeaves(t *testing.T) {
 	}
 }
 
-// TestDecideAsksAboutAddressesOnly: a path box left as it is has no alternative
-// to offer, and a check is not a decision, so neither is a question. Both still
-// appear in the list, and a path is still a default taken.
 func TestDecideAsksAboutAddressesOnly(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false), false)
 	exec(t, r.path("sonarr")+"/sonarr.db",
@@ -213,9 +202,6 @@ func TestDecideAsksAboutAddressesOnly(t *testing.T) {
 	}
 }
 
-// TestDecideRefusesAnAppThePlanDoesNotHave: a prompter can only offer the
-// plan's apps, so an answer naming anything else is a bug in the caller rather
-// than a rule the plan validation would refuse later.
 func TestDecideRefusesAnAppThePlanDoesNotHave(t *testing.T) {
 	p, called := settleFixture(t)
 	_, err := Decide(p, called, func(Choice) (string, error) { return "emby", nil })
@@ -224,10 +210,6 @@ func TestDecideRefusesAnAppThePlanDoesNotHave(t *testing.T) {
 	}
 }
 
-// TestDecideAcceptingADefaultMakesItAnAnswer: an operator who confirms box's
-// choice has looked at it, so the rule is theirs now and the value stops being
-// counted among the defaults taken. What is left is what was never asked: the
-// paths, whose only rewrite is identity.
 func TestDecideAcceptingADefaultMakesItAnAnswer(t *testing.T) {
 	p, called := settleFixture(t)
 	before := append([]plan.HostRule(nil), p.Hosts...)

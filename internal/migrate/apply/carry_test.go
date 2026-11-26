@@ -113,8 +113,6 @@ func carriedFile(t *testing.T, env Env, rel string) bool {
 	return err == nil
 }
 
-// TestAFullCarryIsStagedWholeWhenTheConfigRootCanHoldIt: the tree the snapshot
-// carried is what the release runs, artwork included.
 func TestAFullCarryIsStagedWholeWhenTheConfigRootCanHoldIt(t *testing.T) {
 	env, p, raw := plexCarryEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}
@@ -127,10 +125,6 @@ func TestAFullCarryIsStagedWholeWhenTheConfigRootCanHoldIt(t *testing.T) {
 	}
 }
 
-// TestAShortConfigRootCarriesTheStateAndSaysWhy: the snapshot has the tree and
-// the config root cannot hold it, so the run stages the state alone -- and the
-// summary the operator reads says so with the numbers, on the app's row and in
-// the notes.
 func TestAShortConfigRootCarriesTheStateAndSaysSo(t *testing.T) {
 	env, p, raw := plexCarryEnv(t)
 	env.Disk = shortDisk{free: 1 << 20}
@@ -168,9 +162,6 @@ func TestAShortConfigRootCarriesTheStateAndSaysSo(t *testing.T) {
 	}
 }
 
-// TestAPlanThatSaysTheStateNeverStagesTheTree: a snapshot keeps what the plan
-// says, so an apply of one whose plan carries the state does not grow a library
-// back on the way in.
 func TestAPlanThatSaysTheStateNeverStagesTheTree(t *testing.T) {
 	env, p, _ := plexCarryEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}
@@ -219,11 +210,6 @@ func carriedPhrase(t *testing.T, s Summary) string {
 	return ""
 }
 
-// TestAnAgreementHoldsWhenTheConfigRootShortensTheCarry: the question is asked
-// before there is a config path (a host with no box asks for it during the
-// install), so the pre-install pass says the whole data travels and the run that
-// follows may find no room. That one difference is not a fault, and the row it
-// changed is printed where the operator read the promise.
 func TestAnAgreementHoldsWhenTheConfigRootShortensTheCarry(t *testing.T) {
 	env, p, raw := plexCarryEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}
@@ -261,8 +247,6 @@ func TestAnAgreementHoldsWhenTheConfigRootShortensTheCarry(t *testing.T) {
 	}
 }
 
-// TestTheStateSetIsWhatTheSnapshotNames keeps the two halves in step: what apply
-// stages for a short run is discovery's state list, not a second list of files.
 func TestTheStateSetIsWhatTheSnapshotNames(t *testing.T) {
 	state := plex.Snapshot(false)
 	if len(state.Files) == 0 {
@@ -275,10 +259,6 @@ func TestTheStateSetIsWhatTheSnapshotNames(t *testing.T) {
 	}
 }
 
-// TestTheStateLandsWhereTheAppReadsIt: a state-only carry puts Plex's
-// Preferences.xml and its databases under the directory its image reads them
-// from, not at the top of the mount. Plex that finds no Preferences.xml writes
-// itself a new identity, which is the one thing a migration must not make it do.
 func TestTheStateLandsWhereTheAppReadsIt(t *testing.T) {
 	env, p, raw := plexCarryEnv(t)
 	env.Disk = shortDisk{free: 1 << 20}

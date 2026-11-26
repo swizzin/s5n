@@ -55,8 +55,6 @@ func TestLoadStateRefusesAHalfWrittenRecord(t *testing.T) {
 	}
 }
 
-// TestPlanIDIsTheFirstTwelveHex pins the directory name the design names, so a
-// plan's staging directory is predictable from the file.
 func TestPlanIDIsTheFirstTwelveHex(t *testing.T) {
 	id := PlanID([]byte("version: 2\napps: {}\n"))
 	if len(id) != 12 {

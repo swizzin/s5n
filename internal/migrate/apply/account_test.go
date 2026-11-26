@@ -7,11 +7,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// TestSummaryNamesTheAccountItRenames: an app that keeps its own user table gets
-// one account, box's, and the confirm is where the operator reads that the name
-// they used to sign in with is not the name any more -- and that the app's login
-// was never their way in. The source's name is their own data on their own
-// screen, so the line prints it.
 func TestSummaryNamesTheAccountItRenames(t *testing.T) {
 	s := Summary{Instances: []InstanceSummary{{
 		App:      "autobrr",
@@ -23,10 +18,6 @@ func TestSummaryNamesTheAccountItRenames(t *testing.T) {
 	}
 }
 
-// TestAWriteThatSkipsTheAccountRenameIsRefused: apply holds every Write to the
-// Check before it. An account rename is not a counted column change, so it has
-// its own comparison: a Write that reported a different set of renamed accounts
-// than its Check is a Write that did less (or more) than the operator was shown.
 func TestAWriteThatSkipsTheAccountRenameIsRefused(t *testing.T) {
 	renamed := rewrite.Report{App: "qui", Accounts: []rewrite.Account{{From: "source-login", To: "s5n"}}}
 	if why, same := sameReport(renamed, renamed); !same {

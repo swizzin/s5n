@@ -1,14 +1,9 @@
 package apply
 
-// report.go is a run's own account of itself: what it moves, renames, keeps and
-// leaves behind, as the sectioned page a person reads in full (docs/output.md,
-// rule 7).
-//
-// The snapshot already carries the read's report -- what discovery found and what
-// its checks settled -- and this is the other half: the rows the confirm shows
-// folded, every rewrite counted, the notes said once each, the values left as they
-// are, and the workloads that stay behind. A screen keeps the counts and points
-// here; --details prints the per-rewrite list for someone checking one row.
+// report.go is a run's own account: what it moves, renames, keeps and leaves, as
+// the page a person reads in full (docs/output.md, rule 7). It is the other half of
+// the read's report: folded confirm rows, counted rewrites, notes once each, values
+// left, and workloads staying behind.
 
 import (
 	"strconv"
@@ -97,9 +92,8 @@ func (s Summary) reportLibrary() []report.Row {
 	return rows
 }
 
-// reportLeft is every value this run leaves as it is, per app: the state, the
-// clause the screen showed, and the whole sentence the rewriter wrote about it,
-// which is what the screen has no room for (rules 2 and 7).
+// reportLeft is every value left as it is: the screen's clause and the rewriter's
+// whole sentence (rules 2 and 7).
 func (s Summary) reportLeft() []report.Row {
 	var rows []report.Row
 	for _, in := range s.Instances {
@@ -114,8 +108,7 @@ func (s Summary) reportLeft() []report.Row {
 	return rows
 }
 
-// reportDefaults is the plan's own decisions, each with its reason: the values
-// nobody answered, which the run took.
+// reportDefaults is the plan's own decisions with their reasons.
 func (s Summary) reportDefaults() []report.Row {
 	rows := make([]report.Row, 0, len(s.Defaults))
 	for _, d := range s.Defaults {
@@ -124,8 +117,7 @@ func (s Summary) reportDefaults() []report.Row {
 	return rows
 }
 
-// tableRows is a grouped block's rows as report rows: the apps that share a
-// decision, and the sentence about it.
+// tableRows is a grouped block's rows as report rows.
 func tableRows(rows []say.TableRow) []report.Row {
 	out := make([]report.Row, 0, len(rows))
 	for _, r := range rows {

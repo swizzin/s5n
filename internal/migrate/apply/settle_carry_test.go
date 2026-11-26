@@ -31,9 +31,6 @@ func unsettled() (*plan.Plan, Settled) {
 	return p, s
 }
 
-// TestAnAnswerFromAnEarlierReadIsCarriedNotAsked: the same address, answered in
-// the read before this one, becomes this plan's answer, leaves the called-out
-// list, and is one row for the screen -- the operator is not asked twice.
 func TestAnAnswerFromAnEarlierReadIsCarriedNotAsked(t *testing.T) {
 	now, settled := unsettled()
 	prior := &plan.Plan{
@@ -70,9 +67,6 @@ func TestAnAnswerFromAnEarlierReadIsCarriedNotAsked(t *testing.T) {
 	}
 }
 
-// TestAnAnswerForAnAppThisPlanDoesNotHaveIsAsked: an earlier read of a different
-// app list is not this plan's answer, so the value stays a default and is asked
-// about rather than written into a rule naming an app that is not there.
 func TestAnAnswerForAnAppThisPlanDoesNotHaveIsAsked(t *testing.T) {
 	now, settled := unsettled()
 	prior := &plan.Plan{
@@ -89,9 +83,6 @@ func TestAnAnswerForAnAppThisPlanDoesNotHaveIsAsked(t *testing.T) {
 	}
 }
 
-// TestARehearsalAnswerIsCarriedToo: a leave is an answer, and the plan's answer
-// may be that the value stays: that is carried like any other, so a person is
-// asked once.
 func TestALeaveFromAnEarlierReadIsCarried(t *testing.T) {
 	now, settled := unsettled()
 	prior := &plan.Plan{
@@ -114,9 +105,6 @@ func TestALeaveFromAnEarlierReadIsCarried(t *testing.T) {
 	}
 }
 
-// TestCarriedAnswersReadAsOneLineEach: the row the screen prints is the subject,
-// the address and what it means -- one line, no annotation about where the answer
-// came from.
 func TestCarriedAnswersReadAsOneLineEach(t *testing.T) {
 	now, settled := unsettled()
 	prior := &plan.Plan{

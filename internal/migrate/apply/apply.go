@@ -1,24 +1,10 @@
-// Package apply is the write half of `box migrate`: it adopts a source install
-// into a seedbox box has installed.
-//
-// The order is fixed and every step refuses before it writes: the plan and the
-// seedbox are read, every problem is collected, each app's config is copied into
-// a staging tree and checked there, the operator sees the whole change once, and
-// only then does anything move. A rewriter's Check pass writes nothing, and no
-// app's Write runs until every app's Check has passed, so one uncovered path in
-// the last app stops the migration before its first write (docs/box.md,
-// "Shown before it's done").
-//
-// The source is never written. It is copied, the copy is rewritten, and the copy
-// is what the release runs: the source stays the rollback the operator tears
-// down after the box has proved itself.
-//
-// What lives here is everything testable without a cluster: the staging copy,
-// the preflight, the state file, the summary, the two passes, the data renames,
-// the move into place, the ownership seed and the switch-on. cmd/box builds the
-// dependencies (Env) and hands over to `box apply` afterwards. The one piece
-// that talks to a cluster is the Job runner (runner.go), and it is written
-// against a clientset so a fake drives it.
+// Package apply is the write half of `box migrate`: it adopts a source into an
+// installed seedbox. Every step refuses before it writes -- plan and seedbox read,
+// problems collected, configs staged and checked, one confirm -- and no app's
+// Write runs until every Check passed, so one uncovered path stops the migration
+// before its first write (docs/box.md, "Shown before it's done"). The source is
+// never written: the copy is what the release runs, and the source stays the
+// rollback. Only runner.go talks to a cluster, through a clientset a fake drives.
 package apply
 
 import (
@@ -44,33 +30,21 @@ var ErrCancelled = errors.New("cancelled")
 // Env is everything apply touches outside the plan directory, injected so every
 // refusal and every write is testable without a cluster or an installed box.
 type Env struct {
-	// ConfigRoot and DataRoot are the grant's two host paths. ConfigRoot is
-	// where each instance's directory goes (the claim's subPath), DataRoot is
-	// the tree the release mounts at /data and the one a rename happens in.
+	// ConfigRoot and DataRoot are the grant's two host paths: an instance's
+	// directory goes under the first, renames happen in the second.
 	ConfigRoot, DataRoot string
-	// Configs is the directory holding one config tree per planned app, as the
-	// snapshot carries them: `<Configs>/<instance>/` is what this run stages
-	// and rewrites. The plan's own `config:` key is where the source kept it
-	// and is informational: apply never reads the source host.
+	// Configs holds one config tree per app, as the snapshot carries them; the
+	// plan's `config:` is informational, since apply never reads the source host.
 	Configs string
-	// PUID and PGID are the values' global.puid and global.pgid: everything
-	// staged is owned by them, because the pod's user is not box's.
+	// PUID and PGID own everything staged: the pod's user is not box's.
 	PUID, PGID int
-	// Chown hands one path of a staged config tree to the seedbox's user,
-	// never following a link (own.go). Nil means os.Lchown; a test that
-	// cannot change an owner records the calls instead.
+	// Chown hands a staged path to the seedbox's user, never following a link
+	// (own.go). Nil means os.Lchown.
 	Chown func(path string, uid, gid int) error
-	// Disk answers the one question a run asks about room: an app whose whole
-	// data the snapshot carries is staged whole only when the config root can
-	// hold it (carry.go). Nil means the host's own filesystems; a test that
-	// needs a short disk hands over its own.
+	// Disk answers the room question (carry.go); nil means the host's own.
 	Disk space.Disk
-	// Bulk is the rest of the snapshot's copy of an app's config: the whole data
-	// a full carry holds, which no check reads and which is never extracted
-	// beside them. A run stages it once, straight from the snapshot into the
-	// staging tree, and asks it for the numbers a summary prints rather than
-	// walking a tree that is not on this host. Nil means the extract under
-	// Configs is the whole of every app's config.
+	// Bulk is the rest of a full carry's config, staged once from the snapshot
+	// rather than extracted beside the checks; nil means Configs is all of it.
 	Bulk Bulk
 	// Targets is where every instance answers inside the release (chart.go,
 	// Targets).
@@ -92,48 +66,29 @@ type Env struct {
 	Secret KeyStore
 	// Values turns an instance on in the seedbox's files.
 	Values ValuesEditor
-	// Confirm shows the summary and asks the one question. A nil Confirm is
-	// refused by Run: an unattended run has to say --yes, which cmd/box turns
-	// into a Confirm that answers yes without printing anything.
+	// Confirm shows the summary and asks the one question; nil is refused, and
+	// unattended runs say --yes, which cmd/box turns into an answering Confirm.
 	Confirm func(summary Summary) (bool, error)
-	// Catalog is the app names of the chart release being applied into: what
-	// says whether this box can migrate an app at all. It is the one field
-	// this package adds to the design's Env, because the chart is not part of
-	// the plan and applying into a chart that has no such app is a refusal
-	// before the first write rather than a surprise after it.
+	// Catalog is the chart release's app names: applying into a chart without a
+	// planned app is a refusal before the first write.
 	Catalog []string
-	// Image is the image this release runs for one catalog app, or "" when the
-	// chart has none for it. It is what the confirm's version column compares
-	// the source's image against (versions.go); nil leaves every row `?`, which
-	// is what a caller with no chart to ask wants.
+	// Image is the release's image for an app ("" when it has none), for the
+	// confirm's version column (versions.go); nil leaves every row `?`.
 	Image func(app string) string
-	// Rehearsal says this run applies a rehearsal snapshot: the release is
-	// locked (the box's grant carries the flag, so its egress policy has no
-	// internet), the data is neither adopted nor renamed, and a rewriter whose
-	// app would act on the network with nothing else to stop it writes its
-	// state quiet.
+	// Rehearsal applies a rehearsal snapshot: the release is locked, data is
+	// neither adopted nor renamed, and a rewriter that would act on the network
+	// writes its state quiet.
 	Rehearsal bool
-	// deferred is Survey's mode, set by Survey itself and never by a caller: an
-	// app whose rewriter needs its own image (NeedsRunner) is checked after the
-	// install instead, because this pass runs before there is a box to run one
-	// in. Its row carries the sentence (InstanceSummary.Deferred).
+	// deferred is Survey's mode: an app needing its own image is checked after the
+	// install. Its row carries InstanceSummary.Deferred.
 	deferred bool
 }
 
-// OwnedStore and ValuesEditor are the two halves of the seedbox this package
-// does not own. OwnedStore is in owned.go; ValuesEditor is the other.
-
-// ValuesEditor turns one instance on in the seedbox's files.
-//
-// It is called only for instances the values do not already enable, and its
-// implementation edits the files the way `box init` does: apps.<app>.enabled,
-// and for an app that takes instances an entry in apps.<app>.instances. Both
-// are grant keys (internal/seedbox/grant.go), so the implementation writes the
-// grant, not the user's values file.
-//
-// downloadCategory is the qBittorrent category the instance's torrents are
-// already in (plan.App.DownloadCategory), empty when the source said nothing
-// about it: the instance then downloads into its own category.
+// ValuesEditor turns one instance on in the seedbox's files, only when the values
+// do not already enable it. It edits apps.<app>.enabled or adds an
+// apps.<app>.instances entry -- both grant keys (internal/seedbox/grant.go) -- the
+// way `box init` does. downloadCategory is the torrents' existing category, empty
+// when the source said nothing and the instance gets its own.
 type ValuesEditor interface {
 	Enable(instance, downloadCategory string) error
 }
@@ -142,36 +97,25 @@ type ValuesEditor interface {
 type Summary struct {
 	// Instances are the plan's apps, sorted by name.
 	Instances []InstanceSummary
-	// Renames are the data directories apply would rename, source to contract
-	// name (plan.Data.Renames).
-	Renames []string
-	// MediaRenames are the library's own directories, source to the box
-	// category they become (plan.Data.MediaRenames): the directories a person
-	// sees in the Arrs, Plex and Seerr.
+	// Renames and MediaRenames are the data and library renames (plan.Data).
+	Renames      []string
 	MediaRenames []string
-	// Defaults are the plan's own decisions: the rules discovery wrote and
-	// nobody answered (plan.Defaults). A default is never silent, so the
-	// confirm screen names every one of them.
+	// Defaults are the plan's own decisions (plan.Defaults), never silent: the
+	// confirm names every one.
 	Defaults []string
-	// Outside are the source's workloads box has no app for: they are not
-	// migrated, and the operator brings them back by hand.
+	// Outside are the source's workloads box has no app for.
 	Outside []string
-	// Rehearsal says this run is a rehearsal: nothing leaves the box and no
-	// data is renamed. It is a property of the run, not of the plan.
+	// Rehearsal says nothing leaves the box and no data is renamed.
 	Rehearsal bool
-	// Stopped is how many torrents this run writes stopped, which is the one
-	// change no config file shows.
+	// Stopped is how many torrents this run writes stopped.
 	Stopped int
-	// DefaultRules are the plan's own decisions in a form a grouped screen can
-	// count them by: Defaults is the same list as the lines a report prints.
+	// DefaultRules is Defaults in a form a grouped screen counts by.
 	DefaultRules []plan.Default
-	// Carried are the notes about what each app's staged config holds, the
-	// app's own words: Plex's is its whole data, or its state alone.
+	// Carried are the notes about what each staged config holds.
 	Carried []Carried
 }
 
-// Carried is one app's note about what its staged config holds: its whole data,
-// or the state alone with what the app builds again.
+// Carried is one app's note about what its staged config holds.
 type Carried struct {
 	App  string
 	Note string
@@ -183,51 +127,34 @@ type InstanceSummary struct {
 	Staged  Staged
 	Changes []rewrite.Change
 	Notes   []string
-	// Left are the values the app stores and box will not touch, with their
-	// reasons: a client it never dials, a client of a type box does not run,
-	// a folder history never reads again. They stop nothing, so they are
-	// shown before the confirm rather than after the run.
+	// Left are the values box will not touch, with reasons; they stop nothing, so
+	// they are shown before the confirm.
 	Left []rewrite.Left
-	// Accounts are the app's own account rows this run renames to box's account
-	// (rewrite.Account): the app's single account, which the init container then
-	// signs in as, so it is box's rather than the source owner's.
+	// Accounts are the account rows renamed to box's (rewrite.Account).
 	Accounts []rewrite.Account
 	// Enable says this run switches the instance on.
 	Enable bool
-	// Keys are the release Secret's key names for the keys this instance keeps:
-	// names only, because a key is never printed.
+	// Keys are the release Secret's key names kept, never their values.
 	Keys []string
-	// Token is the release Secret's key name for this instance's Plex server
-	// token, when the run keeps one: plex-token, and only ever on the Plex row.
+	// Token is the release Secret's name for the Plex token, on the Plex row only.
 	Token string
 	// Owned are the connections that will be adopted by id.
 	Owned []rewrite.Owned
-	// Stopped is how many of this app's stored objects this run writes stopped:
-	// a rehearsal's torrents.
+	// Stopped is how many stored objects this run writes stopped.
 	Stopped int
-	// Deferred is the sentence a pre-install pass left on this row instead of a
-	// check: the app's config is checked once its image runs, after the install.
-	// It is empty for every app the pass checked, and for every row a run after
-	// the install shows.
+	// Deferred is the sentence a pre-install pass left instead of a check.
 	Deferred string
-	// Carry is what this run stages out of an app whose config is more than its
-	// state: its whole data, or the state it cannot rebuild. Empty for every app
-	// whose config is its state.
+	// Carry is what this run stages of a config that is more than its state.
 	Carry string
-	// Short is the line with the numbers, when this run carries less than the
-	// plan says because there is no room at the config root. It is the one thing
-	// a summary shows that the plan did not: the confirm owes the operator it.
+	// Short names the numbers when the run carries less than the plan says for
+	// lack of room; the confirm owes the operator that.
 	Short string
-	// Version is what the source ran and what this release runs for it: the
-	// column a person decides a downgrade on (versions.go). Both sides empty
-	// when the caller had no chart to ask.
+	// Version is the source's image against this release's (versions.go).
 	Version AppVersion
 }
 
-// Lines renders the summary as rows: one per change, note, rename, instance
-// switched on, adopted connection, default the plan took and outside workload,
-// in that order. What box leaves as it is comes right after the changes, which
-// is where the operator looks for what will not move.
+// Lines renders the summary as rows in reading order: changes, what box leaves,
+// renames, switches, keys, adoptions, defaults, leftovers.
 func (s Summary) Lines() []string {
 	var rows []string
 	if s.Rehearsal {
@@ -283,9 +210,8 @@ func (s Summary) Lines() []string {
 			rows = append(rows, fmt.Sprintf("%s: keep its API key (%s)", in.App, key))
 		}
 		if in.Token != "" {
-			// The one credential that is not an app's own key: the migrated
-			// server's token, which every Plex-dependent app reads from the
-			// release Secret. Named as the token it is, never printed.
+			// Not an app's own key: the server token every Plex-dependent app
+			// reads. Named as the token, never printed.
 			rows = append(rows, fmt.Sprintf("%s: keep its Plex token (%s)", in.App, in.Token))
 		}
 	}
@@ -306,8 +232,7 @@ func (s Summary) Lines() []string {
 // Result is what one run did, for the caller to report and a test to assert.
 type Result struct {
 	PlanID string
-	// Done says an earlier run of this same plan finished every step, so this
-	// run did nothing; the caller goes straight to the apply.
+	// Done says an earlier run of this plan finished, so nothing was done.
 	Done    bool
 	Staged  []Staged
 	Reports []rewrite.Report
@@ -322,15 +247,12 @@ type Result struct {
 	Owned []rewrite.Owned
 	// Enabled are the instances this run switched on.
 	Enabled []string
-	// Notes are lines the operator only learns after the writes: a note a
-	// Write pass reported, and anything a later step could not do. The caller
-	// prints them when the run returns.
+	// Notes are lines the operator learns after the writes.
 	Notes []string
 }
 
-// problems is one refusal with every problem found in it. A plan and a
-// seedbox are each a page an operator edits, so one pass has to say everything
-// that is wrong rather than the first thing.
+// problems is one refusal with every problem in it: an operator fixes one page,
+// not one line.
 type problems struct {
 	lead  string
 	items []string
@@ -343,34 +265,30 @@ func (p *problems) Error() string {
 	return p.lead + ":\n  " + strings.Join(p.items, "\n  ")
 }
 
-// migration is one run's state: the plan, its environment, the staging
-// directory and the record of what is already done.
+// migration is one run's state: plan, environment, staging and the record.
 type migration struct {
 	p   *plan.Plan
 	env Env
 	id  string
-	// dir is `<config>/.box/migrate/<plan-id>`: staging, the runner's files
-	// and the state record.
+	// dir is `<config>/.box/migrate/<plan-id>`: staging and the state record.
 	dir string
 	st  *State
 	res Result
-	// checks is every app's Check report, which the Write pass is held to.
+	// checks is every app's Check report, which Write is held to.
 	checks map[string]rewrite.Report
-	// deferred are the apps a Survey pass could not check: their rewriter runs
-	// the app's own image, and this pass runs before the box that has one.
+	// deferred are the apps whose rewriter needs the app's image, checked later.
 	deferred map[string]bool
-	// carry is what this run stages for each app whose config is more than its
-	// state (carry.go), settled before the first byte is copied.
+	// carry is what this run stages of a config that is more than its state,
+	// settled before the first byte.
 	carry map[string]carryDecision
-	// keys are the API keys read out of the staged copies, waiting for step 8,
-	// and keyNames is the same set as names for the summary.
+	// keys are the API keys read from the staged copies; keyNames is for the
+	// summary.
 	keys     []keptKey
 	keyNames []string
 }
 
-// Run performs steps 2 to 10 of a migration. A plan whose every step is already
-// recorded returns Done without touching anything, which is what makes a second
-// run of the same plan a no-op instead of a re-rename.
+// Run performs steps 2 to 10. A plan whose steps are recorded returns Done
+// untouched, so a second run is a no-op, not a re-rename.
 func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, error) {
 	res := Result{PlanID: PlanID(planBytes)}
 	if env.Confirm == nil {
@@ -432,19 +350,15 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 	return m.res, nil
 }
 
-// StoppedBeforeWrite reports whether an error is one Run returns before its first
-// write outside the staging tree: a preflight refusal, or a Check that found
-// something the plan does not settle. A caller that installed a box first says so
-// only with this, because "nothing has been moved" is what it tells the operator,
-// and it is only true here.
+// StoppedBeforeWrite reports an error returned before the first write outside
+// staging -- a preflight refusal or a Check gap -- which is the only case where
+// "nothing has been moved" is true.
 func StoppedBeforeWrite(err error) bool {
 	var p *problems
 	return errors.As(err, &p)
 }
 
-// Preflight is step 1: every problem the plan and the seedbox have together,
-// before anything is staged. It writes nothing, so a refusal leaves the host
-// exactly as it was and the source's own tree untouched.
+// Preflight is step 1: every problem found together, writing nothing.
 func Preflight(p *plan.Plan, planBytes []byte, env Env) error {
 	if p == nil {
 		return errors.New("no plan: migrate applies a plan written by `box migrate discover`")
@@ -480,10 +394,8 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 		return nil
 	}
 	if env.Rehearsal {
-		// A rehearsal adopts no data: it never renames, and the copy may not
-		// have the source's tree at all. Torrents start stopped precisely so
-		// that nothing reads it back, and the paths in the configs are still
-		// rewritten to where box would find the data on a real run.
+		// A rehearsal adopts no data: nothing is renamed, torrents start stopped,
+		// and config paths are still rewritten for a real run.
 		return nil
 	}
 	root := path.Clean(env.DataRoot)
@@ -494,8 +406,7 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 	for _, pair := range [][2]string{{d.Downloads, plan.DownloadsDir}, {d.Media, plan.MediaDir}} {
 		from, to := filepath.Join(env.DataRoot, pair[0]), filepath.Join(env.DataRoot, pair[1])
 		if has(st.Renamed, pair[0]) {
-			// An earlier run of this plan made the rename; the source name is
-			// gone by design.
+			// An earlier run made the rename; the source name is gone by design.
 			continue
 		}
 		if !isDir(from) {
@@ -505,10 +416,8 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 		if pair[0] == pair[1] || !exists(to) {
 			continue
 		}
-		// The box's own /data/{downloads,media}/<category> directories are
-		// empty, and the rename removes them: only a target with a file
-		// anywhere under it is the operator's data, and moving that by hand is
-		// the refusal's business.
+		// Only a target holding a file is the operator's data; an empty box-made
+		// directory is removed by the rename.
 		if empty, err := emptyTree(to); err != nil || !empty {
 			items = append(items, fmt.Sprintf("data: %s already exists and is not empty, and %s has to become %s: move its contents into %s by hand first",
 				to, pair[0], pair[1], from))

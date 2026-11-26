@@ -1,19 +1,11 @@
 package apply
 
 // versions.go is the confirm's version column: what the source ran, what the
-// release runs, and the one refusal the pair can make (docs/output.md, "The
-// migration's screens").
-//
-// An app's config is written by the version that ran it, and an older app is not
-// one anybody can trust with a newer app's database. So the two versions are on
-// the row a person decides from, an upgrade is marked, and a downgrade stops the
-// run before anything moves unless they say --yolo.
-//
-// The comparison reads the version a person reads. A tag is a version with the
-// packaging around it stripped -- version-4.0.14.2939, v1.36.1, release-5.0,
-// 5.3.0-lt1.2 -- and the fourth part and beyond is a build number (Plex's
-// 1.43.5.11079, Sonarr's 5.0.0.3041), so it is in neither the column nor the
-// comparison: two builds of one version are one version.
+// release runs, and the downgrade refusal (docs/output.md, "The migration's
+// screens"). An app's config was written by the version that ran it, so a
+// downgrade stops the run unless the operator says --yolo. The comparison reads the
+// version a person reads: packaging stripped, and the fourth part and beyond (a
+// build number) ignored.
 
 import (
 	"strconv"
@@ -26,13 +18,10 @@ import (
 // the image this release runs for it.
 type AppVersion struct {
 	App string
-	// Source and Box are the versions as a person reads them, empty when that
-	// side names no version this box can read (a digest, `latest`, an image it
-	// has no tag for).
+	// Source and Box are readable versions; empty for a digest or `latest`.
 	Source, Box string
-	// Known says both sides read as a version, so they can be compared. A pair
-	// with one unknown is `?` and is never a refusal: box does not stop a
-	// migration over something it could not read.
+	// Known says both sides read as versions; an unknown side is `?`, never a
+	// refusal.
 	Known bool
 	// Cmp is the release against the source: -1 when the release runs an older
 	// app, 0 when they are the same version, 1 when it runs a newer one.
@@ -42,10 +31,7 @@ type AppVersion struct {
 // Downgrade says this release runs an older app than wrote the config.
 func (v AppVersion) Downgrade() bool { return v.Known && v.Cmp < 0 }
 
-// Cell is the row's text: one version when there is nothing to compare, the pair
-// with the direction when there is, and `?` when this box could not read one side.
-// It is empty when this run had no chart to ask, so a summary built without one
-// says nothing about versions rather than a column of question marks.
+// Cell is the row's text: one version, a marked pair, `?`, or empty with no chart.
 func (v AppVersion) Cell() string {
 	switch {
 	case v.Source == "" && v.Box == "":
@@ -74,15 +60,8 @@ func versionOf(instance, source, release string) AppVersion {
 	return v
 }
 
-// Versions is the confirm's version column, from the plan and the chart alone:
-// one row per planned instance, in the summary's order, with no staging copy and
-// no cluster behind it.
-//
-// It is what the confirm prints and what the refusal reads, so the run can
-// refuse a downgrade before it copies an app's config -- a release older than
-// the version that wrote the source is a fact about two image references. image
-// is the chart's own resolution, empty for a chart that has no image for the app
-// (the row then reads `?`).
+// Versions is the column from the plan and chart alone: the confirm prints it and
+// the refusal reads it, so a downgrade stops before any copy.
 func Versions(p *plan.Plan, catalog []string, image func(app string) string) []AppVersion {
 	names := planApps(p)
 	out := make([]AppVersion, 0, len(names))
@@ -124,8 +103,7 @@ func (s Summary) Versions() []AppVersion {
 // source's config was written by, sorted by name (the summary's order).
 func (s Summary) Downgrades() []AppVersion { return Downgrades(s.Versions()) }
 
-// tagVersion is the version an image reference names, as a person reads it, or ""
-// when it names none box can read.
+// tagVersion is the readable version an image names, or "".
 func tagVersion(ref string) string {
 	parts, ok := parseVersion(ref)
 	if !ok {
@@ -155,27 +133,20 @@ func tagVersion(ref string) string {
 	return strings.Join(out, ".")
 }
 
-// versionParts is how many parts of a version a person reads: major, minor and
-// patch. The rest is the build.
+// versionParts is major, minor and patch; the rest is the build.
 const versionParts = 3
 
-// wildcard is a part a project writes as a wildcard (`2.x`): it reads as the
-// zero a missing part reads as, and it decides nothing.
+// wildcard reads as the zero a missing part does, and decides nothing.
 const wildcard = -1
 
-// parseVersion reads the version out of an image reference: the tag, less the
-// packaging a project puts around it. ok is false for a reference with no tag
-// (a bare digest, `latest`), which is the `?` the column shows.
-//
-// A part a project wildcards (`2.x`) is read as the number it starts with, so a
-// pair of one decidable part still compares.
+// parseVersion reads the tag minus packaging; ok is false for a digest or
+// `latest`, which is the `?`. A wildcard part reads as its leading number.
 func parseVersion(ref string) ([]int, bool) {
 	tag := ref
 	if i := strings.IndexByte(tag, '@'); i >= 0 {
 		tag = tag[:i]
 	}
-	// The colon after the last slash is the tag's; before it, it is a
-	// registry's port.
+	// Only the colon after the last slash is the tag's.
 	if i := strings.LastIndexByte(tag, ':'); i >= 0 && !strings.Contains(tag[i:], "/") {
 		tag = tag[i+1:]
 	} else {
@@ -191,8 +162,7 @@ func parseVersion(ref string) ([]int, bool) {
 	if len(tag) > 1 && (tag[0] == 'v' || tag[0] == 'V') && tag[1] >= '0' && tag[1] <= '9' {
 		tag = tag[1:]
 	}
-	// A tag's own suffix is the build's packaging, not the version:
-	// 5.3.0-lt1.2 is qBittorrent 5.3.0 on libtorrent 1.2.
+	// A suffix is packaging, not version: 5.3.0-lt1.2 is 5.3.0 on libtorrent 1.2.
 	if i := strings.IndexByte(tag, '-'); i > 0 {
 		tag = tag[:i]
 	}
@@ -206,9 +176,8 @@ func parseVersion(ref string) ([]int, bool) {
 			return nil, false
 		}
 		if f == "x" || f == "X" || f == "*" {
-			// A wildcard is one part box cannot compare, and it says nothing
-			// about the parts after it: it reads as the zero a missing part
-			// reads as, and the column shows it as it was written.
+			// A wildcard says nothing about later parts; the column shows it as
+			// written.
 			parts = append(parts, wildcard)
 			continue
 		}

@@ -1,14 +1,9 @@
 package apply
 
-// carry_answers.go is cutover's half of settle.go's guided run: an answer an
-// earlier read of the same source already gave.
-//
-// A cutover reads the source again, so it meets the same addresses discover met,
-// and asking about them a second time is asking a person to repeat themselves
-// (docs/output.md, rule 10: an answer collapses to subject -> answer, and is not
-// asked again). What the earlier read answered is carried into this plan as an
-// answer, not a default: the rule keeps the answer, the value leaves the
-// called-out list, and the screen shows one line per carried answer.
+// carry_answers.go carries an answer an earlier read of the same source gave, so a
+// cutover does not ask a person to repeat themselves (docs/output.md, rule 10): the
+// rule keeps the answer, the value leaves the called-out list, and the screen shows
+// one line per carried answer.
 
 import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -33,14 +28,8 @@ func (c KeptAnswer) Answer() string {
 	return c.App
 }
 
-// CarryAnswers writes an earlier read's answers into this run's plan, and returns
-// the called-out list without them: an answered value is not a default any more,
-// so it is not asked about and not listed as something box decided alone.
-//
-// An answer is matched by the address it was given for -- the host and the port,
-// which is what both plans' rules match -- and only a default this run wrote is
-// replaced. A rule this plan already had an answer for is the operator's own and
-// is left alone.
+// CarryAnswers writes answers into the plan and returns the list without them. An
+// answer matches by host and port, and only a default this run wrote is replaced.
 func CarryAnswers(now *plan.Plan, s Settled, prior *plan.Plan) (Settled, []KeptAnswer) {
 	if now == nil || prior == nil {
 		return s, nil
@@ -68,9 +57,8 @@ func CarryAnswers(now *plan.Plan, s Settled, prior *plan.Plan) (Settled, []KeptA
 				kept.add(g.Action, it)
 				continue
 			}
-			// A rule may only name an app this plan has: an earlier read of a
-			// different app list is an answer this plan cannot carry, so the
-			// value stays a default and is asked about.
+			// An answer naming an app this plan lacks cannot be carried: the value
+			// stays a default.
 			if a.App != "" {
 				if _, ok := now.Apps[a.App]; !ok {
 					kept.add(g.Action, it)

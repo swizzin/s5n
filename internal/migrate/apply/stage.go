@@ -1,20 +1,10 @@
 package apply
 
-// stage.go is step 2: one app's config directory copied verbatim into the
-// staging tree.
-//
-// The copy is generic on purpose. Apply knows no per-app file lists; an app's
-// config directory is whatever the app wrote there, and the rewriter for that
-// app decides what inside it matters (internal/migrate/rewrite). A stale layout
-// beside the current one, an old backup, a log from last week: they ride along
-// inert, because excluding one of them would be this package deciding what an
-// app reads.
-//
-// What the copy will not carry is anything the app's own process could use to
-// write outside its config directory: a device, a socket or a fifo is a
-// message to another process, and a symlink that leaves the directory would
-// after the move name a path on the source host that the pod cannot see. Both
-// are refused, by name, before anything is written.
+// stage.go is step 2: an app's config directory copied verbatim into staging. The
+// copy is generic -- stale layouts and backups ride along inert, since excluding
+// one would be deciding what the app reads. A device, socket, fifo or escaping
+// symlink is refused by name before anything is written, since each could reach
+// outside the config the pod can see.
 
 import (
 	"errors"
@@ -28,52 +18,35 @@ import (
 	"github.com/swizzin/s5n/internal/linktree"
 )
 
-// Staged is what one instance's copy cost: how many files, and how many bytes
-// of them. The summary prints it because a Plex config tree is tens of
-// gigabytes of metadata, and the operator should see that before the copy
-// starts rather than after.
+// Staged is what a copy cost, printed before it starts: a Plex tree is tens of
+// gigabytes.
 type Staged struct {
 	App   string
 	Files int64
 	Bytes int64
 }
 
-// copyTree copies src into dst, which must not exist, and returns what it
-// copied.
-//
-// Modes and modification times are preserved, so an app that compares either
-// sees the same tree it left; every entry is chowned to uid:gid, because the
-// pod's user is not whoever ran box. The directory's own times are set after
-// its children, or writing them would move it again.
+// copyTree copies src into dst, which must not exist: modes and mtimes kept, every
+// entry owned by uid:gid, directory times set after their children.
 func copyTree(dst, src string, uid, gid int) (Staged, error) {
 	return copy(dst, src, uid, gid, false, true)
 }
 
-// copyForCheck copies a config tree for a pass that only reads it (Settle's
-// checks), which is taken from a source that may still be running: a socket or
-// fifo the app holds open is left out rather than refused, because a reader can
-// do nothing with one and a running source always has one (qBittorrent's
-// ipc-socket). A snapshot's own copy applies the same rule, and reports what it
-// left (internal/archive).
+// copyForCheck copies a tree for a read-only pass, from a source that may still be
+// running: a socket or fifo is left out and reported, as an archive's copy does.
 func copyForCheck(dst, src string, uid, gid int) (Staged, error) {
 	return copy(dst, src, uid, gid, true, true)
 }
 
-// measureTree copies src into dst for a pass that only measures it: the copy is
-// thrown away, so nothing is handed to the seedbox's user and no owner is
-// needed. It is what the summary before an install counts, and the one
-// difference from what that run then stages.
+// measureTree copies for measurement only: no owner is needed, and it is what the
+// pre-install summary counts.
 func measureTree(dst, src string) (Staged, error) {
 	return copy(dst, src, 0, 0, false, false)
 }
 
-// copyFiles copies the named files out of src into dst, which must not exist,
-// with the directories above them: one app's state out of a config directory that
-// holds its whole library as well (apply's room for a full carry, carry.go).
-//
-// The rules are copyTree's -- modes and times kept, every entry owned by uid:gid,
-// links carried as links -- and a named file that is not there is not a refusal:
-// a database's -wal exists only while something has it open.
+// copyFiles copies the named files with their directories, under copyTree's rules;
+// a missing one is not a refusal, since a -wal exists only while the database is
+// open.
 func copyFiles(dst, src string, files []string, uid, gid int) (Staged, error) {
 	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: true, own: true}
 	return c.files(src, files)
@@ -131,8 +104,7 @@ func (c *copier) finishDirs() error {
 	return nil
 }
 
-// copyNamed makes the directories above one named file and copies the file. A
-// directory above it that is not there means the file is not either.
+// copyNamed makes the directories above one named file and copies it.
 func (c *copier) copyNamed(rel string, made map[string]bool) error {
 	parts := strings.Split(rel, "/")
 	for i := 1; i < len(parts); i++ {
@@ -184,8 +156,7 @@ func (c *copier) copyNamed(rel string, made map[string]bool) error {
 	return nil
 }
 
-// copy is every copy: the same walk, with the kernel's own files either left out
-// or refused, and with or without an owner.
+// copy is the walk, with kernel files left out or refused.
 func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
 	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: skipKernel, own: own}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -200,9 +171,8 @@ func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
 	return c.st, nil
 }
 
-// chown hands one entry of the copy to the seedbox's user, and does nothing at
-// all when this copy has no owner (measureTree). link is a symlink, which is
-// owned with Lchown so the copy never follows it.
+// chown hands one entry to the seedbox's user; print is how a symlink is owned
+// (Lchown) so the copy never follows it.
 func (c *copier) chown(path string, link bool) error {
 	if !c.own {
 		return nil
@@ -220,8 +190,7 @@ type copier struct {
 	uid, gid int
 	st       Staged
 	dirs     []dirTime
-	// skipKernel leaves a device, socket or fifo out instead of refusing it:
-	// only a copy taken from a running source meets one.
+	// skipKernel leaves a device, socket or fifo out; only a running source has one.
 	skipKernel bool
 	// own is false for a copy nobody keeps: measureTree's.
 	own bool
@@ -307,23 +276,11 @@ func (c *copier) copyFile(dst, src string, info fs.FileInfo) (int64, error) {
 	return n, nil
 }
 
-// copyLink copies one symlink, and refuses one that resolves outside the config
-// directory. The rule itself is internal/linktree's, because a snapshot's
-// config/ tree is copied under the same one: what a staging copy would carry and
-// a snapshot would not (or the other way round) would make the two trees differ.
-//
-// A link is copied as a link: the app reads it the same way, and following it
-// would turn one file into two copies that then drift. An absolute link that
-// points inside the directory is rewritten to the relative form, because the
-// tree it names is about to move and the absolute text would still name the
-// source host's path after the move.
-//
-// One link is not a path at all and is left out of the copy: the images point
-// their log at the container's own stdout, so a qBittorrent config directory
-// holds qBittorrent/logs/qbittorrent.log as a link to /proc/self/fd/1. /proc,
-// /dev and /sys are the pod's own kernel filesystems, never somewhere a config
-// tree keeps a file, and the app writes the link again on start. Refusing it
-// made every real qBittorrent install uncopyable (hack/e2e-box.sh, migrate).
+// copyLink copies a symlink under internal/linktree's rule, so staging and a
+// snapshot agree. Following a link would make two copies that drift; an absolute
+// inside link is written relative because the tree moves. The log link to
+// /proc/self/fd/1 is left out: a kernel filesystem is never a config file, and
+// refusing it made every real qBittorrent uncopyable.
 func (c *copier) copyLink(dst, src, rel string) error {
 	target, err := os.Readlink(src)
 	if err != nil {
@@ -374,13 +331,8 @@ func emptyDir(path string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
-// emptyTree reports whether path holds nothing but directories, recursively: no
-// file, symlink or special file anywhere under it. That is a rename target this
-// box made itself -- the wiring Job creates /data/{downloads,media}/<category>
-// for every Arr the release runs (internal/wiring/dirs.go) -- and a target with
-// nothing in it is one the rename may remove. A path that is not there is not
-// empty, like emptyDir: the caller then has nothing to remove and renames into
-// the name.
+// emptyTree reports whether path holds only directories: a box-made rename target
+// (internal/wiring/dirs.go) may be removed, while an absent one is not empty.
 func emptyTree(path string) (bool, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -401,11 +353,8 @@ func emptyTree(path string) (bool, error) {
 	return true, nil
 }
 
-// removeEmptyTree removes path and every empty directory under it, and never a
-// file: each removal is os.Remove, which fails on a directory that stopped being
-// empty after emptyTree proved it, so a file that appears in between is an error
-// rather than something deleted. Only an emptyTree caller may pass its answer
-// here.
+// removeEmptyTree removes empty directories only: os.Remove fails if one stopped
+// being empty, so a file that appears is an error rather than deleted.
 func removeEmptyTree(path string) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {

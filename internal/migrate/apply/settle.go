@@ -1,29 +1,14 @@
 package apply
 
-// settle.go is the read-only pass that runs before an install: every rewriter's
-// Check over a copy of every app's config, and the plan that comes out of it.
-//
-// Apply's first write is on a host that has already been prepared, and its
-// refusal is the first thing that ever reads the addresses and paths an app
-// stores (docs/box.md, "Only local addresses are rewritten"). So the gaps a
-// migration meets are met at apply, after the install, which is too late to ask
-// about and too late to be a surprise. Settle runs the same checks earlier, on
-// the same bytes, where nothing is written and nothing can break: every value
-// the plan does not settle becomes a decision in the plan (a default rule with a
-// reason) and a line in the list this function returns, so the operator sees
-// what happens to it before the downtime rather than as a refusal after it.
-//
-// A default is a decision, not a guess. Where the field a value was found in
-// says which app it can only mean, the rule points there (a PeerBanHelper
-// downloader of type qBittorrent is the box's qBittorrent). Everywhere else the
-// only safe rewrite is none at all, so the rule is an identity: the path or
-// address is left exactly as it is, and the reason says so. A default never
-// suggests a rewrite that would write a broken config.
-//
-// What Settle cannot check is recorded, not failed: the one app whose database
-// only its own image may read is "checked at apply" when this run has no runner.
-// What a rewriter left on purpose (a disabled client, a client of a type box
-// does not run) is passed through with the rewriter's own reason.
+// settle.go is the read-only pass before an install: every rewriter's Check over a
+// copy of every app's config, and the plan that comes out. Apply's refusal is the
+// first thing that reads what an app stored, and after the install is too late to
+// ask; Settle meets the gaps where nothing is written, turning each unsettled
+// value into a defaulted rule with a reason and a line in its list. A default is a
+// decision, not a guess: where the field fixes the app the rule points there, and
+// everywhere else it is an identity, since no rewrite is safer than a broken one.
+// What only apply can check is recorded as such, and a rewriter's Left passes
+// through with its reason.
 
 import (
 	"context"
@@ -55,31 +40,23 @@ const (
 
 // SettleInput is everything Settle needs that the plan does not hold.
 type SettleInput struct {
-	// Catalog is this chart's app names: how an instance name becomes the
-	// rewriter that reads it (CatalogApp).
+	// Catalog is the chart's app names, how an instance becomes its rewriter.
 	Catalog []string
-	// Configs answers the host path one instance's source config is at. nil
-	// reads the plan's own app.Config, which is right when the host the plan
-	// describes is this host.
+	// Configs answers an instance's source config path; nil reads app.Config,
+	// right when the plan's host is this host.
 	Configs func(instance string) string
-	// Targets is where every instance answers on the box (Targets). Every app
-	// in the plan needs one: a rewriter writes every address it settles, so an
-	// endpoint this run does not know is a check it cannot make.
+	// Targets is where every instance answers; a rewriter writes every address it
+	// settles, so a missing endpoint is a check it cannot make.
 	Targets map[string]rewrite.Endpoint
-	// Run is the runner a rewriter needs for a format only the app's own image
-	// may write. nil records those apps as checked at apply.
+	// Run is the runner a rewriter needs; nil records those apps as checked at
+	// apply.
 	Run rewrite.Runner
-	// Work is the directory the private copies are made in: the run's own working
-	// directory beside its snapshot (internal/migrate/work), never the system's
-	// temporary directory. A config tree is where a real source kept 8.5 GiB, and
-	// /tmp is a tmpfs on a Fedora or an Arch host.
+	// Work is where private copies are made, beside the snapshot
+	// (internal/migrate/work), never /tmp, which is a tmpfs on some hosts.
 	Work string
 }
 
-// Settled is what Settle called out, grouped by decision: one line per host or
-// path, and beneath it every place that holds it. It is data, so a caller can
-// print it, count it or keep it in report.txt; Lines is the text a report
-// carries.
+// Settled is what Settle called out, grouped by decision; Lines is its text.
 type Settled []SettledGroup
 
 // SettledGroup is one decision, with every value that decision was made about.
@@ -92,24 +69,19 @@ type SettledGroup struct {
 
 // SettledItem is one host, path or app the decision is about.
 type SettledItem struct {
-	// Value is what the decision is about: an address as stored, a path, or
-	// the instance name of a check.
+	// Value is what the decision is about: an address, a path or an instance.
 	Value string
-	// Why is the reason, one line, without the action in front of it.
+	// Why is the reason, without the action in front of it.
 	Why string
-	// Holds is where the value is stored: one entry per app, file and place.
+	// Holds is where the value is stored, one entry per app, file and place.
 	Holds []SettledHold
-	// Host and Port are the address a decision is about, as stored: what a
-	// guided run asks about and what the plan's rule matches. Empty for a path
-	// and for a check, which are not addresses.
+	// Host and Port are the stored address, which a guided run asks about.
 	Host string
 	Port int
-	// App is what a rewrite points the value at, and empty for a leave and a
-	// check.
+	// App is what a rewrite points at; empty for a leave and a check.
 	App string
-	// Default says box chose this decision. A guided run clears it when the
-	// operator answers, so the summary of defaults taken names only what
-	// nobody looked at.
+	// Default says box chose this; a guided run clears it when answered, so the
+	// defaults taken name only what nobody looked at.
 	Default bool
 }
 
@@ -135,8 +107,7 @@ func (h SettledHold) String() string {
 // Empty reports whether Settle called nothing out.
 func (s Settled) Empty() bool { return len(s) == 0 }
 
-// Defaults is the decisions box took without the operator answering: what an
-// unattended run has to name, and what the end of a guided run still lists.
+// Defaults is the decisions taken without an answer.
 func (s Settled) Defaults() Settled {
 	var out Settled
 	for _, g := range s {
@@ -153,8 +124,8 @@ func (s Settled) Defaults() Settled {
 	return out
 }
 
-// Lines is the called-out list as text: one header per decision, then one line
-// per host or path with its reason, then the places that hold it.
+// Lines is one header per decision, one line per value with its reason, then the
+// places that hold it.
 func (s Settled) Lines() []string {
 	var out []string
 	for _, g := range s {

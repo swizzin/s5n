@@ -223,12 +223,6 @@ func TestRunnerJobSpec(t *testing.T) {
 	}
 }
 
-// TestRunnerHandsTheExchangeToThePod is the one thing a Job cannot work around:
-// box and the pod are different users. On a host box is root and the Job runs as
-// the seedbox's uid, so an exchange directory box left owned by itself is one
-// the pod cannot write its result into, and an input file written 0600 for box
-// is one it cannot read at all. The modes and the owner are asserted as the pod
-// would find them, at the moment the Job is created.
 func TestRunnerHandsTheExchangeToThePod(t *testing.T) {
 	f := newRunnerFixture(t, "rows", "", 0)
 	var problems []string

@@ -124,9 +124,6 @@ apps:
 	return env, p, doc, env.Bulk.(*fakeBulk)
 }
 
-// TestTheTreeIsStagedOutOfTheSnapshotOnce: the run with room writes the snapshot's
-// tree at the config root, through the one call that does it, and the artwork the
-// library keeps is what the release runs.
 func TestTheTreeIsStagedOutOfTheSnapshotOnce(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}
@@ -156,8 +153,6 @@ func TestTheTreeIsStagedOutOfTheSnapshotOnce(t *testing.T) {
 	}
 }
 
-// TestAShortConfigRootStagesTheStateItExtracted: no room at the config root means
-// the state alone, out of the extract, and the snapshot's tree is never touched.
 func TestAShortConfigRootStagesTheStateItExtracted(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	env.Disk = shortDisk{free: 1 << 20}
@@ -187,10 +182,6 @@ func TestAShortConfigRootStagesTheStateItExtracted(t *testing.T) {
 	}
 }
 
-// TestThePassBeforeAnInstallCountsTheSnapshotAndStagesNoneOfIt: the question is
-// asked before there is a config root, and the app whose check runs its own image
-// is not staged there at all -- its row is the snapshot's numbers, and the run
-// after the install lands on the same row.
 func TestThePassBeforeAnInstallCountsTheSnapshotAndStagesNoneOfIt(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}
@@ -233,9 +224,6 @@ func TestThePassBeforeAnInstallCountsTheSnapshotAndStagesNoneOfIt(t *testing.T) 
 	}
 }
 
-// TestAPlanThatSaysTheWholeDataOverAStateIsTheState: a plan says what its
-// snapshot took, and a hand edit that says the whole data over a snapshot that
-// carried the state is staged as the state -- the row follows the bytes.
 func TestAPlanThatSaysTheWholeDataOverAStateIsTheState(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	bulk.whole = false
@@ -274,9 +262,6 @@ func TestAPlanThatSaysTheWholeDataOverAStateIsTheState(t *testing.T) {
 	}
 }
 
-// TestTheCarrySizeIsTheSnapshotsNumbers keeps the two halves in step: what a run
-// checks the room against is the number the summary prints, both of them the
-// archive's.
 func TestTheCarrySizeIsTheSnapshotsNumbers(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	env.Disk = shortDisk{free: bulk.bytes}
