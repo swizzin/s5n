@@ -7,17 +7,14 @@ import (
 	"testing"
 )
 
-// TestEveryVariantIsReadable is the gate on the data above: every colour a
-// person reads has to reach a fixed contrast against what it is read on. The
-// thresholds are WCAG's, kept where WCAG puts them, and computed here rather
-// than trusted from a comment:
+// The gate on the data above: every colour a person reads reaches a fixed
+// contrast against what it is read on, computed here rather than trusted from a
+// comment. The thresholds are WCAG's:
 //
-//   - body text on the background is 7:1, AAA, because a terminal has no
-//     antialiasing worth the name and box is read while something is failing;
-//   - muted explanation and the accent are 4.5:1, AA;
-//   - text drawn on an accent-filled button is 4.5:1 against that fill, or the
-//     busiest control in the form is the least legible thing on screen;
-//   - the ✓ and ✗ marks are 3:1, the threshold for a graphic rather than prose.
+//   - body text 7:1 (AAA): a terminal has no antialiasing worth the name, and box
+//     is read while something is failing;
+//   - muted explanation, the accent, and text on an accent fill 4.5:1 (AA);
+//   - the ✓ and ✗ marks 3:1, the threshold for a graphic rather than prose.
 func TestEveryVariantIsReadable(t *testing.T) {
 	checks := []struct {
 		name string
@@ -45,9 +42,8 @@ func TestEveryVariantIsReadable(t *testing.T) {
 	}
 }
 
-// TestPalettesAreCompleteHex catches a typo in a colour before it reaches a
-// terminal: every field has to be a six-digit #rrggbb string, which is the only
-// form lipgloss and an OSC 11 sequence both accept.
+// A typo in a colour stops here: #rrggbb is the only form lipgloss and an OSC 11
+// sequence both accept.
 func TestPalettesAreCompleteHex(t *testing.T) {
 	for _, th := range Themes() {
 		for _, v := range []Variant{th.Dark, th.Light} {
@@ -68,9 +64,8 @@ func TestPalettesAreCompleteHex(t *testing.T) {
 	}
 }
 
-// TestTheRegistryIsWellFormed: a name that appears twice makes Parse's answer
-// depend on list order, and an empty variant name produces "nord-" as a valid
-// name in the error list.
+// A name twice makes Parse's answer depend on list order, and an empty variant
+// name makes "nord-" a valid name in the error list.
 func TestTheRegistryIsWellFormed(t *testing.T) {
 	seen := map[string]bool{}
 	for _, th := range Themes() {
@@ -96,8 +91,7 @@ func TestTheRegistryIsWellFormed(t *testing.T) {
 	}
 }
 
-// TestParseFollowsTheBackground: a pair name has no colours of its own. The
-// terminal decides, which is the whole reason themes come in pairs.
+// A pair name has no colours of its own: the terminal decides.
 func TestParseFollowsTheBackground(t *testing.T) {
 	sel, err := Parse("catppuccin")
 	if err != nil {
@@ -114,8 +108,8 @@ func TestParseFollowsTheBackground(t *testing.T) {
 	}
 }
 
-// TestParsePinsAVariant: a variant name draws the same colours on any terminal,
-// which is what an operator who does not trust OSC 11 wants.
+// A variant name draws the same colours on any terminal, for an operator who does
+// not trust OSC 11.
 func TestParsePinsAVariant(t *testing.T) {
 	sel, err := Parse("catppuccin-mocha")
 	if err != nil {
@@ -130,9 +124,8 @@ func TestParsePinsAVariant(t *testing.T) {
 		}
 	}
 
-	// The pair's own short names pin too: s5n-light is the light side on a
-	// dark terminal, which is how someone with a light terminal that answers
-	// no query gets the palette they asked for.
+	// The pair's own names pin too: s5n-light on a dark terminal, for one whose
+	// terminal answers no query.
 	sel, err = Parse("s5n-light")
 	if err != nil {
 		t.Fatal(err)
@@ -142,8 +135,7 @@ func TestParsePinsAVariant(t *testing.T) {
 	}
 }
 
-// TestParseDefaultsToS5n: an unset theme is the shipped one, not an error.
-// box's values may leave the key out entirely.
+// An unset theme is the shipped one, not an error: values may leave the key out.
 func TestParseDefaultsToS5n(t *testing.T) {
 	for _, name := range []string{"", "  ", "S5N"} {
 		sel, err := Parse(name)
@@ -159,9 +151,8 @@ func TestParseDefaultsToS5n(t *testing.T) {
 	}
 }
 
-// TestParseRejectsAnUnknownNameWithTheList: the error is the whole answer. A
-// theme name is typed into a values file, so the message has to say what would
-// have worked rather than that something is wrong.
+// The error is the whole answer: a theme name is typed into a values file, so it
+// must say what would have worked.
 func TestParseRejectsAnUnknownNameWithTheList(t *testing.T) {
 	_, err := Parse("amber")
 	if err == nil {
@@ -183,8 +174,7 @@ func TestParseRejectsAnUnknownNameWithTheList(t *testing.T) {
 			t.Fatalf("the error does not list %q: %s", name, msg)
 		}
 	}
-	// Every variant of every theme, not just the pairs: those are the names
-	// someone would actually pin.
+	// Variants too, not just the pairs: those are the names someone pins.
 	for _, want := range []string{"s5n", "s5n-dark", "catppuccin-latte", "nord-snow-storm", "dracula-alucard"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the error does not list %q: %s", want, msg)
@@ -192,8 +182,7 @@ func TestParseRejectsAnUnknownNameWithTheList(t *testing.T) {
 	}
 }
 
-// TestResolveIsParseAndPick keeps the two-step and the one-step honest: the tui
-// calls Resolve, the tests above call Parse.
+// The one-step calls the two-step: the tui calls Resolve.
 func TestResolveIsParseAndPick(t *testing.T) {
 	v, err := Resolve("nord", false)
 	if err != nil {
@@ -224,8 +213,8 @@ func contrast(t *testing.T, a, b string) float64 {
 	return (la + 0.05) / (lb + 0.05)
 }
 
-// luminance is WCAG's relative luminance: the channels linearised, then the
-// weights for a standard observer.
+// luminance is WCAG's relative luminance: linearised channels and the standard
+// observer's weights.
 func luminance(hex string) (float64, error) {
 	r, g, b, err := rgb(hex)
 	if err != nil {

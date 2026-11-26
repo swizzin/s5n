@@ -13,10 +13,9 @@ import (
 	"github.com/swizzin/s5n/internal/theme"
 )
 
-// wantField is the mark as a person reads it, '#' for a lit piece and '.' for
-// an unlit one, one string per row. It is written out rather than computed so
-// the test is a second copy of the drawing: a changed glyph table fails here
-// and the reviewer can see what the mark is supposed to look like.
+// wantField is the mark as a person reads it, '#' lit and '.' unlit. Written out
+// rather than computed so it is a second copy of the drawing: a changed glyph
+// table fails here, and the reviewer can see what the mark should look like.
 var wantField = [Rows]string{
 	"......#####......",
 	"......#..........",
@@ -27,9 +26,8 @@ var wantField = [Rows]string{
 	"####...###..#...#",
 }
 
-// TestFieldIsTheBrandTable prints the bitfield and compares it to the literal
-// above. The columns between the glyphs are unlit pieces, not gaps: that is
-// what makes three letters read as one continuous field.
+// The columns between glyphs are unlit pieces, not gaps: that is what makes three
+// letters read as one continuous field.
 func TestFieldIsTheBrandTable(t *testing.T) {
 	field := Field()
 	var got [Rows]string
@@ -53,8 +51,7 @@ func TestFieldIsTheBrandTable(t *testing.T) {
 	if len(field) != Rows || len(field[0]) != Cols {
 		t.Fatalf("field is %dx%d, want %dx%d", len(field[0]), len(field), Cols, Rows)
 	}
-	// The separator columns are unlit in every row, and nothing else is: a lit
-	// piece in column 5 would join the s to the 5.
+	// A lit piece in column 5 would join the s to the 5.
 	for row := 0; row < Rows; row++ {
 		for _, col := range []int{5, 11} {
 			if field[row][col] != Unlit {
@@ -64,13 +61,11 @@ func TestFieldIsTheBrandTable(t *testing.T) {
 	}
 }
 
-// darkLook is the s5n dark variant's two-tone, the drawing every pixel test
-// below reads.
+// darkLook is the s5n dark variant's two-tone, which every pixel test reads.
 func darkLook() Look { return LookOf(theme.Default().Dark) }
 
-// TestMarkPNG checks the raster the login page shows: the sizes are the cell
-// count times the cell, the background is transparent (the page shows through),
-// and each piece is drawn in its own ink.
+// The raster the login page shows: cell count times cell, and each piece in its
+// own ink.
 func TestMarkPNG(t *testing.T) {
 	const cell = 8
 	look := darkLook()
@@ -89,29 +84,28 @@ func TestMarkPNG(t *testing.T) {
 		t.Errorf("height = %d, want %d", got, want)
 	}
 
-	// One pixel from the middle of a cell, not its corner, so a mistake in the
-	// cell arithmetic cannot pass as a NEAREST-neighbour coincidence.
+	// The middle of a cell, not its corner, so a cell-arithmetic mistake cannot
+	// pass as a NEAREST-neighbour coincidence.
 	at := func(row, col int) color.NRGBA {
 		return color.NRGBAModel.Convert(img.At(col*cell+cell/2, row*cell+cell/2)).(color.NRGBA)
 	}
-	// Row 0: the 5's top bar is lit, and it is the accent.
+	// Row 0: the 5's top bar, in the accent.
 	if got := at(0, 6); got != look.Five {
 		t.Errorf("the 5's top bar = %s, want the accent %s", Hex(got), Hex(look.Five))
 	}
-	// Row 3, column 0 is the s's left stroke: the letters take the fg.
+	// The s's left stroke takes the fg.
 	if got := at(3, 0); got != look.Letters {
 		t.Errorf("an s cell = %s, want the fg %s", Hex(got), Hex(look.Letters))
 	}
-	// Row 0, column 0 is an unlit piece above the s.
+	// An unlit piece above the s.
 	if got := at(0, 0); got != look.Unlit {
 		t.Errorf("an unlit cell = %s, want the dim %s", Hex(got), Hex(look.Unlit))
 	}
-	// The separator column too: unlit, drawn, not a hole in the field.
+	// The separator column is drawn, not a hole in the field.
 	if got := at(3, 5); got != look.Unlit {
 		t.Errorf("the separator column = %s, want the dim %s", Hex(got), Hex(look.Unlit))
 	}
-	// Every cell is painted, so nothing in the canvas is transparent: the logo
-	// is the field, and the page behind it is the background.
+	// Every cell is painted: the logo is the field, and the page is the background.
 	for row := 0; row < Rows; row++ {
 		for col := 0; col < Cols; col++ {
 			if got := at(row, col); got.A != 0xFF {
@@ -121,8 +115,8 @@ func TestMarkPNG(t *testing.T) {
 	}
 }
 
-// TestFaviconPNG is the pixel-exact favicon: 16 px is 2 px cells with no gap,
-// 32 px is 3 px cells with a 1 px gap, and the 5 is centred in the tile.
+// The pixel-exact favicon: 16 px is 2 px cells with no gap, 32 px is 3 px cells
+// with a 1 px gap, and the 5 is centred.
 func TestFaviconPNG(t *testing.T) {
 	ink := darkLook().Five
 	for _, size := range FaviconSizes {
@@ -142,9 +136,8 @@ func TestFaviconPNG(t *testing.T) {
 	}
 }
 
-// checkFaviconCells: every lit cell of the 5 is the ink, every unlit cell of
-// its 5x7 box is transparent, and the tile's corner -- outside the glyph -- is
-// transparent too, so the browser's own chrome shows through.
+// Every lit cell is the ink, every unlit cell of the 5x7 box and the tile's corner
+// are transparent, so the browser's own chrome shows through.
 func checkFaviconCells(t *testing.T, img image.Image, size int, ink color.NRGBA) {
 	t.Helper()
 	geom := faviconCells[size]
@@ -169,7 +162,7 @@ func checkFaviconCells(t *testing.T, img image.Image, size int, ink color.NRGBA)
 	if got := pixel(img, 0, 0); got.A != 0 {
 		t.Errorf("%d: the tile's corner is painted", size)
 	}
-	// The drawing is centred: its own bounds start where the centring says.
+	// The drawing is centred: its bounds start where the centring says.
 	minX, minY := size, size
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
@@ -189,9 +182,8 @@ func checkFaviconCells(t *testing.T, img image.Image, size int, ink color.NRGBA)
 	}
 }
 
-// checkFaviconGap is the one difference between the two sizes: at 16 px cells
-// touch, so the pixel between two lit cells in the 5's top bar is lit; at 32 px
-// that pixel is the gap, and it is transparent.
+// The one difference between the sizes: at 16 px cells touch, so the pixel between
+// two lit cells is lit; at 32 px that pixel is the transparent gap.
 func checkFaviconGap(t *testing.T, img image.Image, size int, ink color.NRGBA) {
 	t.Helper()
 	geom := faviconCells[size]
@@ -208,8 +200,7 @@ func checkFaviconGap(t *testing.T, img image.Image, size int, ink color.NRGBA) {
 	}
 }
 
-// faviconOrigin is where the 5 starts in a size-square tile: the rest of the
-// tile is the margin that centres it.
+// faviconOrigin is where the 5 starts in a size-square tile; the rest is margin.
 func faviconOrigin(size int) (x, y int) {
 	geom := faviconCells[size]
 	w := 5*geom.cell + 4*geom.gap
@@ -217,14 +208,13 @@ func faviconOrigin(size int) (x, y int) {
 	return (size - w) / 2, (size - h) / 2
 }
 
-// pixel is one pixel as a non-premultiplied colour, which is what the PNG was
-// written with.
+// pixel is one pixel as a non-premultiplied colour, as the PNG was written.
 func pixel(img image.Image, x, y int) color.NRGBA {
 	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
 }
 
-// TestFaviconICO is the container: two entries, 16 and 32, each a PNG payload
-// of the size the entry claims and lands entirely inside the file.
+// The container: two entries, 16 and 32, each a PNG payload of the size it claims
+// and inside the file.
 func TestFaviconICO(t *testing.T) {
 	ink := darkLook().Five
 	data, err := FaviconICO(ink)
@@ -269,8 +259,7 @@ func TestFaviconICO(t *testing.T) {
 	}
 }
 
-// TestMarkSVG is the README's copy: one rect per cell, the two-tone inks, all
-// of them opaque.
+// The README's copy: one rect per cell, the two-tone inks, all opaque.
 func TestMarkSVG(t *testing.T) {
 	look := darkLook()
 	data, err := MarkSVG(look, 40, 8)
@@ -290,8 +279,7 @@ func TestMarkSVG(t *testing.T) {
 			t.Errorf("the SVG does not carry %s", want)
 		}
 	}
-	// The two inks, and nothing translucent: an SVG is drawn on the page the
-	// README is being read on, so the mark is the variant's own colours and a
+	// Nothing translucent: an SVG is drawn on whatever page reads the README, and a
 	// fill-opacity would make the unlit pieces vanish into a dark viewer.
 	for _, want := range []string{`fill="` + Hex(look.Five) + `"`, `fill="` + Hex(look.Letters) + `"`, `fill="` + Hex(look.Unlit) + `"`} {
 		if !strings.Contains(svg, want) {
@@ -306,10 +294,9 @@ func TestMarkSVG(t *testing.T) {
 	}
 }
 
-// contrastTable is the step-3 table: every variant's lit inks against the page
-// box draws it on. A dark variant is drawn on Authelia's dark page and a light
-// variant on its white one -- a pair name is the pair's dark variant, so those
-// are the same row twice and there is nothing else the login can show.
+// Every variant's lit inks against the page box draws it on: a dark variant on
+// Authelia's dark page, a light one on white. A pair name is the pair's dark
+// variant, so those are the same row twice.
 func TestEveryVariantIsLegibleOnItsAutheliaPage(t *testing.T) {
 	for _, th := range theme.Themes() {
 		cases := []struct {
@@ -323,9 +310,8 @@ func TestEveryVariantIsLegibleOnItsAutheliaPage(t *testing.T) {
 		for _, c := range cases {
 			row := fmt.Sprintf("%-22s %-12s", th.Name, c.name)
 			worst := 21.0
-			// An opaque ink on the page it is drawn on is what the eye gets;
-			// Contrast ignores the alpha of a translucent one, and no drawing
-			// here is translucent any more.
+			// Contrast ignores a translucent ink's alpha, and nothing here is
+			// translucent.
 			five := Contrast(c.look.Five, c.bg.RGBA())
 			letters := Contrast(c.look.Letters, c.bg.RGBA())
 			row += fmt.Sprintf("  %s on %-5s 5:%5.2f s/n:%5.2f", Hex(c.look.Five), c.bg.Name, five, letters)
@@ -346,8 +332,8 @@ func TestEveryVariantIsLegibleOnItsAutheliaPage(t *testing.T) {
 	}
 }
 
-// TestPinnedLookIsTheVariant: a pinned variant draws its own palette, not a
-// derivation. The 5 is the accent, s and n the fg, unlit pieces the dim.
+// A pinned variant draws its own palette, not a derivation: the 5 the accent, s
+// and n the fg, unlit pieces the dim.
 func TestPinnedLookIsTheVariant(t *testing.T) {
 	for _, th := range theme.Themes() {
 		for _, v := range []theme.Variant{th.Dark, th.Light} {
@@ -368,9 +354,8 @@ func TestPinnedLookIsTheVariant(t *testing.T) {
 	}
 }
 
-// TestAutheliaBackgroundsAreTheirOKLCH recomputes each page colour from the
-// CSS value Authelia ships, so the constants the contrast test trusts cannot
-// drift from the source they were read at.
+// Each page colour is recomputed from the CSS value Authelia ships, so the
+// constants the contrast test trusts cannot drift from their source.
 func TestAutheliaBackgroundsAreTheirOKLCH(t *testing.T) {
 	for _, bg := range AutheliaBackgrounds() {
 		var l, c, h float64
@@ -386,8 +371,7 @@ func TestAutheliaBackgroundsAreTheirOKLCH(t *testing.T) {
 	}
 }
 
-// TestFaviconRejectsWhatItCannotDraw: a size with no cell geometry is a bug in
-// the caller, not a picture to invent.
+// A size with no cell geometry is a bug in the caller, not a picture to invent.
 func TestFaviconRejectsWhatItCannotDraw(t *testing.T) {
 	if _, err := FaviconPNG(darkLook().Five, 48); err == nil {
 		t.Error("a 48 px favicon was drawn")

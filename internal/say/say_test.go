@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// Confirm is what release and platform ask their one question with on the plain
-// path, so its four answers are the contract: yes, no, an answer that never
-// came, and nobody to ask at all.
+// The four answers are the contract: yes, no, an answer that never came, and
+// nobody to ask.
 func TestPlainConfirmAnswers(t *testing.T) {
 	cases := []struct {
 		name string
@@ -44,8 +43,7 @@ func TestPlainConfirmAnswers(t *testing.T) {
 	}
 }
 
-// --yes answers without prompting: an unattended run still records a yes, and
-// nothing is read from a stdin nobody is typing into.
+// --yes answers without reading from a stdin nobody is typing into.
 func TestPlainConfirmYesNeverReads(t *testing.T) {
 	p := &Plain{Yes: true, In: failingReader{}}
 	got, err := p.Confirm("install the platform layer?", false)
@@ -57,8 +55,8 @@ func TestPlainConfirmYesNeverReads(t *testing.T) {
 	}
 }
 
-// An EOF with no answer is an error, not a no: box was waiting for a person who
-// was not there, and saying so is different from being told no.
+// An EOF with no answer is an error, not a no: waiting for a person who was not
+// there is different from being told no.
 func TestPlainConfirmReportsEOF(t *testing.T) {
 	p := &Plain{In: strings.NewReader("")}
 	if _, err := p.Confirm("apply s5n?", false); !errors.Is(err, io.EOF) {
@@ -66,8 +64,8 @@ func TestPlainConfirmReportsEOF(t *testing.T) {
 	}
 }
 
-// With no reader there is no terminal to ask on, and that is the documented
-// refusal rather than an implicit yes: box writes to a cluster as root.
+// With no reader there is no terminal to ask on, which is a refusal and never an
+// implicit yes: box writes to a cluster as root.
 func TestPlainConfirmRefusesWithoutATerminal(t *testing.T) {
 	p := &Plain{}
 	_, err := p.Confirm("apply s5n?", false)
@@ -79,8 +77,7 @@ func TestPlainConfirmRefusesWithoutATerminal(t *testing.T) {
 	}
 }
 
-// Ask is the name release and platform call: the same question, the same
-// answer.
+// Ask is the name release and platform call for the same question.
 func TestPlainAskIsConfirm(t *testing.T) {
 	p := &Plain{In: strings.NewReader("y\n")}
 	ok, err := p.Ask("apply s5n?", false)
@@ -95,17 +92,15 @@ func TestPlainAskIsConfirm(t *testing.T) {
 	}
 }
 
-// failingReader is stdin when nobody is typing: reading it fails loudly, so a
-// prompt that reads anyway cannot pass silently.
+// failingReader is stdin when nobody is typing: a prompt that reads it fails.
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) {
 	return 0, errors.New("read from a stdin nobody typed into")
 }
 
-// A plan item's children are printed under it, two columns past where its own
-// text starts, with their own marks -- and with spaces only: the transcript is
-// what a screen reader and a logged run read.
+// Children print under their item with their own marks, and spaces only: a
+// screen reader and a logged run read the transcript.
 func TestPlainPlanIndentsChildren(t *testing.T) {
 	var buf strings.Builder
 	p := &Plain{W: &buf}
@@ -133,9 +128,8 @@ func TestPlainPlanIndentsChildren(t *testing.T) {
 	}
 }
 
-// Table is a block of rows in two columns: the glyph, the name, and the facts
-// joined with a middle dot. The transcript is a golden test's and a log's, so
-// nothing in it depends on a terminal's width.
+// The transcript is a golden test's and a log's, so nothing in it depends on a
+// terminal's width.
 func TestPlainTable(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -153,8 +147,7 @@ func TestPlainTable(t *testing.T) {
 	}
 }
 
-// A row with no glyph is a note, and a row with no facts is a name: neither is
-// an empty line a reader has to guess at.
+// A row with no glyph is a note, and one with no facts is a name.
 func TestPlainTableDefaultsTheGlyph(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -175,9 +168,8 @@ func TestPlainTableWithNoRows(t *testing.T) {
 	}
 }
 
-// The gutter carries one mark per line, and a warning is `!`: it is something
-// that needs a person, which is the rulebook's word for the mark. `⚠` is not
-// one of the seven marks, so neither renderer prints it.
+// A warning is `!`, something that needs a person. `⚠` is not one of the seven
+// marks, so neither renderer prints it.
 func TestPlainWarnNeedsThePerson(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -188,8 +180,7 @@ func TestPlainWarnNeedsThePerson(t *testing.T) {
 	}
 }
 
-// A success line is a done line: the ✓ in the gutter, the same mark a named
-// step ends with.
+// A success line is a done line: the ✓ a named step also ends with.
 func TestPlainSuccessIsADoneRow(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -200,8 +191,8 @@ func TestPlainSuccessIsADoneRow(t *testing.T) {
 	}
 }
 
-// A phase is a heading: the lowercase noun on a line of its own, with no colon
-// and nothing after it. The live renderer draws the same name in its masthead.
+// A phase is a lowercase noun alone on its line, which a live renderer draws in
+// its masthead.
 func TestPlainPhaseIsALabel(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -213,10 +204,8 @@ func TestPlainPhaseIsALabel(t *testing.T) {
 	}
 }
 
-// A question is a mark of its own: the `?` in the gutter, then the question as
-// the flow asked it, then the answer line the terminal echoes after it. The
-// mark is what makes a prompt one of box's lines rather than a bare sentence
-// in the middle of a run (rule 1).
+// The `?` makes a prompt one of box's lines rather than a bare sentence in the
+// middle of a run (rule 1).
 func TestPlainConfirmAsksWithTheQuestionMark(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf, In: strings.NewReader("y\n")}
@@ -229,9 +218,7 @@ func TestPlainConfirmAsksWithTheQuestionMark(t *testing.T) {
 	}
 }
 
-// The default a flow chose is on the prompt itself: [Y/n] says a bare enter
-// installs, [y/N] says it does not, and the same question asked both ways shows
-// both.
+// The default is on the prompt itself: [Y/n] says a bare enter installs.
 func TestPlainConfirmShowsTheDefaultItWasGiven(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf, In: strings.NewReader("\ny\n")}

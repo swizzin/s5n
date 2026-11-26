@@ -1,18 +1,12 @@
-// Package brand draws the s5n mark.
-//
-// The mark is `s5n` spelled in a torrent piece bitfield: three 5x7 glyphs with
-// one unlit column between them, so the whole thing reads as one field of
-// pieces rather than as a word. Lowercase s and n sit on the x-height (rows
-// 2-6); the 5 stands full height. The glyph tables below are the s5n mark
-// itself: a table that drifts is a different mark, not a tweak.
+// Package brand draws the s5n mark: `s5n` spelled in a torrent piece bitfield,
+// three 5x7 glyphs with one unlit column between them, so it reads as one field
+// of pieces rather than a word. The glyph tables below are the mark itself; a
+// table that drifts is a different mark.
 //
 // Two-tone is canonical: the 5 in the theme's accent, s and n in its fg. Every
-// drawing is one theme variant's own palette, drawn for the page that variant
-// paints: there is no drawing that has to read on two backgrounds, because the
-// login never asks the browser which page to show.
-//
-// Nothing here imports lipgloss, huh or Bubble Tea: this is pixel work, and
-// the same functions draw the login page's pictures and the README's SVG.
+// drawing is one variant's palette, drawn for the page that variant paints, so no
+// drawing has to read on two backgrounds. Nothing here imports lipgloss, huh or
+// Bubble Tea: this is pixel work.
 package brand
 
 import (
@@ -35,9 +29,8 @@ const (
 	Rows = 7
 )
 
-// Piece is what one cell of the field is: the glyph it belongs to, or a cell
-// no glyph lights (the columns between the letters and the counters inside
-// them).
+// Piece is what one cell of the field is: the glyph it belongs to, or Unlit for
+// the columns between letters and the counters inside them.
 type Piece uint8
 
 // The four things a cell can be.
@@ -101,9 +94,9 @@ func Field() [Rows][Cols]Piece {
 	return out
 }
 
-// Look is one drawing of the mark: the ink for the 5, for the s and n, and for
-// the unlit pieces, which are the variant's dim -- every piece is opaque,
-// because the page behind the field is the variant's own background.
+// Look is one drawing of the mark: the ink for the 5, for s and n, and for the
+// unlit pieces, which are the variant's dim. Every piece is opaque, because the
+// page behind the field is the variant's own background.
 type Look struct {
 	Five    color.NRGBA
 	Letters color.NRGBA
@@ -111,8 +104,7 @@ type Look struct {
 }
 
 // LookOf is a variant's own two-tone: the 5 in the accent, s and n in the fg,
-// unlit pieces in the dim. It is the only drawing there is, because the login
-// is always drawn against the page its palette paints.
+// unlit pieces in the dim.
 func LookOf(v theme.Variant) Look {
 	return Look{
 		Five:    mustHex(v.Accent),
@@ -121,20 +113,17 @@ func LookOf(v theme.Variant) Look {
 	}
 }
 
-// minLitContrast is the WCAG ratio a lit cell has to reach on the page it is
-// drawn on. 3:1 is the threshold for a graphic rather than prose, and the mark
-// is a picture on a login page, not text.
+// minLitContrast is the WCAG ratio a lit cell must reach on its page: 3:1 is the
+// threshold for a graphic, and the mark is a picture, not text.
 const minLitContrast = 3.0
 
-// MarkPNG draws the mark at one pixel per cell within a cell-sized square, on
-// a transparent background: lit cells in their piece's ink and unlit cells in
-// the look's.
+// MarkPNG draws the mark at one pixel per cell within a cell-sized square, on a
+// transparent background.
 //
-// There is no gap between cells. At the 64 px width Authelia draws the logo
-// (web/src/layouts/LoginLayout.tsx:47-51: `className="mx-auto my-2 w-16"`, on
-// the login page; MinimalLayout.tsx:48 draws the same), a 1 px gap on a 17-cell
-// field is a sub-pixel smear; the SVG keeps the gap because the README draws it
-// at 40 px a cell, where the pieces read as pieces.
+// No gap between cells: at the 64 px width Authelia draws the logo
+// (web/src/layouts/LoginLayout.tsx:47-51, `className="mx-auto my-2 w-16"`, and
+// MinimalLayout.tsx:48), a 1 px gap on a 17-cell field is a sub-pixel smear. The
+// SVG keeps the gap, because the README draws it at 40 px a cell.
 func MarkPNG(l Look, cell int) ([]byte, error) {
 	if cell < 1 {
 		return nil, errCellSize(cell)
@@ -149,11 +138,9 @@ func MarkPNG(l Look, cell int) ([]byte, error) {
 	return encodePNG(img)
 }
 
-// MarkSVG is the mark as one SVG document, ready for a README: rounded pieces
-// with a gap between them, on a transparent background.
-//
-// The radius is 0.17 of a cell, which is what makes a lit cell
-// read as a piece rather than as a pixel at a size this large.
+// MarkSVG is the mark as one SVG document for a README: rounded pieces with a gap,
+// on a transparent background. The radius is 0.17 of a cell, which makes a lit
+// cell read as a piece rather than a pixel at this size.
 func MarkSVG(l Look, cell, gap int) ([]byte, error) {
 	if cell < 1 || gap < 0 {
 		return nil, errCellSize(cell)
@@ -205,10 +192,9 @@ func (l Look) ink(p Piece) color.NRGBA {
 	}
 }
 
-// The favicon is the 5 alone, drawn pixel-exact so nothing is antialiased:
-// 2 px cells with no gap at 16, and 3 px cells with a 1 px gap at 32. Below
-// 64 px the field's unlit pieces drop out, which is why the favicon is one
-// glyph and not the word.
+// The favicon is the 5 alone, pixel-exact so nothing is antialiased: 2 px cells
+// with no gap at 16, 3 px with a 1 px gap at 32. Below 64 px the field's unlit
+// pieces drop out, so the favicon is one glyph, not the word.
 var faviconCells = map[int]struct{ cell, gap int }{
 	16: {2, 0},
 	32: {3, 1},
@@ -217,9 +203,8 @@ var faviconCells = map[int]struct{ cell, gap int }{
 // FaviconSizes are the sizes an ICO carries, smallest first.
 var FaviconSizes = []int{16, 32}
 
-// FaviconPNG draws the 5 in one ink on a transparent tile of the given size.
-// Only 16 and 32 exist: the cell and gap of each are the design's, so any
-// other size is a call with no drawing behind it.
+// FaviconPNG draws the 5 in one ink on a transparent tile. Only 16 and 32 exist:
+// any other size is a call with no drawing behind it.
 func FaviconPNG(ink color.NRGBA, size int) ([]byte, error) {
 	geom, ok := faviconCells[size]
 	if !ok {
@@ -242,11 +227,11 @@ func FaviconPNG(ink color.NRGBA, size int) ([]byte, error) {
 	return encodePNG(img)
 }
 
-// FaviconICO is favicon.ico: an ICONDIR with one PNG payload per size in
-// FaviconSizes. The container is written by hand because the standard library
-// has no ICO encoder, and a browser reads a PNG payload inside an ICO: the
-// format allows one since Windows Vista, and Authelia serves the file as-is
-// (internal/server/handlers.go:171, `r.GET("/favicon.ico", ...)`).
+// FaviconICO is favicon.ico: an ICONDIR with one PNG payload per size. It is
+// written by hand because the standard library has no ICO encoder; a browser
+// reads a PNG payload inside an ICO (allowed since Windows Vista), and Authelia
+// serves the file as-is (internal/server/handlers.go:171, `r.GET("/favicon.ico",
+// ...)`).
 func FaviconICO(ink color.NRGBA) ([]byte, error) {
 	payloads := make([][]byte, 0, len(FaviconSizes))
 	for _, size := range FaviconSizes {
@@ -280,8 +265,8 @@ func FaviconICO(ink color.NRGBA) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// fill paints a square of one ink, one pixel at a time: no blending, so every
-// edge lands on a pixel boundary and the drawing is exact at 16 px.
+// fill paints a square of one ink, no blending, so every edge lands on a pixel
+// boundary and the drawing is exact at 16 px.
 func fill(img *image.NRGBA, x, y, size int, ink color.NRGBA) {
 	for dy := 0; dy < size; dy++ {
 		for dx := 0; dx < size; dx++ {
