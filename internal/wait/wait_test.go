@@ -91,7 +91,6 @@ func TestUntilNeverSleepsPastTheDeadline(t *testing.T) {
 	}
 }
 
-// An error ends the wait and is returned: a failed read is not a state to poll.
 func TestUntilStopsOnAnError(t *testing.T) {
 	refused := errors.New("connection refused")
 	got, err := Until(context.Background(), time.Minute, time.Millisecond, func(context.Context) (bool, error) {
@@ -105,7 +104,6 @@ func TestUntilStopsOnAnError(t *testing.T) {
 	}
 }
 
-// A wait cancelled before its first attempt never asks.
 func TestUntilStopsOnACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

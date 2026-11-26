@@ -226,8 +226,6 @@ func TestApplySnapshotFirstEnableDoesNotMove(t *testing.T) {
 	}
 }
 
-// The pod's digest is what the pinned tag's bytes are, not a second reference:
-// reading it as one stopped and copied the app on every apply.
 func TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -594,9 +592,6 @@ func TestApplyCopiesBeforeTheReleaseMoves(t *testing.T) {
 	}
 }
 
-// TestRenderedImageKeepsAPinnedTagWithItsDigest: a pin box wrote names both, and
-// the chart renders both. Reading the variant's tag instead would put a tag in
-// the plan's sentence that the release does not run.
 func TestRenderedImageKeepsAPinnedTagWithItsDigest(t *testing.T) {
 	chart := applyChart(t)
 	values := applyValues(map[string]any{"tag": "4.9.0", "digest": digestA})
@@ -610,10 +605,6 @@ func TestRenderedImageKeepsAPinnedTagWithItsDigest(t *testing.T) {
 	}
 }
 
-// TestRollbackPinAfterAnApplySnapshotWritesBothHalves: an apply of a tag-only
-// pin copies what ran and records the digest the pod reported, and a rollback
-// --pin from that copy writes the tag and the digest into the values file --
-// never a tag alone.
 func TestRollbackPinAfterAnApplySnapshotWritesBothHalves(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "sonarr")

@@ -10,8 +10,6 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// The reference layout docs/output.md points at, produced by the flow that owns
-// it.
 func TestTheUpdateScreenIsTheReference(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestA)

@@ -55,8 +55,6 @@ func TestProbeExitCodes(t *testing.T) {
 	}
 }
 
-// TestProbeTreatsAnUnresolvableNameAsClosed: a name that cannot resolve is a
-// connection that did not open, not an error the caller has to interpret.
 func TestProbeTreatsAnUnresolvableNameAsClosed(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := probeArgs([]string{"tcp", "--address", "does-not-exist.invalid:53", "--want", "closed", "--timeout", "1s"}, &out, &errOut)
@@ -65,11 +63,6 @@ func TestProbeTreatsAnUnresolvableNameAsClosed(t *testing.T) {
 	}
 }
 
-// TestProbeSettleWaitsForThePolicyToLand: a CNI programs a new pod's policy a
-// moment after the pod starts, so one dial at start-up can open where every
-// later one is denied. With --settle the probe keeps dialling until the answer
-// it wants holds several times in a row, and only a deadline with no such run
-// is the other answer.
 func TestProbeSettleWaitsForThePolicyToLand(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

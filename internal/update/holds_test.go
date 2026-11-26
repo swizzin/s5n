@@ -75,8 +75,6 @@ func TestHoldValuesLapsesWhenTheReleaseMovesPastIt(t *testing.T) {
 	}
 }
 
-// A tag-only release still pins something other than the avoided image. Comparing
-// digests alone leaves the hold standing, because "" is every tag's digest.
 func TestHoldValuesLapsesWhenTheReleasePinsAnotherTag(t *testing.T) {
 	hold := heldSonarr()
 	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"}

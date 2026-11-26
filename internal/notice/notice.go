@@ -1,11 +1,9 @@
 // Package notice is the one message box posts when something happens to a
-// seedbox. The body is JSON: the human sentence in text (Slack, Mattermost)
-// and content (Discord), plus structured fields. Posting is one attempt, and a
-// failed delivery never fails the update it is about.
+// seedbox: a sentence in text and content plus structured fields. One attempt,
+// and a failed delivery never fails the update.
 //
-// The address is box.yaml's secret (0600). Only hostconf.Redact may print it:
-// net/http's *url.Error embeds the whole URL, query included, so every error is
-// cleaned before it is returned.
+// The address is a box.yaml secret (0600); only hostconf.Redact may print it,
+// and every error is cleaned first because *url.Error embeds the whole URL.
 package notice
 
 import (

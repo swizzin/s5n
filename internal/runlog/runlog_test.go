@@ -38,8 +38,6 @@ func TestDirChoice(t *testing.T) {
 	}
 }
 
-// The transcript carries box's own addresses, so the file is 0600 and the
-// directory 0700.
 func TestLogIsPrivate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "box")
 	l, err := OpenAt(dir, "update")
@@ -105,8 +103,6 @@ func TestPartialLineIsFinished(t *testing.T) {
 	}
 }
 
-// The longest registered secret is replaced first, so a password containing
-// another secret is taken out whole.
 func TestSecretsNeverReachTheFile(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "update")
 	if err != nil {
@@ -200,7 +196,6 @@ func TestDirectoryIsPruned(t *testing.T) {
 	}
 }
 
-// The size cap prunes by total, not only by count.
 func TestDirectoryIsPrunedBySize(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

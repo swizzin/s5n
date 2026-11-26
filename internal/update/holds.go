@@ -79,13 +79,11 @@ type Lapse struct {
 	Text string
 }
 
-// HoldValues is the overlay release.Options.Holds applies: the values that keep
-// each held app on its image, and the holds this release has lapsed. An
-// operator's pin wins; a release pinning another image lapses the hold; a
-// release whose catalog cannot name the variant leaves it standing.
+// HoldValues is the overlay keeping each held app on its image, and the holds
+// this release lapsed. A pin wins; another pinned image lapses; an unnameable
+// variant stands.
 //
-// The caller removes lapsed holds only after an apply without them succeeded: a
-// failed run that dropped one would move the app onto the image it avoided.
+// Lapsed holds are removed only after an apply without them succeeded.
 func HoldValues(chart release.Chart, values map[string]any, holds []snapshot.Hold) (map[string]any, []Lapse, error) {
 	out := make(map[string]any)
 	var lapsed []Lapse

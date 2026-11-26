@@ -102,13 +102,9 @@ func (b *boxUpdate) rollback() error {
 	return nil
 }
 
-// reportNewer says once what a run that cannot install has waiting. who is the
-// rest of the sentence.
-// this one does not.
-//
-// A release the seedbox would move to that needs a newer box is the chart
-// source's refusal, not this one's: it names both versions and stops before
-// anything is written (internal/release's box.s5n/min-box rule).
+// reportNewer says once what a run that cannot install has waiting; who is the
+// rest of the sentence. A release needing a newer box is the chart source's
+// refusal, named there before anything is written (box.s5n/min-box).
 func (b *boxUpdate) reportNewer(ctx context.Context, who string) {
 	found, err := b.Check(ctx, b.Options)
 	if err != nil {
@@ -164,15 +160,9 @@ func (b *boxUpdate) updateAsRoot(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// updateRun is `box update` in order: box's own replacement first, then the
-// chart work, which runs in this process only when no newer binary took it over.
-// The order is the point -- the release an update settles on is the one its
-// min-box accepts, which means deciding it with the box that does the work -- so
-// it is one value a test can run with both halves swapped for fakes.
-//
-// The chart half's error comes back rather than ending the process there: the
-// timer's wake reads health after it either way, and the caller is the one place
-// that prints and picks an exit code.
+// updateRun is box's replacement then the chart work, which runs here only if no
+// newer binary took over. The chart error comes back: a timer's wake reads health
+// either way, and the caller prints and picks the exit code.
 type updateRun struct {
 	Box    *boxUpdate
 	Charts func(context.Context) error

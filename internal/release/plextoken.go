@@ -1,12 +1,10 @@
 package release
 
-// plextoken.go is the one credential `box apply` fills in for itself: the Plex
-// server token, read from Plex's own Preferences.xml when the Secret has none.
-// The wiring Job hands it to Tautulli and Maintainerr.
+// plextoken.go is the one credential `box apply` fills in: the Plex token, read
+// from Preferences.xml when the Secret has none, for Tautulli and Maintainerr.
 //
-// A token already in the Secret is never overwritten -- the person's own, or one
-// an earlier apply took -- so a rotated token stays old until the key is removed
-// by hand and apply runs again (docs/box.md). Plex owns the file: box reads it.
+// A token in the Secret is never overwritten, so a rotated one stays old until
+// the key is removed and apply runs again (docs/box.md). Box only reads.
 
 import (
 	"context"

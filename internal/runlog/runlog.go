@@ -1,11 +1,6 @@
-// Package runlog is box's run log: the plain transcript of one command, every
-// line timestamped. It is bounded, because a box that checks every fifteen
-// minutes would otherwise fill /var/log: a run prunes the directory to the
-// newest KeepFiles and KeepBytes, and one file stops at MaxFile. Registered
-// secrets are replaced before they reach it.
-//
-// Nothing here can fail a command: an unwritable directory or a full disk is
-// one line, never an exit code.
+// Package runlog is box's run log: every line timestamped, bounded by KeepFiles,
+// KeepBytes and MaxFile, with registered secrets replaced before they reach it.
+// Nothing here can fail a command: an unwritable directory is one line.
 package runlog
 
 import (
