@@ -1,31 +1,11 @@
-// Package fastresume rewrites the paths qBittorrent stored in a download
-// directory's resume files, ahead of migrating it onto box.
-//
-// qBittorrent keeps one <info-hash>.fastresume per torrent beside the torrent's
-// own <info-hash>.torrent, and the resume file is where the paths the app saw
-// are recorded. A migrated qBittorrent that kept the source's paths looks for
-// its files under directories the new host does not have, finds none of them,
-// and sets about downloading everything again — from zero, with the copies it
-// already made sitting right there. With them rewritten it carries on seeding
-// where it was.
-//
-// The keys that hold a path are fixed by what libtorrent and qBittorrent read,
-// and they are the same in libtorrent 1.2 and 2.0:
-//
-//   - save_path: libtorrent's own (write_resume_data.cpp:116 and :123,
-//     read_resume_data.cpp:171 and :287). qBittorrent refuses to load a resume
-//     file whose save_path is empty (bencoderesumedatastorage.cpp:355-358).
-//   - qBt-savePath and qBt-downloadPath: qBittorrent's per-torrent overrides
-//     (bencoderesumedatastorage.cpp:260-266 read them, :479-480 write them only
-//     when automatic torrent management is off). An absent qBt-savePath means
-//     the torrent follows the app's download path, so an empty or missing value
-//     is left exactly as it is.
-//   - mapped_files: a list of renamed files, normally relative to save_path
-//     (write_resume_data.cpp:217, read_resume_data.cpp:179), so only an
-//     absolute entry — one another client wrote — is rewritten.
-//
-// Nothing else in the file is a filesystem path: the rest is integers,
-// bitfields, peer lists, trackers, URLs and text.
+// Package fastresume rewrites the paths qBittorrent stored in a resume
+// directory, ahead of migrating it onto box: a client that kept the source's paths
+// finds none of its files and downloads everything again from zero, with the
+// copies sitting right there. The path keys are libtorrent's save_path
+// (write_resume_data.cpp:116, read_resume_data.cpp:171), qBittorrent's qBt-savePath
+// and qBt-downloadPath overrides (bencoderesumedatastorage.cpp:260-266), and
+// absolute mapped_files entries (write_resume_data.cpp:217); an empty qBt-savePath
+// means automatic torrent management and is left alone. Nothing else is a path.
 package fastresume
 
 import (
@@ -42,27 +22,20 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// resumeExt is the suffix qBittorrent gives a torrent's resume data
-// (bencoderesumedatastorage.cpp:483).
+// resumeExt is qBittorrent's resume suffix (bencoderesumedatastorage.cpp:483).
 const resumeExt = ".fastresume"
 
-// dirPerm is what a directory this package creates gets: the same mode `box
-// init` gives the config root, so the app's own user can write into it. Handing
-// the tree to puid:pgid is the caller's job, which is the same deal
-// atomicfile.Write makes about its parent directory.
+// dirPerm is what a directory this package creates gets, the mode `box init` gives
+// the config root; handing the tree to puid:pgid is the caller's job.
 const dirPerm fs.FileMode = 0o775
 
 // pathKeys are the resume keys libtorrent and qBittorrent read as an absolute
-// filesystem path. part_file_dir is libtorrent 2's own: qBittorrent leaves it
-// empty, but a resume file another client wrote can carry one, and an empty
-// value is left exactly as it is (libtorrent@v2.1.2:src/write_resume_data.cpp:109,
-// src/read_resume_data.cpp:288).
+// path; part_file_dir is libtorrent 2's, empty in qBittorrent's own files
+// (libtorrent@v2.1.2:src/write_resume_data.cpp:109, read_resume_data.cpp:288).
 var pathKeys = []string{"save_path", "qBt-savePath", "qBt-downloadPath", "part_file_dir"}
 
-// Table is the plan's per-app path rules: the app whose files are being
-// rewritten, and the path it stored, mapped to the one it will store. The
-// source install's paths differ per app, so a table is never applied to another
-// app's files.
+// Table is the plan's per-app path rules; a table is never applied to another
+// app's files, because each app saw its own paths.
 type Table interface {
 	Rewrite(app, stored string) (string, bool)
 }
@@ -83,8 +56,8 @@ type Option func(*config)
 
 type config struct {
 	dryRun bool
-	// stop marks every torrent stopped as well as rewriting its paths: what a
-	// rehearsal does so a copy cannot seed, recheck or fetch metadata.
+	// stop marks every torrent stopped as well as rewriting its paths: a
+	// rehearsal's copy must not seed, recheck or fetch metadata.
 	stop bool
 }
 
@@ -94,32 +67,21 @@ func DryRun() Option {
 	return func(c *config) { c.dryRun = true }
 }
 
-// Stop marks every torrent in the run stopped: paused=1 and auto_managed=0,
-// which qBittorrent 5.3 reads as a stopped torrent
-// (bencoderesumedatastorage.cpp:360). It is the one app-specific half of a
-// rehearsal's lock: with the data absent or shared, a running torrent would
-// recheck to 0% and churn the disk, and a seeding one would announce.
-//
-// It is the same pass as the path rewrite, so a resume file is decoded, both
-// edits made and it is written once; every key this package does not name comes
-// back byte for byte.
+// Stop marks every torrent stopped: paused=1 and auto_managed=0, which qBittorrent
+// 5.3 reads as stopped (bencoderesumedatastorage.cpp:360). With the data absent or
+// shared, a running torrent would recheck to 0% and churn the disk, and a seeding
+// one would announce. It is the same pass as the path rewrite, so a file is
+// decoded once and every key this package does not name comes back byte for byte.
 func Stop() Option {
 	return func(c *config) { c.stop = true }
 }
 
-// RewriteDir copies src into dst, rewriting the paths in every resume file
-// through app's table.
-//
-// src is only ever read. It belongs to the source install, which keeps running
-// until the operator tears it down, and it is the rollback if the migration goes
-// wrong; dst must not exist or must be empty, because a destination holding
-// anything else could not be told apart from a finished copy.
-//
-// Every file is read and decoded before the first write, so a path no rule
-// covers refuses the whole run and leaves dst as it found it. The error is a
-// *plan.UncoveredError, which lists every gap at once: a torrent client's resume
-// directory is thousands of files and the operator should not have to discover
-// them one run at a time.
+// RewriteDir copies src into dst, rewriting every resume file's paths. src is
+// only ever read: it belongs to the source install, which stays the rollback. dst
+// must not exist or must be empty, or it could not be told from a finished copy.
+// Every file is read and decoded before the first write, so a gap refuses the run
+// and leaves dst as it found it, with every gap in one *plan.UncoveredError: a
+// resume directory is thousands of files.
 func RewriteDir(src, dst, app string, table Table, opts ...Option) (Report, error) {
 	var cfg config
 	for _, o := range opts {
@@ -151,8 +113,7 @@ func RewriteDir(src, dst, app string, table Table, opts ...Option) (Report, erro
 	return rep, nil
 }
 
-// outFile is one file pass two writes: the source's bytes, or a resume file's
-// rewritten ones, under the mode the source file had.
+// outFile is one file pass two writes, under the source's mode.
 type outFile struct {
 	name    string
 	data    []byte
@@ -160,18 +121,16 @@ type outFile struct {
 	changed bool // the bytes differ from what the source held
 }
 
-// resume is one resume file's rewrite: the bytes to write, what changed, and
-// the paths no rule covers. A file with gaps has no bytes: the run refuses
-// rather than write half a rewrite.
+// resume is one file's rewrite; a file with gaps has no bytes, because the run
+// refuses rather than write half a rewrite.
 type resume struct {
 	data     []byte
 	rewrites map[string]int
 	gaps     []plan.Uncovered
 }
 
-// read is pass one: every file in src is read, and every resume file decoded
-// and rewritten in memory. Gaps come back rather than an error, because the
-// caller reports them all together once the directory has been read.
+// read is pass one: every file read, every resume file rewritten in memory. Gaps
+// come back as values, because the caller reports them all at once.
 func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []plan.Uncovered, error) {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -182,8 +141,8 @@ func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []p
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
-			// qBittorrent writes this directory flat. A subdirectory is
-			// something else's data, and copying it is not this package's job.
+			// qBittorrent writes this directory flat; a subdirectory is someone
+			// else's data.
 			return nil, nil, fmt.Errorf("%s: is a directory; a resume directory holds files only", filepath.Join(src, name))
 		}
 		info, err := e.Info()
@@ -217,9 +176,8 @@ func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []p
 				}
 			}
 		} else {
-			// The torrent's metadata, and anything else the client keeps
-			// beside it, is copied byte for byte: its paths are relative to
-			// save_path and stay right once save_path is.
+			// The metadata is copied byte for byte: its paths are relative to
+			// save_path and stay right.
 			rep.Copied++
 		}
 		files = append(files, out)
@@ -227,9 +185,8 @@ func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []p
 	return files, gaps, nil
 }
 
-// stoppedData marks one decoded resume file stopped when this run is a
-// rehearsal, counting it for the report. A run that is not a rehearsal returns
-// the bytes it was given: the stop is the snapshot's mode, not a setting.
+// stoppedData marks one file stopped in a rehearsal, counting it; any other run
+// gets the bytes back unchanged, because the stop is the snapshot's mode.
 func stoppedData(name string, data []byte, cfg config, rep *Report) ([]byte, error) {
 	if !cfg.stop {
 		return data, nil
@@ -244,9 +201,8 @@ func stoppedData(name string, data []byte, cfg config, rep *Report) ([]byte, err
 	return out, nil
 }
 
-// rewriteFile decodes one resume file and returns the bytes pass two writes.
-// The gaps it finds are returned rather than an error: a file with two unmapped
-// paths is worth reporting once, with the rest of the directory.
+// rewriteFile returns the bytes pass two writes, with gaps as values so they are
+// reported with the rest of the directory.
 func rewriteFile(name string, raw []byte, app string, table Table, rep *Report) ([]byte, []plan.Uncovered, error) {
 	res, err := rewriteResume(name, raw, app, table)
 	if err != nil {
@@ -261,10 +217,7 @@ func rewriteFile(name string, raw []byte, app string, table Table, rep *Report) 
 	return res.data, nil, nil
 }
 
-// rewriteResume is one resume file's rewrite, decoded in memory: the bytes it
-// would become, the keys it changed, and every path no rule covers. A file
-// with gaps has no bytes, because the run refuses rather than write half a
-// rewrite.
+// rewriteResume is one file's rewrite in memory; with gaps there are no bytes.
 func rewriteResume(name string, raw []byte, app string, table Table) (resume, error) {
 	v, err := bencode.Decode(raw)
 	if err != nil {
@@ -287,11 +240,8 @@ func rewriteResume(name string, raw []byte, app string, table Table) (resume, er
 	return res, nil
 }
 
-// Scan reads a resume directory and reports what a rewrite would do, writing
-// nothing: it is the check pass, on the staged copy the app will see.
-//
-// Gaps come back as values rather than as a *plan.UncoveredError, because a
-// rewriter collects them with every other gap it finds before refusing once.
+// Scan reports what a rewrite would do, writing nothing. Gaps come back as values
+// so a rewriter collects them with its other gaps before refusing once.
 func Scan(dir, app string, table Table, opts ...Option) (Report, []plan.Uncovered, error) {
 	var cfg config
 	for _, o := range opts {
@@ -302,10 +252,8 @@ func Scan(dir, app string, table Table, opts ...Option) (Report, []plan.Uncovere
 	return rep, gaps, err
 }
 
-// Rewrite rewrites a resume directory in place: every file Scan decoded and
-// changed is written through atomicfile, and nothing else is touched. Files
-// that need no change keep their bytes and their mtime, so a second run writes
-// nothing at all.
+// Rewrite rewrites a resume directory in place: only changed files are written,
+// through atomicfile, so a second run writes nothing.
 func Rewrite(dir, app string, table Table, opts ...Option) (Report, []plan.Uncovered, error) {
 	var cfg config
 	for _, o := range opts {
@@ -327,9 +275,8 @@ func Rewrite(dir, app string, table Table, opts ...Option) (Report, []plan.Uncov
 	return rep, nil, nil
 }
 
-// Blob rewrites one bencoded resume blob in memory, as the SQLite resume store
-// keeps it. name labels the blob where a gap is reported, as a resume file's
-// name does; changed is false when the bytes came back the same.
+// Blob rewrites one bencoded blob in memory, as the SQLite store keeps it; name
+// labels it in a gap.
 func Blob(name string, raw []byte, app string, table Table, opts ...Option) (data []byte, rewrites map[string]int, gaps []plan.Uncovered, stopped bool, err error) {
 	var cfg config
 	for _, o := range opts {
@@ -349,18 +296,15 @@ func Blob(name string, raw []byte, app string, table Table, opts ...Option) (dat
 	return data, res.rewrites, nil, stopped, nil
 }
 
-// stopKeys are the two resume keys qBittorrent 5.3 reads as a stopped torrent:
-// paused=1 from libtorrent 1.2's resume format, and auto_managed=0 so the queue
-// does not start it again. libtorrent 2 carries the same two keys for
-// qBittorrent's benefit.
+// The two keys qBittorrent 5.3 reads as stopped: paused=1 and auto_managed=0, so
+// the queue does not start it again.
 const (
 	keyPaused      = "paused"
 	keyAutoManaged = "auto_managed"
 )
 
-// stopBytes marks one resume file, or one bencoded resume blob, stopped.
-// Everything else in it is left exactly as it was: the same round-trip promise
-// as the path rewrite, made by the same encoder.
+// stopBytes marks one file or blob stopped, leaving everything else byte for
+// byte.
 func stopBytes(name string, raw []byte) ([]byte, bool, error) {
 	v, err := bencode.Decode(raw)
 	if err != nil {
@@ -390,10 +334,8 @@ func stopBytes(name string, raw []byte) ([]byte, bool, error) {
 	return out, true, nil
 }
 
-// setInt writes one integer into a dictionary, inserting the key in its sorted
-// position when the file does not carry it. libtorrent writes both keys, but a
-// resume file another client wrote may not, and a missing key is not a reason
-// to leave a torrent running.
+// setInt writes one integer, inserting the key in its sorted position when
+// absent: a missing key is not a reason to leave a torrent running.
 func setInt(v *bencode.Value, key string, want int64) (bool, error) {
 	if f := v.Lookup(key); f != nil {
 		if f.Kind != bencode.Int {
@@ -419,8 +361,7 @@ func setInt(v *bencode.Value, key string, want int64) (bool, error) {
 	return true, nil
 }
 
-// rewriter maps one resume file's stored paths, remembering the gaps so the
-// run can report all of them at once.
+// rewriter maps one file's stored paths, keeping the gaps for one report.
 type rewriter struct {
 	app      string
 	file     string
@@ -429,8 +370,7 @@ type rewriter struct {
 	gaps     []plan.Uncovered
 }
 
-// paths rewrites every value in the file that holds a path. Everything else is
-// left exactly as it was found.
+// paths rewrites every value that holds a path, leaving the rest as found.
 func (r *rewriter) paths(v *bencode.Value) {
 	for _, key := range pathKeys {
 		if f := v.Lookup(key); f != nil && f.Kind == bencode.String {
@@ -448,14 +388,10 @@ func (r *rewriter) paths(v *bencode.Value) {
 	}
 }
 
-// value maps one stored path in place.
-//
-// label names it for a gap: for a mapped file that is the entry, so the
-// operator knows which of a torrent's many names has no rule, while the report
-// counts under key so one file with ten unmapped names still reads as one line.
-// A value that is not absolute — an empty qBt-savePath under automatic torrent
-// management, or a mapped name relative to save_path — comes back unchanged and
-// is neither counted nor reported.
+// value maps one stored path in place. label names the entry in a gap, while the
+// report counts under key so ten unmapped names read as one line. A relative value
+// (automatic torrent management's empty qBt-savePath, a mapped name) is unchanged
+// and neither counted nor reported.
 func (r *rewriter) value(key, label string, v *bencode.Value) {
 	out, ok := r.table.Rewrite(r.app, string(v.Bytes))
 	if !ok {
@@ -469,9 +405,8 @@ func (r *rewriter) value(key, label string, v *bencode.Value) {
 	r.rewrites[key]++
 }
 
-// checkDst refuses a destination this run must not write into, before anything
-// is read: a destination holding a half copy looks exactly like a finished one,
-// and the next run would refuse it as well.
+// checkDst refuses a destination this run must not write into, before anything is
+// read: a half copy looks exactly like a finished one.
 func checkDst(src, dst string) error {
 	srcAbs, err := filepath.Abs(src)
 	if err != nil {
@@ -508,9 +443,8 @@ func within(dir, p string) bool {
 	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator))
 }
 
-// writeAll is pass two: the destination directory, then every file through
-// atomicfile, so a crash leaves complete files rather than half-written resume
-// data qBittorrent would reject.
+// writeAll is pass two: the directory, then every file through atomicfile, so a
+// crash leaves complete files.
 func writeAll(dst string, files []outFile) (written []string, created bool, err error) {
 	if _, statErr := os.Stat(dst); errors.Is(statErr, fs.ErrNotExist) {
 		if err := os.MkdirAll(dst, dirPerm); err != nil {
@@ -527,9 +461,8 @@ func writeAll(dst string, files []outFile) (written []string, created bool, err 
 	return written, created, nil
 }
 
-// undo removes what this run wrote and only that: the files it copied, and the
-// destination directory when this run is what created it. A directory that was
-// already there is left empty, which the next run accepts.
+// undo removes what this run wrote: its files, and a directory it created; an
+// already-present directory is left empty, which the next run accepts.
 func undo(dst string, written []string, created bool) {
 	for _, name := range written {
 		os.Remove(filepath.Join(dst, name))
