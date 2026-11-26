@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// TestTemplateIsTheDecidedFile pins the file bootstrap writes: root edits it by
-// hand, so its bytes are documentation and must not drift with a refactor.
+// Root edits the template by hand, so its bytes are documentation and must not
+// drift with a refactor.
 func TestTemplateIsTheDecidedFile(t *testing.T) {
 	want := `# box's settings for this host. box never rewrites this file; edit it by hand.
 update:
@@ -22,8 +22,7 @@ notices:
 	if got := string(Template()); got != want {
 		t.Fatalf("Template() is not the decided file:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
-	// And the template is a file the parser accepts, as the defaults: the file
-	// box writes and the values box reads are one thing.
+	// The file box writes and the values box reads are one thing.
 	cfg, err := parse("box.yaml", Template())
 	if err != nil {
 		t.Fatalf("the template does not parse: %v", err)
@@ -33,8 +32,7 @@ notices:
 	}
 }
 
-// TestPathIsBesideTheRecord: --record moves both files, so a box's whole state
-// is one directory and a second host's is another.
+// --record moves both files, so a box's whole state is one directory.
 func TestPathIsBesideTheRecord(t *testing.T) {
 	for _, c := range []struct{ record, want string }{
 		{"/etc/s5n/cluster.yaml", "/etc/s5n/box.yaml"},
@@ -61,8 +59,7 @@ func TestLoadMissingFileIsTheDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadReadsEveryKey: each of the four decides something, so each one is
-// read back exactly as written.
+// Each of the four keys decides something, so each is read back exactly.
 func TestLoadReadsEveryKey(t *testing.T) {
 	file := write(t, `update:
   timer: off
@@ -85,8 +82,7 @@ notices:
 	}
 }
 
-// TestLoadAcceptsAShorterFileAndKeepsTheDefaults: the file is root's, and one
-// that sets only the address is not a file that turned the timer off.
+// One that sets only the address is not a file that turned the timer off.
 func TestLoadAcceptsAShorterFileAndKeepsTheDefaults(t *testing.T) {
 	cfg, _, err := Load(write(t, "notices:\n  url: https://hooks.example.test/x\n"))
 	if err != nil {
@@ -100,8 +96,7 @@ func TestLoadAcceptsAShorterFileAndKeepsTheDefaults(t *testing.T) {
 	}
 }
 
-// TestParseAcceptsCommentsBlanksQuotesAndBothBooleanSpellings: the file is
-// hand-written, so the shapes a person actually writes are accepted.
+// The file is hand-written, so the shapes a person actually writes are accepted.
 func TestParseAcceptsCommentsBlanksQuotesAndBothBooleanSpellings(t *testing.T) {
 	cfg, err := parse("box.yaml", []byte(`
 # the timer
@@ -122,9 +117,8 @@ notices:
 	}
 }
 
-// TestParseRefusesWhatItDoesNotUnderstand is the whole point of the strict
-// parser: every message names the file, the line and the key, so an operator can
-// find the typo without reading box's source.
+// Every message names file, line and key, so an operator finds the typo without
+// reading box's source.
 func TestParseRefusesWhatItDoesNotUnderstand(t *testing.T) {
 	for _, c := range []struct{ name, data, want string }{
 		{
@@ -200,8 +194,8 @@ func TestParseRefusesWhatItDoesNotUnderstand(t *testing.T) {
 	}
 }
 
-// TestEnsureWritesOnlyAMissingFile is bootstrap's rule: the defaults go on a
-// host that has none, and a file root has edited is never touched again.
+// The defaults go on a host that has none, and a file root edited is never
+// touched again.
 func TestEnsureWritesOnlyAMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", FileName)
 	wrote, err := Ensure(path)
@@ -239,8 +233,7 @@ func TestEnsureWritesOnlyAMissingFile(t *testing.T) {
 	}
 }
 
-// TestSetNoticeURLSplicesOneLine: init writes the answer into root's file, so
-// every other byte -- the comments, the order, the other three keys -- is kept.
+// init writes the answer into root's file, so every other byte is kept.
 func TestSetNoticeURLSplicesOneLine(t *testing.T) {
 	url := "https://hooks.example.test/services/T00/B00/abc"
 	got, err := SetNoticeURL(Template(), url)
@@ -281,8 +274,7 @@ func TestSetNoticeURLNeedsAURLline(t *testing.T) {
 	}
 }
 
-// TestRedactIsSchemeAndHostOnly: a notice address carries its own token, so the
-// only part of it box may print is the name of the host it posts to.
+// A notice address carries its own token, so only the host may be printed.
 func TestRedact(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"", ""},

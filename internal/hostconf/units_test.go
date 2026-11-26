@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// TestUnitFiles pins the two files systemd runs: the service is the run nobody
-// watches, so its command line, its timeout and the timer's wake schedule are
-// the whole behaviour of the feature.
+// The service is the run nobody watches, so its command line, its timeout and the
+// timer's wake schedule are the whole behaviour of the feature.
 func TestUnitFiles(t *testing.T) {
 	service, timer := UnitFiles("/usr/local/bin/box", "/etc/s5n/cluster.yaml",
 		"/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml")
@@ -44,8 +43,8 @@ WantedBy=timers.target
 	}
 }
 
-// TestUnitFilesQuoteAPathWithSpaces: ExecStart is split on whitespace, so a box
-// in a directory with a space in its name would be started as two commands.
+// ExecStart is split on whitespace, so a box in a directory with a space would be
+// started as two commands.
 func TestUnitFilesQuoteAPathWithSpaces(t *testing.T) {
 	service, _ := UnitFiles("/opt/my box/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
 	if !strings.Contains(string(service), `ExecStart="/opt/my box/box" update --timer `) {
@@ -74,8 +73,8 @@ func (f *fakeUnits) Enable(context.Context) error {
 	return f.enableErr
 }
 
-// TestInstallWritesThenEnables: the first run installs both files and starts the
-// timer, and a re-run whose bytes are the same does neither.
+// The first run installs both files and starts the timer; a re-run whose bytes are
+// the same does neither.
 func TestInstallWritesThenEnables(t *testing.T) {
 	f := &fakeUnits{}
 	changed, err := Install(context.Background(), f, "/usr/local/bin/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
@@ -106,8 +105,8 @@ func TestInstallWritesThenEnables(t *testing.T) {
 	}
 }
 
-// TestInstallReportsAFailedEnable: a unit file box wrote but could not turn on is
-// an error bootstrap says out loud, not a silent timer that never runs.
+// A unit file written but not turned on is an error bootstrap says out loud, not a
+// silent timer that never runs.
 func TestInstallReportsAFailedEnable(t *testing.T) {
 	f := &fakeUnits{enableErr: os.ErrPermission}
 	if _, err := Install(context.Background(), f, "/usr/local/bin/box", "c", "g", "v"); err == nil {
@@ -115,9 +114,8 @@ func TestInstallReportsAFailedEnable(t *testing.T) {
 	}
 }
 
-// TestDirUnitsWriteModeAndSkipUnchanged proves the write half without systemd: the
-// files land 0644 (systemd reads them, not root alone) and a second install
-// leaves their bytes and mtimes alone.
+// The write half without systemd: files land 0644 (systemd reads them, not root
+// alone) and a second install leaves their mtimes alone.
 func TestDirUnitsWriteModeAndSkipUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	u := DirUnits{Dir: dir}
