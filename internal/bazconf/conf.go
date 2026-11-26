@@ -1,21 +1,12 @@
-// Package bazconf seeds the two settings Bazarr must have before it starts:
-// the API key the wiring Job authenticates with, and the URL prefix the chart
-// serves it under.
+// Package bazconf seeds the two settings Bazarr needs before it starts: the API
+// key the wiring Job authenticates with and the URL prefix the chart serves it
+// under.
 //
-// Bazarr keeps its settings in a YAML file, config/config.yaml under the
-// config directory (bazarr/app/config.py:519 at v1.6.2), which it loads with
-// Dynaconf and rewrites whole from memory on every start and every settings
-// save (config.py:558-574, and write_config() runs at import). Neither value can
-// therefore be set through the API: general.base_url is read once, when the
-// Flask blueprints are registered (bazarr/app/server.py:21-22), so the API
-// itself lives under the prefix a running process never changes; and the API
-// key is what a request would have to present to change anything at all.
-//
-// So this is the Tautulli pattern (internal/ttlconf) with one difference: the
-// file is YAML, not an INI, so the splice is by section and indentation rather
-// than by `[section]`. Only the two keys this package owns are ever touched --
-// everything else is the app's own, and on the second start it is the app's
-// whole reformatted file that this rewrites two lines of.
+// Neither can be set through the API: Bazarr loads config/config.yaml
+// (bazarr/app/config.py:519 at v1.6.2) and rewrites it whole on every start
+// (config.py:558-574), and its blueprints are registered under general.base_url
+// once, at import (bazarr/app/server.py:21-22). So the file is spliced by
+// section, and only the two keys this package owns are touched.
 package bazconf
 
 import (
@@ -23,9 +14,8 @@ import (
 	"strings"
 )
 
-// The keys this package owns, and the sections they live in. Both names are
-// Bazarr's own validators: `general.base_url` (config.py:92) and `auth.apikey`
-// (config.py:185).
+// The keys this package owns and the sections they live in, both names Bazarr's
+// own validators (config.py:92 and config.py:185).
 const (
 	sectionGeneral = "general"
 	sectionAuth    = "auth"
@@ -33,15 +23,13 @@ const (
 	keyAPIKey      = "apikey"
 )
 
-// Seal ensures config.yaml serves at baseURL and holds apiKey, and returns
-// whether anything had to change so a second start writes nothing.
+// Seal ensures config.yaml serves at baseURL and holds apiKey, and reports
+// whether anything changed.
 //
-// A file this cannot edit safely is an error rather than a best guess: the
-// values are only reached by section and indentation, and a section written as
-// a flow mapping (`general: {...}`) or declared twice is a file whose two keys
-// this would either miss or duplicate. An init container that fails is a pod
-// that says so; one that guessed would leave a config the app rewrites from
-// memory on the next start.
+// A file it cannot edit safely -- a flow mapping (`general: {...}`), a section
+// declared twice -- is an error, not a guess: the app rewrites the file from
+// memory on the next start, and an init container that fails is a pod that says
+// so.
 func Seal(existing []byte, apiKey, baseURL string) (out []byte, changed bool, err error) {
 	doc, err := parse(existing)
 	if err != nil {
@@ -80,8 +68,8 @@ type document struct {
 	last   string // the file's own newline state, so a render keeps it
 }
 
-// parse splits a YAML file into its top-level sections without interpreting
-// anything inside them: this package never reads a value it does not own.
+// parse splits a YAML file into top-level sections, reading no value it does
+// not own.
 func parse(data []byte) (*document, error) {
 	doc := &document{}
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
@@ -94,11 +82,8 @@ func parse(data []byte) (*document, error) {
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		// A document marker is the first line of the file the app writes, and
-		// it belongs to the file's prologue: one document, its settings. A
-		// second one further down is a second document, which the app's loader
-		// would read only the first of, so it is refused rather than preserved
-		// as if it were a section.
+		// A document marker belongs to the file's prologue. A second one is a
+		// second document, and the app's loader reads only the first.
 		if trimmed == "---" {
 			if len(doc.secs) > 0 {
 				return nil, fmt.Errorf("holds more than one YAML document (`---` after %q); the app reads only one", doc.secs[0].name)
@@ -140,8 +125,7 @@ func parse(data []byte) (*document, error) {
 	return doc, nil
 }
 
-// topLevelKey reads a top-level key line: `name:` at column zero, possibly
-// quoted.
+// topLevelKey reads a top-level `name:` line, possibly quoted.
 func topLevelKey(line string) (name string, ok bool) {
 	s := strings.TrimRight(line, " \t")
 	if len(s) > 0 && (s[0] == '\'' || s[0] == '"') {
@@ -168,8 +152,7 @@ func topLevelKey(line string) (name string, ok bool) {
 	return name, true
 }
 
-// keyChar is what a plain YAML mapping key is made of, which is every shape the
-// app's own section names take.
+// keyChar is what a plain YAML mapping key is made of.
 func keyChar(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
@@ -230,19 +213,16 @@ func (d *document) set(sectionName, key, value string) {
 		}
 		k, _, ok := splitKey(strings.TrimPrefix(line, indent))
 		if ok && k == key {
-			// Keep the line's own trailing spaces? A settings file is not a
-			// place they matter, and the app rewrites this file anyway.
 			s.body[i] = indent + key + ": " + quote(value)
 			return
 		}
 	}
-	// The section exists without the key: it goes last in the section, before
-	// whatever follows it, so the section keeps its position.
+	// The section exists without the key: it goes last in the section.
 	s.body = append(s.body, indent+key+": "+quote(value))
 }
 
-// childIndent is the indentation of a section's first child line, which is what
-// its keys are written at. An empty section has none.
+// childIndent is the indentation of a section's first child line; an empty
+// section has none.
 func childIndent(s *section) string {
 	for _, line := range s.body {
 		if strings.TrimSpace(line) == "" {
@@ -253,8 +233,8 @@ func childIndent(s *section) string {
 	return ""
 }
 
-// splitKey splits "key: value" at the first colon that is followed by a space
-// or the end of the line, which is where YAML ends a plain key.
+// splitKey splits "key: value" at the first colon followed by a space or the
+// end of the line, where YAML ends a plain key.
 func splitKey(line string) (key, value string, ok bool) {
 	for i := 0; i < len(line); i++ {
 		if line[i] != ':' {
@@ -270,9 +250,8 @@ func splitKey(line string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// scalar is a YAML scalar's value: unquoted, with a plain value's comment
-// dropped. Only the two shapes this file uses are handled -- a plain scalar and
-// a quoted string -- because the keys this package reads are its own.
+// scalar is a YAML scalar's value, unquoted, with a plain value's comment
+// dropped. Only the two shapes this file uses are handled.
 func scalar(v string) string {
 	if v == "" {
 		return ""
@@ -337,9 +316,8 @@ func lastQuote(v string, quote byte) int {
 	return -1
 }
 
-// quote writes a value as a double-quoted YAML scalar: every value this
-// package writes is a path or a key, and quoting is what keeps a `#` or a `:`
-// in one from being read as a comment or a mapping.
+// quote writes v as a double-quoted YAML scalar, so a `#` or `:` in a path or a
+// key is not read as a comment or a mapping.
 func quote(v string) string {
 	var b strings.Builder
 	b.WriteByte('"')
