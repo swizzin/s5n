@@ -55,11 +55,23 @@ type Jellyfin struct {
 	Token string
 }
 
+// Jellyfin's own client header. Every request a Jellyfin client makes carries
+// it, and a sign-in without one is refused: AuthenticateUserByName builds its
+// AuthenticationRequest from it, and a missing Client is an
+// ArgumentNullException on `request.App` -- the app's 400 "Error processing
+// request", not a wrong password (Jellyfin.Api/Controllers/UserController.cs
+// and Jellyfin.Server.Implementations/Security/AuthorizationContext.cs at
+// v12.4). DeviceId is the device's own identity, so it is a constant here: one
+// Job is one device.
+const jellyfinClientHeader = `MediaBrowser Client="s5n", Device="wiring", DeviceId="s5n-wiring", Version="1.0"`
+
 // NewJellyfin builds a tokenless client. Nothing it asks without a token is a
 // write: /System/Info/Public and /Startup/* answer anonymously while the wizard
 // is incomplete, and every other call needs Token set.
 func NewJellyfin(baseURL string) *Jellyfin {
-	return &Jellyfin{client: NewClient(baseURL, nil)}
+	c := NewClient(baseURL, nil)
+	c.Header.Set("Authorization", jellyfinClientHeader)
+	return &Jellyfin{client: c}
 }
 
 // PublicInfo is the subset of GET /System/Info/Public this Job reads.
@@ -396,9 +408,15 @@ type Observation struct {
 }
 
 // SetToken points this client at a session token or an API key.
+//
+// It goes in the Authorization header's Token parameter, not in an X-Emby-Token
+// of its own: at v12.4 a token in that header is the only one the app's
+// authentication handler reads, and the legacy header answers 401 on every
+// endpoint (checked against a 12.4 server: sign-in succeeds, then /Users with
+// X-Emby-Token is 401 and with the Token parameter is 200).
 func (j *Jellyfin) SetToken(token string) {
 	j.Token = token
-	j.client.Header.Set("X-Emby-Token", token)
+	j.client.Header.Set("Authorization", jellyfinClientHeader+`, Token="`+token+`"`)
 }
 
 // HasToken reports whether the client will authenticate.

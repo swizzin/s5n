@@ -163,6 +163,13 @@ func (f *jellyfinFake) userRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *jellyfinFake) signIn(w http.ResponseWriter, r *http.Request) {
+	// The app builds the session's client, device and version from this header
+	// and answers 400 without it, whatever the password was.
+	if !strings.HasPrefix(r.Header.Get("Authorization"), `MediaBrowser Client="`) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Error processing request."))
+		return
+	}
 	var body struct{ Username, Pw string }
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if f.passwords[body.Username] != body.Pw || body.Pw == "" {
@@ -226,6 +233,20 @@ func (f *jellyfinFake) getUser(w http.ResponseWriter, id string) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
+// headerToken reads `Token="..."` out of a MediaBrowser authorization header.
+func headerToken(header string) string {
+	const prefix = `Token="`
+	i := strings.Index(header, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := header[i+len(prefix):]
+	if end := strings.IndexByte(rest, '"'); end >= 0 {
+		return rest[:end]
+	}
+	return ""
+}
+
 func (f *jellyfinFake) apiKeys(w http.ResponseWriter, r *http.Request) {
 	if !f.auth(w, r) {
 		return
@@ -271,9 +292,11 @@ func (f *jellyfinFake) networkConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // auth checks the token the client sent, so a test that forgets to sign in
-// fails the way the real app would answer: 401, not a silent empty list.
+// fails the way the real app would answer: 401, not a silent empty list. The
+// token is the Authorization header's Token parameter, which is the only place
+// a 12.4 server reads one.
 func (f *jellyfinFake) auth(w http.ResponseWriter, r *http.Request) bool {
-	token := r.Header.Get("X-Emby-Token")
+	token := headerToken(r.Header.Get("Authorization"))
 	if token == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return false

@@ -3086,6 +3086,7 @@ PYPBH
   jf_token() {
     curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
       -H 'Content-Type: application/json' -d "{\"Username\":\"$1\",\"Pw\":\"$2\"}" \
+      -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\"" \
       "https://${JELLYFIN_HOST}/Users/AuthenticateByName" 2>/dev/null |
       python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("AccessToken") or "")
@@ -3099,7 +3100,7 @@ except Exception: print("")' || true
   jf_api() {
     local token=$1; shift
     curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
-      -H "X-Emby-Token: ${token}" "$@"
+      -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\", Token=\"${token}\"" "$@"
   }
   jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Library/VirtualFolders" >"$WORK/jf-libs.json" || true
   for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
@@ -3130,9 +3131,13 @@ d=json.load(open("'"$WORK"'/jf-network.json")); p=d.get("KnownProxies") or d.get
 print("  KnownProxies: %s" % p)
 sys.exit(0 if p and any("10.244." in x or "/" in x for x in p) else 1)' ||
     { echo "Jellyfin's KnownProxies is empty: it ignores the Gateway's forwarded address"; fail=1; }
+  # IsInNetwork is the app's own verdict on where the request came from: the
+  # Gateway's proxy pod is on the same pod subnet as the app, so a request it
+  # does not trust reads as "my network". False means the person's address
+  # arrived, which only a trusted peer's X-Forwarded-For can do.
   jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
-  grep -q '"IsLocal":false' "$WORK/jf-endpoint.json" ||
-    { echo "Jellyfin counts a request through the Gateway as local ($(cat "$WORK/jf-endpoint.json"))"; fail=1; }
+  grep -q '"IsInNetwork":false' "$WORK/jf-endpoint.json" ||
+    { echo "Jellyfin counts a request through the Gateway as coming from its own network ($(cat "$WORK/jf-endpoint.json"))"; fail=1; }
 
   # ---- a renewal, with the redirect and the narrowed listener in place -------
   # The renewal is triggered the way `cmctl renew` does: the Certificate's

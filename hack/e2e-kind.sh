@@ -1291,12 +1291,13 @@ grep -qi '<!doctype html' "$WORK/jellyfin.html" || { echo "${JELLYFIN_HOST} answ
 jf_api() {
   local token=$1; shift
   curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-    -H "X-Emby-Token: ${token}" "$@"
+    -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\", Token=\"${token}\"" "$@"
 }
 # jf_signin <user> <password>: the token of a session, empty when refused.
 jf_signin() {
   curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
     -H 'Content-Type: application/json' -d "{\"Username\":\"$1\",\"Pw\":\"$2\"}" \
+    -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\"" \
     "https://${JELLYFIN_HOST}/Users/AuthenticateByName" 2>/dev/null |
     python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("AccessToken") or "")
@@ -1401,10 +1402,12 @@ done
 # LocalAccessOrRequiresElevation to a local caller with no credential at all.
 #
 # The app reads this list at startup only, so the proof is its own answer about
-# this request: IsLocal can be false only because the person's address arrived
-# in X-Forwarded-For from a peer the app was told to trust. (Emptying the list
-# here would not change the answer until the pod restarted, which is why the
-# list is read, not toggled.)
+# this request. Its rule for "in my network" is the server's own interfaces, and
+# the peer of a request it does not trust is the Gateway's proxy pod -- an
+# address on the same pod subnet as the app itself. So IsInNetwork=false is only
+# possible because the person's address arrived in X-Forwarded-For from a peer
+# the app was told to trust. (Emptying the list here would not change the answer
+# until the pod restarted, which is why the list is read, not toggled.)
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
 python3 - "$WORK/jf-network.json" <<'PYNET' || fail=1
 import json, sys
@@ -1420,9 +1423,9 @@ if not proxies:
 print("  KnownProxies: %s" % ", ".join(proxies))
 PYNET
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
-grep -q '"IsLocal":false' "$WORK/jf-endpoint.json" ||
-  { echo "Jellyfin counts a request through the Gateway as local ($(cat "$WORK/jf-endpoint.json")): the forwarded address is ignored"; fail=1; }
-echo "a request through the Gateway is not local, so the person's address arrived"
+grep -q '"IsInNetwork":false' "$WORK/jf-endpoint.json" ||
+  { echo "Jellyfin counts a request through the Gateway as coming from its own network ($(cat "$WORK/jf-endpoint.json")): the forwarded address is ignored"; fail=1; }
+echo "a request through the Gateway is not in the app's network, so the person's address arrived"
 
 
 # ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
