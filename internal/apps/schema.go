@@ -52,6 +52,10 @@ const (
 	fieldAPIKey   = "apiKey"
 	fieldSection  = "section"
 	fieldKeyword  = "keyword"
+	// qui's Arr instances name two fields of their own: which Arr a row is,
+	// and whether it is on (internal/models/arr_instance.go at v1.36.1).
+	fieldType    = "type"
+	fieldEnabled = "enabled"
 )
 
 // Clone deep-copies an Item. Used to turn a schema template into a request body

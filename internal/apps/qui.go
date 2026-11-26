@@ -300,3 +300,214 @@ func (q *Qui) TestInstance(ctx context.Context, id int) error {
 	}
 	return nil
 }
+
+// QuiArrSpec is one Arr instance qui registers for ID lookups: a Sonarr or a
+// Radarr on the box, dialled by qui's own pod.
+type QuiArrSpec struct {
+	Name    string
+	Type    string // sonarr or radarr, the only two qui has (internal/models/arr_instance.go at v1.36.1)
+	BaseURL string // the Arr's in-cluster URL, its own URL base included
+	APIKey  string
+}
+
+// quiArrTimeoutSeconds is the timeout a created row carries: qui's own default
+// (internal/api/handlers/arr.go at v1.36.1 fills in 15 when the request names
+// none), written out so the row says what it means.
+const quiArrTimeoutSeconds = 15
+
+// ArrInstances lists qui's Arr instances (GET /api/arr/instances). The answer
+// never carries a stored API key: the model marks it json:"-", so there is
+// nothing to compare and nothing that could be written back.
+func (q *Qui) ArrInstances(ctx context.Context) ([]Item, error) {
+	var out []Item
+	if err := q.client.Get(ctx, q.api("/arr/instances"), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EnsureArrInstance makes one Arr instance match the spec and proves it with
+// qui's own test, which is an Arr API call made from qui's pod: it is the only
+// thing that shows the release's NetworkPolicy admits qui to that Arr.
+//
+// ownedID and knownFingerprint are owned.json's record. The id keeps a rename in
+// qui's UI from creating a second row; the fingerprint of the key last written
+// and proven is the only way a rotation in the release Secret is visible, since
+// qui never answers a stored key.
+//
+// Only the key is ever written to a row that already exists. A row box adopted
+// is the operator's -- its name, its enabled flag, its priority and its timeout
+// are what they chose, or what their old install had -- and a disabled one is
+// left disabled: nothing dials it, so there is nothing to prove.
+func (q *Qui) EnsureArrInstance(ctx context.Context, spec QuiArrSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
+	list, err := q.ArrInstances(ctx)
+	if err != nil {
+		return EnsureResult{}, fmt.Errorf("list qui Arr instances: %w", err)
+	}
+	cur, found, recreated, previousID, note := locateQuiArr(list, spec, ownedID)
+
+	change := Created
+	if found {
+		change = Unchanged
+		if knownFingerprint != SecretFingerprint(spec.APIKey) {
+			change = Updated
+		}
+	}
+
+	id := 0
+	switch change {
+	case Created:
+		body := Item{
+			fieldType: spec.Type, fieldName: spec.Name, "base_url": spec.BaseURL,
+			"api_key": spec.APIKey, fieldEnabled: true, "priority": 0,
+			"timeout_seconds": quiArrTimeoutSeconds,
+		}
+		var out Item
+		if err := q.client.Post(ctx, q.api("/arr/instances"), body, &out); err != nil {
+			return EnsureResult{}, fmt.Errorf("create qui Arr instance %q: %w", spec.Name, err)
+		}
+		id = out.Int("id")
+	case Updated:
+		id = cur.Int("id")
+		if err := q.client.Put(ctx, q.api(fmt.Sprintf("/arr/instances/%d", id)), Item{"api_key": spec.APIKey}, nil); err != nil {
+			return EnsureResult{}, fmt.Errorf("update qui Arr instance %q: %w", spec.Name, err)
+		}
+	default:
+		id = cur.Int("id")
+	}
+	if id == 0 {
+		return EnsureResult{}, fmt.Errorf("qui answered no id for its Arr instance %q", spec.Name)
+	}
+
+	disabled := found && !quiArrEnabled(cur)
+	if disabled {
+		if note == "" {
+			note = "left disabled"
+		} else {
+			note += ", left disabled"
+		}
+	}
+	result := EnsureResult{Change: change, ID: id, Recreated: recreated, PreviousID: previousID, Note: note}
+	if disabled {
+		return result, nil
+	}
+	if err := q.TestArrInstance(ctx, id); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// locateQuiArr finds the Arr instance the Job owns:
+//
+//   - a recorded id is authoritative, so a rename in qui's UI never creates a
+//     second row;
+//   - with nothing recorded -- or a record whose row is gone -- the row at this
+//     box's address is adopted. The table is UNIQUE on (type, base_url), so a
+//     create there is refused 409, and a migrated box's row is already pointed
+//     at the release by internal/migrate/qui. Any row counts, enabled or not:
+//     the uniqueness is the reason, not the state. Two spellings of one address
+//     (the index is on the interned text, so a differently-cased host is a
+//     second row) are the lowest id, with the receipt naming both;
+//   - there is deliberately no fallback by name. A row of the right name at
+//     another address is another Arr -- the operator's remote one, say -- and
+//     adopting it would point nothing at this box's Arr while leaving the
+//     remote one holding a key from this release;
+//   - only when neither exists was the recorded row deleted, so the run creates
+//     one and says which id went.
+func locateQuiArr(list []Item, spec QuiArrSpec, ownedID int) (cur Item, found, recreated bool, previousID int, note string) {
+	if ownedID != 0 {
+		for _, item := range list {
+			if item.Int("id") == ownedID {
+				return item, true, false, 0, ""
+			}
+		}
+	}
+	if same := quiArrURLMatches(list, spec); len(same) > 0 {
+		best := same[0]
+		for _, item := range same[1:] {
+			if item.Int("id") < best.Int("id") {
+				best = item
+			}
+		}
+		return best, true, false, 0, adoptionNote(best, same, ownedID)
+	}
+	if ownedID != 0 {
+		return nil, false, true, ownedID, ""
+	}
+	return nil, false, false, 0, ""
+}
+
+// quiArrURLMatches returns the rows of the spec's own type whose base URL is the
+// one the spec names.
+func quiArrURLMatches(list []Item, spec QuiArrSpec) []Item {
+	want := normalizeQuiArrBaseURL(spec.BaseURL)
+	if want == "" {
+		return nil
+	}
+	var out []Item
+	for _, item := range list {
+		if !strings.EqualFold(item.Str(fieldType), spec.Type) {
+			continue
+		}
+		if normalizeQuiArrBaseURL(item.Str("base_url")) == want {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// normalizeQuiArrBaseURL is an Arr base URL the way two of them are compared.
+// qui stores what the operator typed, minus the surrounding space and any
+// trailing slash (internal/models/arr_instance.go: normalizeBaseURL at
+// v1.36.1), so only what DNS and HTTP themselves fold is folded here: the
+// scheme and the host are case-blind, and the path is compared as stored --
+// box's own shape serves several apps under one name, and the path is what says
+// which one an address meant.
+func normalizeQuiArrBaseURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	scheme, rest, ok := splitScheme(s)
+	if !ok {
+		scheme = ""
+	}
+	host, path := rest, ""
+	if i := strings.Index(rest, "/"); i >= 0 {
+		host, path = rest[:i], rest[i:]
+	}
+	return strings.ToLower(scheme) + strings.ToLower(host) + strings.TrimRight(path, "/")
+}
+
+// quiArrEnabled reads a row's enabled flag. The model answers it as a bool on
+// every row (internal/models/arr_instance.go at v1.36.1), so an absent one is a
+// body this client did not write, and treating it as enabled is what keeps the
+// test running rather than silently skipping the proof.
+func quiArrEnabled(item Item) bool {
+	if on, ok := item[fieldEnabled].(bool); ok {
+		return on
+	}
+	return true
+}
+
+// TestArrInstance asks qui to dial the Arr now (POST
+// /api/arr/instances/{id}/test). It answers 200 either way, with
+// {"success":false,"error":...} on a failure, so the status alone would pass a
+// row that reaches nothing.
+func (q *Qui) TestArrInstance(ctx context.Context, id int) error {
+	var out struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := q.client.Post(ctx, q.api(fmt.Sprintf("/arr/instances/%d/test", id)), nil, &out); err != nil {
+		return fmt.Errorf("test qui Arr instance %d: %w", id, err)
+	}
+	if !out.Success {
+		detail := out.Error
+		if detail == "" {
+			detail = "qui did not say why"
+		}
+		return fmt.Errorf("qui Arr instance %d is not reachable: %s", id, detail)
+	}
+	return nil
+}

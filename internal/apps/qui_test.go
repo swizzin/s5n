@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,18 @@ type quiFake struct {
 	login    int
 	password string // what the app holds; a PUT without one keeps it
 	disabled bool   // QUI__AUTH_DISABLED: the API is open, the login refuses
+
+	// The Arr instances, qui's other owned objects. Their API is the app's own
+	// (internal/api/handlers/arr.go at v1.36.1): a create is refused 409 at a
+	// URL the type already has, the list never carries a stored API key, and an
+	// update leaves every field it is not sent alone.
+	arrRows     []Item
+	arrNext     int
+	arrWrites   int
+	arrCreated  []Item
+	arrUpdated  []Item
+	arrTested   int
+	arrTestFail bool
 }
 
 func (f *quiFake) handler() http.HandlerFunc {
@@ -46,6 +59,14 @@ func (f *quiFake) handler() http.HandlerFunc {
 			f.testHandler(w)
 		case strings.HasPrefix(path, "/api/instances/") && r.Method == http.MethodPut:
 			f.updateHandler(w, r)
+		case path == "/api/arr/instances" && r.Method == http.MethodGet:
+			f.arrListHandler(w)
+		case path == "/api/arr/instances" && r.Method == http.MethodPost:
+			f.arrCreateHandler(w, r)
+		case strings.HasPrefix(path, "/api/arr/instances/") && strings.HasSuffix(path, "/test"):
+			f.arrTestHandler(w)
+		case strings.HasPrefix(path, "/api/arr/instances/") && r.Method == http.MethodPut:
+			f.arrUpdateHandler(w, r)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
@@ -149,6 +170,80 @@ func newQuiFake(t *testing.T) (*quiFake, *Qui) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	return f, NewQui(srv.URL, "/qui", "s5n", "qui-pass-123")
+}
+
+// arrListHandler is GET /api/arr/instances: every row, and no stored API key --
+// internal/models/arr_instance.go marks APIKeyEncrypted json:"-", so the key is
+// never in the response at all (not even as a mask).
+func (f *quiFake) arrListHandler(w http.ResponseWriter) {
+	out := []Item{}
+	for _, row := range f.arrRows {
+		c := row.Clone()
+		delete(c, "api_key")
+		out = append(out, c)
+	}
+	writeJSON(w, out)
+}
+
+// arrCreateHandler is POST /api/arr/instances. The table has a UNIQUE index on
+// (type, base_url), and the handler answers 409 for it, so a create beside an
+// existing row is refused rather than becoming a duplicate.
+func (f *quiFake) arrCreateHandler(w http.ResponseWriter, r *http.Request) {
+	var body Item
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	for _, row := range f.arrRows {
+		if strings.EqualFold(row.Str("type"), body.Str("type")) &&
+			strings.TrimRight(row.Str("base_url"), "/") == strings.TrimRight(body.Str("base_url"), "/") {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]string{"error": "An instance with this URL already exists for this type"})
+			return
+		}
+	}
+	f.arrCreated = append(f.arrCreated, body)
+	f.arrNext++
+	body["id"] = f.arrNext
+	body["last_test_status"] = "unknown"
+	f.arrRows = append(f.arrRows, body)
+	f.arrWrites++
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, body)
+}
+
+// arrUpdateHandler is PUT /api/arr/instances/{id}: every field it is not sent is
+// left alone, which is what makes "write only the key" an update of the key.
+func (f *quiFake) arrUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/qui/api/arr/instances/"))
+	var body Item
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	for i, row := range f.arrRows {
+		if row.Int("id") != id {
+			continue
+		}
+		f.arrUpdated = append(f.arrUpdated, body)
+		for _, key := range []string{"name", "base_url", "api_key", "enabled", "priority", "timeout_seconds"} {
+			value, ok := body[key]
+			if !ok || (key == "api_key" && value == "") {
+				continue
+			}
+			row[key] = value
+		}
+		f.arrRows[i] = row
+		f.arrWrites++
+		writeJSON(w, row)
+		return
+	}
+	http.Error(w, "ARR instance not found", http.StatusNotFound)
+}
+
+// arrTestHandler is POST /api/arr/instances/{id}/test: 200 either way, with
+// {"success": false, "error": ...} when qui cannot reach the Arr.
+func (f *quiFake) arrTestHandler(w http.ResponseWriter) {
+	f.arrTested++
+	if f.arrTestFail {
+		writeJSON(w, map[string]any{"success": false, "error": "connection refused"})
+		return
+	}
+	writeJSON(w, map[string]any{"success": true})
 }
 
 // loginQui logs in and fails the test if the app refuses.
