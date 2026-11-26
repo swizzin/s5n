@@ -24,9 +24,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Helm is the release client: the Helm SDK over client-go, which the maintainer
-// decided is box's cluster client. It is namespace-scoped, because one release
-// is one namespace is one seedbox.
+// Helm is the release client: the Helm SDK over client-go, namespace-scoped,
+// because one release is one namespace is one seedbox.
 type Helm struct {
 	Kubeconfig string
 	Namespace  string
@@ -34,21 +33,12 @@ type Helm struct {
 	// Timeout bounds install, upgrade and their wait. Zero means 15 minutes,
 	// which is what hack/e2e-kind.sh gives the wiring Job.
 	Timeout time.Duration
-	// HooksOnly says this handle's upgrade waits for the release's hooks and
-	// not for its resources: the caller gates the release itself. `box update`
-	// sets it, because a step's health gate is the only gate that can tell a
-	// crashlooping pod from a slow migration and put the app back. Helm's own
-	// wait cannot: kstatus reads a crashlooping pod as failed, and Helm drops
-	// failed resources from the wait, so the release's StatefulSet keeps it
-	// waiting until the whole Timeout is gone -- thirty-five minutes of a
-	// broken image before the rollback could start.
+	// HooksOnly waits for hooks, not resources: `box update`'s health gate is
+	// the only one that can tell a crashloop from a slow migration. Helm's wait
+	// would spend the whole Timeout on a broken image before a rollback.
 	HooksOnly bool
-	// SkipHooks says an upgrade installs the release without running the
-	// chart's hooks: the caller runs them itself, in the apply that installs
-	// the state that stays. `box update`'s step sets it for its first apply --
-	// the chart's wiring Job waits for every app to answer, so a moved app
-	// whose new image never starts cannot let it pass, and the step has to
-	// judge the moved apps before that Job runs at all.
+	// SkipHooks installs without the chart's hooks; `box update` sets it for its
+	// first apply so its health gate judges the apps before the wiring Job.
 	SkipHooks bool
 
 	cfg *action.Configuration
@@ -70,11 +60,9 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	return NewHelmWithTimeout(kubeconfig, namespace, releaseName, 0)
 }
 
-// NewHelmWithTimeout is NewHelm with client-go's per-request timeout on every
-// client the handle builds. A caller that reads without a wait of its own needs
-// it: `box status` is one line from a shell prompt, and a context deadline
-// bounds nothing inside Helm, whose release storage makes its API calls with
-// context.Background() (see kube.WithRequestTimeout).
+// NewHelmWithTimeout bounds every client-go request: a context deadline bounds
+// nothing inside Helm, whose release storage calls with context.Background()
+// (see kube.WithRequestTimeout).
 func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.Duration) (*Helm, error) {
 	if namespace == "" {
 		return nil, errors.New("no namespace: the grant names the release namespace")
@@ -82,11 +70,8 @@ func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.
 	if releaseName == "" {
 		releaseName = ReleaseName
 	}
-	// Helm builds its own clients from this getter, so kube.Flags is what
-	// carries box's warning policy into them: client-go's deprecation notices
-	// would otherwise print through klog in the middle of box's output
-	// (docs/box.md: box is the whole interface). Helm's own warnings go
-	// through slog and are silenced below.
+	// Helm builds its clients from this getter, so kube.Flags carries box's
+	// warning policy: client-go deprecations would print through klog.
 	flags := kube.Flags(kubeconfig, namespace)
 	if timeout > 0 {
 		flags = kube.WithRequestTimeout(flags, timeout)
@@ -96,10 +81,8 @@ func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.
 	if err := cfg.Init(flags, namespace, "secret"); err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
-	// Helm's own slog output and hook stdout would land in the middle of
-	// box's transcript. box is the whole interface (docs/box.md), and the
-	// reporter is the only thing that speaks: Helm's noise is dropped, not
-	// explained away. Its errors still come back through the API calls.
+	// Helm's slog output and hook stdout would interrupt box's transcript; drop
+	// them, but keep its errors.
 	cfg.SetLogger(slog.DiscardHandler)
 	cfg.HookOutputFunc = func(string, string, string) io.Writer { return io.Discard }
 	restConfig, err := flags.ToRESTConfig()
@@ -113,10 +96,8 @@ func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.
 	return &Helm{Kubeconfig: kubeconfig, Namespace: namespace, Release: releaseName, cfg: cfg, cs: cs}, nil
 }
 
-// Deployed returns the values the release was installed with. Helm stores the
-// values box handed it, which for a box-applied release is the whole effective
-// document (chart defaults, the user's values, then the grant), so the diff of
-// a re-apply compares like with like.
+// Deployed returns the installed values -- for a box release the whole
+// effective document -- so a re-apply compares like with like.
 func (h *Helm) Deployed(_ context.Context) (map[string]any, bool, error) {
 	rel, err := h.deployedRelease()
 	if err != nil || rel == nil {
@@ -137,18 +118,15 @@ func (h *Helm) Deployed(_ context.Context) (map[string]any, bool, error) {
 // own status. Exists is false when no release of box's name is deployed.
 type ReleaseState struct {
 	Exists bool
-	// ChartVersion is the version of the chart the release was deployed with.
-	// It is what an update compares a newer release against, and the revision
-	// is what a failed step returns to.
+	// ChartVersion is what an update compares against; Revision is what a failed
+	// step returns to.
 	ChartVersion string
 	Revision     int
 	Status       string
 }
 
-// State reads the deployed release's chart version, revision and status
-// without its values. Deployed answers "what did the operator ask for"; this
-// answers "what is running", which is the question an update's target and its
-// rollback both start from.
+// State reads the chart version, revision and status: what is running, which an
+// update's target and rollback both start from.
 func (h *Helm) State(_ context.Context) (ReleaseState, error) {
 	rel, err := h.deployedRelease()
 	if err != nil {
@@ -173,24 +151,21 @@ func (h *Helm) State(_ context.Context) (ReleaseState, error) {
 		}
 	}
 	if state.ChartVersion == "" {
-		// Without it an update cannot say what it is moving from, and
-		// guessing "the newest" would step a box that is already current.
+		// Without it an update cannot say what it moves from, and guessing would
+		// step a current box.
 		return ReleaseState{}, fmt.Errorf("release %s in %s: Helm does not record which chart version it was deployed with", h.Release, h.Namespace)
 	}
 	return state, nil
 }
 
-// Deployed reports whether Helm's status for the release is deployed. An
-// update's health gate waits for this, because a release can be upgraded and
-// then failed by a hook or by a controller retrying its status.
+// Deployed reports Helm's deployed status; a hook can fail a release after its
+// upgrade.
 func (s ReleaseState) Deployed() bool {
 	return s.Status == string(common.StatusDeployed)
 }
 
-// deployedRelease is the release Helm has deployed, or nil when there is none.
-// A release of that name in any other state (failed, pending) is an error: it
-// is not a clean slate, and unloading it behind the operator's back is not
-// box's call.
+// deployedRelease is the deployed release, nil when none. A release in another
+// state is an error: box will not unload it behind the operator.
 func (h *Helm) deployedRelease() (helmrelease.Releaser, error) {
 	rel, err := h.cfg.Releases.Deployed(h.Release)
 	if err == nil {
@@ -207,14 +182,9 @@ func (h *Helm) deployedRelease() (helmrelease.Releaser, error) {
 	return nil, nil
 }
 
-// Upgrade installs or upgrades the release and waits for it. The install path
-// is Helm's Install action rather than Upgrade with Install=true, so the choice
-// is visible in the code and an unexpected existing release cannot be adopted
-// by accident.
-//
-// SkipHooks leaves the chart's hooks for a later apply: Helm would wait for
-// them here, and a hook that cannot finish is a failure of this upgrade, so a
-// caller that has its own gate has to be able to move the release first.
+// Upgrade installs or upgrades and waits. The install path is Helm's Install
+// action, so an existing release cannot be adopted by accident. SkipHooks
+// leaves hooks for a later apply, whose gate must move the release first.
 func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) (int, error) {
 	chrt, err := chart.open()
 	if err != nil {
@@ -257,16 +227,10 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 	return acc.Version(), nil
 }
 
-// Rollback returns the release to an earlier revision and waits for it.
-//
-// It is what a failed update step does, so it takes the revision the step
-// recorded, never "one back": an update can make more than one revision (the
-// per-host and login steps are object writes, not revisions, but a retried
-// apply is), and "one back" could land between them.
-//
-// Helm v4.3.1's rollback takes no context, so box refuses to start one on a
-// cancelled run and bounds it with the same Timeout as an upgrade rather than
-// pretending the context reaches it.
+// Rollback returns to the recorded revision and waits. It takes the step's own
+// revision, never "one back", which could land between a retried apply's two.
+// Helm v4.3.1's rollback takes no context, so box refuses a cancelled run and
+// bounds it with Timeout.
 func (h *Helm) Rollback(ctx context.Context, revision int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -286,8 +250,7 @@ func (h *Helm) Rollback(ctx context.Context, revision int) error {
 	return nil
 }
 
-// timeout is how long a Helm action may take. Zero is 15 minutes, which is
-// what hack/e2e-kind.sh gives the wiring Job.
+// timeout is a Helm action's budget; zero is 15 minutes.
 func (h *Helm) timeout() time.Duration {
 	if h.Timeout > 0 {
 		return h.Timeout
@@ -295,8 +258,7 @@ func (h *Helm) timeout() time.Duration {
 	return 15 * time.Minute
 }
 
-// Receipt reads the `<release>-wiring` ConfigMap's status.json, which
-// internal/wiring publishes on every run.
+// Receipt reads `<release>-wiring`'s status.json.
 func (h *Helm) Receipt(ctx context.Context) (Receipt, error) {
 	cm, err := h.cs.CoreV1().ConfigMaps(h.Namespace).Get(ctx, h.Release+"-wiring", metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -335,13 +297,9 @@ func (h *Helm) Receipt(ctx context.Context) (Receipt, error) {
 	return out, nil
 }
 
-// JobLog reads the log of the release's wiring Job, followed or once.
-//
-// The Job is a Helm hook, so it is not a release resource: box finds its pods by
-// the label the Job controller writes, reads the newest one, and asks for its
-// log from the beginning -- kept open when the caller follows it, which is what
-// the live line reads. A pod that is not there yet is an error, and the wait
-// asks again.
+// JobLog reads the wiring Job's log, followed or once. The Job is a hook, not a
+// release resource, so its newest pod is found by the controller's label; no pod
+// yet is an error the wait retries.
 func (h *Helm) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
 	job := h.Release + "-wiring"
 	pods, err := h.cs.CoreV1().Pods(h.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
@@ -351,8 +309,7 @@ func (h *Helm) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
 	var pod *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		// The Job controller keeps a pod that has finished; one being deleted is
-		// the next run's, not this one's.
+		// A finished pod is kept; one being deleted belongs to the next run.
 		if p.DeletionTimestamp != nil {
 			continue
 		}
@@ -373,9 +330,7 @@ func (h *Helm) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
 	return stream, nil
 }
 
-// configOf returns a release's own values. Helm v4 exposes the user-supplied
-// values only on the concrete v1 release type; the accessor interface is
-// deliberately smaller.
+// configOf reads a release's values; Helm v4 exposes them only on v1's type.
 func configOf(rel helmrelease.Releaser) (map[string]any, error) {
 	switch r := rel.(type) {
 	case *v1release.Release:

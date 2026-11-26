@@ -16,19 +16,14 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// NominalCapacity is the size box writes on every PersistentVolume and claim.
-//
-// A hostPath volume has no size: the filesystem is the limit, and the API
-// requires a number anyway. Nothing enforces this one -- there is no quota, no
-// resize, and `box` never reads it back as a limit.
+// NominalCapacity is the size box writes on every PV and claim. A hostPath
+// volume has no size, but the API requires a number and nothing enforces it.
 const NominalCapacity = "1Ti"
 
-// Pod Security Admission labels on the namespace box creates. enforce is the
-// one that admits or refuses a pod; audit and warn say the same level because
-// that is what makes the namespace's intent legible to whoever looks at it --
-// and because they are what root's `adduser` writes for a user's namespace.
-// Anything weaker than restricted lets a pod through that the chart's own
-// security context assumes it will not get.
+// Pod Security labels on the namespace box creates: enforce admits or refuses a
+// pod, and audit and warn say the same level for legibility and to match
+// `adduser`. Anything weaker lets in a pod the chart's security context assumes
+// it will not get.
 const (
 	podSecurityEnforce    = "pod-security.kubernetes.io/enforce"
 	podSecurityAudit      = "pod-security.kubernetes.io/audit"
@@ -40,22 +35,16 @@ const (
 type NamespacePlan struct {
 	Name   string
 	Exists bool
-	// CanCreate is whether this identity may create a namespace. It is asked
-	// only when the namespace is missing, and it is the whole gate: a
-	// namespace is cluster-scoped, so root's kubeconfig can and a user's
-	// namespace-scoped one cannot.
+	// CanCreate is asked only when the namespace is missing: cluster-scoped, so
+	// root's kubeconfig can and a user's cannot.
 	CanCreate bool
-	// Enforce is an existing namespace's Pod Security enforce value, or "" for
-	// no label. Only enforce decides admission; audit and warn change what the
-	// API server records, not what it lets in, so "weaker than restricted" is
-	// about this value alone.
+	// Enforce is the existing namespace's Pod Security level, or "" for no
+	// label: only enforce decides admission.
 	Enforce string
 }
 
-// PlanNamespace is one namespace, read. A missing one also costs a
-// SelfSubjectAccessReview -- a read the API server answers -- because the next
-// thing apply would do is create it, and that has to be refused before the PV
-// is written rather than after.
+// PlanNamespace reads one namespace; a missing one also asks the access
+// question, so a refusal comes before the PV is written.
 func (s *KubeStorage) PlanNamespace(ctx context.Context) (NamespacePlan, error) {
 	plan := NamespacePlan{Name: s.namespace}
 	live, err := s.cs.CoreV1().Namespaces().Get(ctx, s.namespace, metav1.GetOptions{})
@@ -75,14 +64,9 @@ func (s *KubeStorage) PlanNamespace(ctx context.Context) (NamespacePlan, error) 
 	return plan, nil
 }
 
-// canCreateNamespaces asks the API server, as this identity, the one question
-// that decides whether apply may go on. A denial is an answer, not an error:
-// the operator gets the refusal that names root's command.
-//
-// It is an apply, not a create: CreateNamespace server-side-applies, which the
-// API server authorizes as create on a namespace that is not there and as patch
-// on one that is, and box must not be told yes by an identity that can only do
-// the first.
+// canCreateNamespaces asks the API server as this identity; a denial is an
+// answer, not an error. It asks apply, not create: CreateNamespace
+// server-side-applies, which is create when missing and patch when present.
 func (s *KubeStorage) canCreateNamespaces(ctx context.Context) (bool, error) {
 	allowed, err := kube.Allowed(ctx, kube.SSAR(s.cs), kube.Access{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"})
 	if err != nil {
@@ -91,11 +75,9 @@ func (s *KubeStorage) canCreateNamespaces(ctx context.Context) (bool, error) {
 	return allowed, nil
 }
 
-// CreateNamespace creates the seedbox's namespace with the Pod Security
-// restricted labels, plus box's managed-by label. It is a server-side apply
-// under the same field manager as the volumes, so `kubectl apply
-// --field-manager=box` and box agree about who owns what. An existing
-// namespace is never applied: root's or an admin's labels win.
+// CreateNamespace server-side-applies the namespace with restricted labels and
+// box's managed-by, under the same field manager as the volumes. An existing
+// namespace is never applied.
 func (s *KubeStorage) CreateNamespace(ctx context.Context) error {
 	ns := coreapply.Namespace(s.namespace).WithLabels(map[string]string{
 		kube.ManagedByLabel: kube.FieldManager,
@@ -109,9 +91,7 @@ func (s *KubeStorage) CreateNamespace(ctx context.Context) error {
 	return nil
 }
 
-// StorageObject is one PV or claim box has to write, as Plan found it. The
-// fields are what box prints; the apply is what box runs after the operator
-// says yes.
+// StorageObject is one PV or claim to write; the fields are what box prints.
 type StorageObject struct {
 	Kind   string // KindPersistentVolume or KindPersistentVolumeClaim
 	Name   string
@@ -119,29 +99,22 @@ type StorageObject struct {
 	apply  func(ctx context.Context) error
 }
 
-// The two kinds Plan returns. They are constants because undo reads them: only
-// a volume this run created is ever deleted again.
+// The two kinds Plan returns; undo deletes only a volume this run created.
 const (
 	KindPersistentVolume      = "PersistentVolume"
 	KindPersistentVolumeClaim = "PersistentVolumeClaim"
 )
 
-// StorageClient is box's handle on the namespace a seedbox lives in and the
-// storage it needs. The namespace comes first because the claims live in it:
-// on a fresh cluster it is the one object that is missing, and a claim written
-// into a namespace that does not exist fails after its cluster-scoped PV has
-// already been created. Plan and PlanNamespace only read: every refusal -- a
-// PV that backs another path, a claim bound to another volume, a namespace
-// that is missing and cannot be created -- happens there, before anything is
-// written. Apply and CreateNamespace write one planned object each, with
-// server-side apply.
+// StorageClient is box's handle on the namespace and storage. Plan and
+// PlanNamespace only read, so every conflict is refused before a write; a claim
+// written into a missing namespace would fail after its cluster-scoped PV
+// exists. Apply and CreateNamespace write one planned object each.
 type StorageClient interface {
 	Plan(ctx context.Context, namespace string, vols []seedbox.Volume) ([]StorageObject, error)
 	PlanNamespace(ctx context.Context) (NamespacePlan, error)
 	CreateNamespace(ctx context.Context) error
 	Apply(ctx context.Context, obj StorageObject) error
-	// Delete removes an object this run wrote, when the run cannot finish. It
-	// is only ever given a volume apply created itself.
+	// Delete removes a volume this run created when it cannot finish.
 	Delete(ctx context.Context, obj StorageObject) error
 }
 
@@ -152,8 +125,7 @@ type KubeStorage struct {
 	cs        kubernetes.Interface
 }
 
-// NewStorage builds the storage client for one namespace. Like NewHelm it is
-// lazy: no cluster call happens until Plan.
+// NewStorage builds the storage client; no cluster call happens until Plan.
 func NewStorage(kubeconfig, namespace string) (*KubeStorage, error) {
 	if namespace == "" {
 		return nil, fmt.Errorf("no namespace: the grant names the release namespace")
@@ -175,9 +147,8 @@ func NewStorageFor(namespace string, cs kubernetes.Interface) *KubeStorage {
 	return &KubeStorage{namespace: namespace, cs: cs}
 }
 
-// Plan compares the volumes with the cluster. It returns only what has to be
-// created, in data-then-config order, and never writes: a conflict on the
-// second volume must not leave the first one applied.
+// Plan returns only what must be created, in data-then-config order, and never
+// writes: a conflict on the second must not leave the first applied.
 func (s *KubeStorage) Plan(ctx context.Context, namespace string, vols []seedbox.Volume) ([]StorageObject, error) {
 	var out []StorageObject
 	for _, v := range vols {
@@ -190,9 +161,8 @@ func (s *KubeStorage) Plan(ctx context.Context, namespace string, vols []seedbox
 	return out, nil
 }
 
-// planVolume is one volume's PV and claim. An existing PV is never mutated: box
-// either finds the one it would have made -- same path, same single claim -- or
-// refuses and says what it found.
+// planVolume is one volume's PV and claim. An existing PV is never mutated: it
+// must match the path and single claim, or box refuses.
 func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbox.Volume) ([]StorageObject, error) {
 	var out []StorageObject
 
@@ -241,11 +211,9 @@ func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbo
 	return out, nil
 }
 
-// checkPersistentVolume refuses a PV of box's name that backs something else.
-// The comparison is the path and the single claim, which is the whole contract
-// of a static volume: a bound PV's path is never changed in place. Both paths
-// are in the error, because "which one is it actually using" is the only
-// question the operator has.
+// checkPersistentVolume refuses a PV of box's name that backs another path or
+// claim; a static volume's path is never changed in place. The error names both
+// paths.
 func (s *KubeStorage) checkPersistentVolume(live *corev1.PersistentVolume, v seedbox.Volume) error {
 	if live.Spec.HostPath == nil {
 		return fmt.Errorf("PersistentVolume %s already exists and is not a hostPath volume: box will not take it over; delete or rename it first", live.Name)
@@ -277,11 +245,9 @@ func (s *KubeStorage) Apply(ctx context.Context, obj StorageObject) error {
 	return nil
 }
 
-// Delete removes one object this run created, when a later write failed and the
-// run will not finish. Only volumes: a claim is namespaced and harmless, and
-// the next apply finds it and binds the volume it names again, while a PV is
-// cluster-scoped and would be left backing a path on a box that never came up.
-// Anything else is refused rather than guessed at.
+// Delete removes a volume this run created. Only volumes: a claim is harmless
+// and rebound by the next apply, while a PV would be left backing a box that
+// never came up.
 func (s *KubeStorage) Delete(ctx context.Context, obj StorageObject) error {
 	if obj.Kind != KindPersistentVolume {
 		return fmt.Errorf("refusing to delete %s %s: box only removes a volume it created in this run", obj.Kind, obj.Name)
@@ -292,11 +258,9 @@ func (s *KubeStorage) Delete(ctx context.Context, obj StorageObject) error {
 	return nil
 }
 
-// checkHostPaths refuses a grant whose host directories are not there. box does
-// not create them -- `box init` does, and it reports what it found -- so a
-// missing path here means the release would come up with an empty volume under
-// a path the operator meant to fill. The check is skipped only for a path that
-// lives inside a test node (`--paths-in-node`), where this host cannot see it.
+// checkHostPaths refuses missing host directories: box does not create them
+// (`box init` does), and an empty volume under a path meant to be filled is
+// worse. Skipped under --paths-in-node.
 func checkHostPaths(vols []seedbox.Volume) error {
 	for _, v := range vols {
 		info, err := os.Stat(v.Path)
@@ -310,10 +274,8 @@ func checkHostPaths(vols []seedbox.Volume) error {
 	return nil
 }
 
-// persistentVolume is the static PV box creates for one volume: one host
-// directory, one claim, reclaim Retain, no storage class. It is a server-side
-// apply configuration, so the fields box claims are exactly the ones it would
-// write back; nothing else on the object is touched.
+// persistentVolume is one host directory, one claim, Retain, no storage class.
+// The apply configuration claims exactly the fields box writes.
 func (s *KubeStorage) persistentVolume(namespace string, v seedbox.Volume) *coreapply.PersistentVolumeApplyConfiguration {
 	return coreapply.PersistentVolume(v.Claim).
 		WithLabels(map[string]string{kube.ManagedByLabel: kube.FieldManager}).
@@ -327,8 +289,7 @@ func (s *KubeStorage) persistentVolume(namespace string, v seedbox.Volume) *core
 			WithHostPath(coreapply.HostPathVolumeSource().WithPath(v.Path).WithType(corev1.HostPathDirectory)))
 }
 
-// persistentVolumeClaim pins the claim to its PV by name, so nothing but this
-// exact volume can satisfy it.
+// persistentVolumeClaim pins the claim to its PV by name.
 func (s *KubeStorage) persistentVolumeClaim(namespace string, v seedbox.Volume) *coreapply.PersistentVolumeClaimApplyConfiguration {
 	return coreapply.PersistentVolumeClaim(v.Claim, namespace).
 		WithLabels(map[string]string{kube.ManagedByLabel: kube.FieldManager}).

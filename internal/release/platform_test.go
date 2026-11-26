@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// shippedFile is charts/s5n/platform.yaml, the file a chart release carries.
-// The other packages read it through releasetest; this one cannot (that helper
-// returns this package's own type), so it reads the path it owns.
+// shippedFile is charts/s5n/platform.yaml, read directly: releasetest returns
+// this package's own type.
 func shippedFile(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", "charts", "s5n", "platform.yaml"))
@@ -20,7 +19,7 @@ func shippedFile(t *testing.T) []byte {
 	return b
 }
 
-// shippedPins is that file, parsed the way box parses it.
+// shippedPins is that file parsed as box parses it.
 func shippedPins(t *testing.T) Versions {
 	t.Helper()
 	pins, err := ParseVersions(shippedFile(t))
@@ -30,10 +29,7 @@ func shippedPins(t *testing.T) Versions {
 	return pins
 }
 
-// platformDoc is a whole platform.yaml for the parser tests: the five pins and
-// the two k0s checksums, spelled the way the chart ships them. A test that needs
-// a damaged file changes one line of this, so the damage is the only thing
-// wrong with it.
+// platformDoc is a whole platform.yaml; a damaged test changes one line.
 func platformDoc() string {
 	return "authelia: \"1.0.0@sha256:" + strings.Repeat("a", 64) + "\"\n" +
 		"k0s: v1.0.0\n" +
@@ -52,21 +48,16 @@ func docWith(old, line string) string {
 	return strings.Replace(platformDoc(), old, line, 1)
 }
 
-// The pins ship inside the chart now, so the fixture loader is the first thing
-// to prove: a chart that carries platform.yaml has them parsed, and box never
-// reads a version out of its own binary.
 func TestChartCarriesThePlatformPins(t *testing.T) {
 	chart := testChart(t)
-	// testdata/chart is a fixture, not the real chart: its pins are its own, so
-	// a value leaking in from a global (or from the real chart) shows up here.
+	// The fixture's own pins expose a value leaking from a global or the chart.
 	if chart.Pins.K0s != "v1.99.0+k0s.1" || chart.Pins.EnvoyGateway != "9.9.9" || chart.Pins.MetalLB != "9.9.9" {
 		t.Fatalf("chart pins = %+v, want the fixture chart's", chart.Pins)
 	}
 	if !strings.HasPrefix(chart.Pins.Authelia, "docker.io/example/authelia:1.0.0@sha256:") {
 		t.Fatalf("authelia pin = %q", chart.Pins.Authelia)
 	}
-	// The k0s checksums are the fixture chart's too, one per architecture: a
-	// sum read from anywhere but the release in hand shows up here.
+	// One fixture checksum per architecture exposes a sum from elsewhere.
 	if chart.Pins.K0sSHA256["amd64"] != strings.Repeat("1", 64) || chart.Pins.K0sSHA256["arm64"] != strings.Repeat("2", 64) {
 		t.Fatalf("k0s checksums = %v, want the fixture chart's", chart.Pins.K0sSHA256)
 	}
@@ -76,9 +67,7 @@ func TestChartCarriesThePlatformPins(t *testing.T) {
 	}
 }
 
-// copyChart writes a copy of testdata/chart into a temp directory, with the
-// named file replaced or (when body is nil) left out. Tests that refuse a
-// release need a release that is wrong in exactly one way.
+// copyChart copies the fixture with one file replaced or left out.
 func copyChart(t *testing.T, omit string, replace map[string][]byte) string {
 	t.Helper()
 	dst := t.TempDir()
@@ -108,10 +97,6 @@ func copyChart(t *testing.T, omit string, replace map[string][]byte) string {
 	return dst
 }
 
-// A release that ships no platform.yaml is one box cannot install: there is no
-// compiled-in fallback, and inventing one here would put the platform back in
-// the binary. The refusal names the release, so the operator can see which one
-// they pulled.
 func TestChartWithoutPlatformPinsIsRefused(t *testing.T) {
 	dir := copyChart(t, PlatformFile, nil)
 	_, err := loadChartDir(DevVersion, dir)
@@ -125,8 +110,6 @@ func TestChartWithoutPlatformPinsIsRefused(t *testing.T) {
 	}
 }
 
-// An empty pin is the same refusal one step later: box would otherwise plan an
-// install at version "", which is a chart nobody publishes.
 func TestChartWithAnEmptyPinIsRefused(t *testing.T) {
 	body := []byte(docWith("metallb: 1.0.0\n", "metallb: \"\"\n"))
 	dir := copyChart(t, "", map[string][]byte{PlatformFile: body})
@@ -141,10 +124,6 @@ func TestChartWithAnEmptyPinIsRefused(t *testing.T) {
 	}
 }
 
-// A missing or unknown key is an error, not a zero value: box would otherwise
-// plan an install at version "". The k0s checksums are keys like any other, and
-// a sum that is not a sha256 is refused for what it is -- 64 lowercase hex, as
-// the release's own sha256sums.txt writes it.
 func TestParseVersionsRefusesADamagedFile(t *testing.T) {
 	full := platformDoc()
 	files := map[string]struct {
@@ -211,9 +190,6 @@ func TestParseVersionsRefusesADamagedFile(t *testing.T) {
 	}
 }
 
-// A value typed as a YAML number instead of a string is refused rather than
-// silently rounded: a bare 1.10 is 1.1 to a YAML parser, and a chart version
-// is not a number.
 func TestParseVersionsKeepsTheVersionAsWritten(t *testing.T) {
 	v, err := ParseVersions([]byte(docWith("k0s: v1.0.0\n", "k0s: v1.37.2+k0s.1\n")))
 	if err != nil {
@@ -225,8 +201,7 @@ func TestParseVersionsKeepsTheVersionAsWritten(t *testing.T) {
 	if !strings.HasPrefix(v.Authelia, "1.0.0@sha256:") {
 		t.Fatalf("parsed authelia %q: an image reference is kept as written, repository and all", v.Authelia)
 	}
-	// A sum is kept as written too: it is compared byte for byte with what the
-	// release publishes, so nothing here trims or lowercases it.
+	// A sum is kept as written: it is compared byte for byte.
 	if v.K0sSHA256["amd64"] != strings.Repeat("1", 64) {
 		t.Fatalf("parsed k0s checksum %q", v.K0sSHA256["amd64"])
 	}
@@ -235,11 +210,6 @@ func TestParseVersionsKeepsTheVersionAsWritten(t *testing.T) {
 	}
 }
 
-// The shipped file is the only home for the pins, so it must carry all five as
-// bare versions -- this is the test that fails when someone adds a component to
-// the parser and forgets the chart, or the other way round. The two k0s
-// checksums are here for the same reason: box installs nothing it cannot
-// verify, and the shipped file is where that sum comes from.
 func TestShippedPinsAreWhole(t *testing.T) {
 	pins := shippedPins(t)
 	for key, got := range map[string]string{
@@ -260,12 +230,6 @@ func TestShippedPinsAreWhole(t *testing.T) {
 	}
 }
 
-// The k0s checksums live under the k0s line and nowhere else, quoted, with no
-// `# renovate:` marker: they are not versions, so Renovate must never open a
-// pull request against one. They move in the same pull request as the version
-// above them -- `go run ./hack/k0s-sums --write` writes all three lines -- and
-// adjacency is what keeps a reader (and this test) from finding a sum that
-// describes some other release.
 func TestK0sChecksumsSitUnderTheirVersionWithoutARenovateMarker(t *testing.T) {
 	file := string(shippedFile(t))
 	block := regexp.MustCompile("(?m)^k0s: \\S+[^\n]*\n" +
@@ -279,12 +243,6 @@ func TestK0sChecksumsSitUnderTheirVersionWithoutARenovateMarker(t *testing.T) {
 	}
 }
 
-// TestAutheliaPinIsAnImageReference pins the one entry here that is not a
-// chart version: box writes the login's Deployment itself, so the pin has to
-// be the whole image reference -- repository, tag and digest. A tag alone would
-// let the login change under a box that never changed; a tag and digest with no
-// repository is not an image at all (containerd reads it as
-// docker.io/library/<tag>), which is a pod that never starts.
 func TestAutheliaPinIsAnImageReference(t *testing.T) {
 	pin := shippedPins(t).Authelia
 	ref, digest, ok := strings.Cut(pin, "@sha256:")
@@ -299,15 +257,13 @@ func TestAutheliaPinIsAnImageReference(t *testing.T) {
 			t.Fatalf("authelia digest %q is not lowercase hex", digest)
 		}
 	}
-	// The reference is repository, tag: the slash and the last colon are what
-	// make it resolvable, and a value without them is the version on its own.
+	// A resolvable reference needs the repository slash and tag colon.
 	colon := strings.LastIndex(ref, ":")
 	if colon < 0 || !strings.Contains(ref[:colon], "/") {
 		t.Fatalf("authelia pin %q names no repository: it has to be <registry>/<repository>:<tag>@sha256:..., not a bare tag", pin)
 	}
 	repo, tag := ref[:colon], ref[colon+1:]
-	// The repository is the one Renovate's depName names, and it does not
-	// change when the version does.
+	// The repository is Renovate's depName and is version-independent.
 	if repo != "docker.io/"+renovateRepo {
 		t.Errorf("authelia repository is %q, want docker.io/%s", repo, renovateRepo)
 	}
@@ -317,19 +273,15 @@ func TestAutheliaPinIsAnImageReference(t *testing.T) {
 	if strings.HasPrefix(pin, tag+"@") {
 		t.Fatalf("authelia pin %q starts with the version: the repository is missing", pin)
 	}
-	// The line is what Renovate reads: a docker datasource comment naming the
-	// same repository, on the same line as the whole reference, so a bump is
-	// one pull request against one package and updates the digest with the tag.
+	// Renovate reads the docker comment and reference from one line.
 	if !regexp.MustCompile(`(?m)^authelia: "` + regexp.QuoteMeta(pin) + `"\s+# renovate: datasource=docker depName=` + regexp.QuoteMeta(renovateRepo) + `$`).Match(shippedFile(t)) {
 		t.Errorf("the authelia line in charts/s5n/%s is not a quoted pin with a docker datasource comment:\n%s", PlatformFile, shippedFile(t))
 	}
 }
 
-// renovateRepo is the upstream image Renovate watches for the login.
+// renovateRepo is the login image Renovate watches.
 const renovateRepo = "authelia/authelia"
 
-// Every other pin carries a Renovate comment naming its datasource too: the
-// chart move must not have cost the other lane's regex a line.
 func TestEveryPinCarriesItsRenovateSource(t *testing.T) {
 	file := string(shippedFile(t))
 	for key, want := range map[string]string{

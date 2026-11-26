@@ -7,9 +7,7 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// peerChart is testdata/chart-peer: the fixture chart plus the one values
-// branch the real chart has and it does not, qBittorrent's peers Service, with
-// no port in it.
+// peerChart adds qBittorrent's peers Service branch, with no port.
 func peerChart(t *testing.T) Chart {
 	t.Helper()
 	c, err := loadChartDir(DevVersion, "testdata/chart-peer")
@@ -19,24 +17,20 @@ func peerChart(t *testing.T) Chart {
 	return c
 }
 
-// peerFakes is newFakes with that chart, and with the release Helm has being
-// the same chart: the difference between the two sides is the port alone.
+// peerFakes uses that chart on both sides; only the port differs.
 func peerFakes(t *testing.T) (*fakes, Chart) {
 	t.Helper()
 	f := newFakes(t)
 	chart := peerChart(t)
 	f.chart = &chart
 	f.rel.chartVersion = chart.Version
-	// The release lives in its namespace, so apply asks Helm about it only
-	// when the namespace is there: an existing box is the case these tests are.
+	// Helm is asked only when the namespace exists; these tests have one.
 	f.store.nsExists = true
 	f.store.nsEnforce = "restricted"
 	return f, chart
 }
 
-// deployedFor is the values an already-installed box's release holds: what the
-// same files render, which is what an apply would install. A test edits it to
-// stand for a box installed while the chart still defaulted the peer port.
+// deployedFor is what the release holds; a test edits it for an old box.
 func deployedFor(t *testing.T, f *fakes, chart Chart) map[string]any {
 	t.Helper()
 	sb, err := seedbox.Load(f.grantPath, f.values)
@@ -50,7 +44,7 @@ func deployedFor(t *testing.T, f *fakes, chart Chart) map[string]any {
 	return effective
 }
 
-// portIn is the peer port one values document carries.
+// portIn is the peer port in a values document.
 func portIn(t *testing.T, values map[string]any) int {
 	t.Helper()
 	qbt, _ := values["apps"].(map[string]any)["qbittorrent"].(map[string]any)
@@ -67,15 +61,10 @@ func portIn(t *testing.T, values map[string]any) int {
 	return 0
 }
 
-// An old box has no peer port in its files and its release renders the one the
-// chart used to default to. box keeps that number: the chart ships no default
-// any more, so the value the release already holds is what this apply installs,
-// and nothing about the peers Service moves.
 func TestABoxWithNoRecordedPortKeepsThePortItsReleaseHas(t *testing.T) {
 	f, chart := peerFakes(t)
 	deployed := deployedFor(t, f, chart)
-	// The box was installed while the chart defaulted the port, so this is what
-	// Helm stored and what its peers Service is on.
+	// Installed while the chart defaulted it: what Helm stored and peers use.
 	qbt := deployed["apps"].(map[string]any)["qbittorrent"].(map[string]any)
 	qbt["torrent"].(map[string]any)["port"] = legacyPeerPort
 	f.rel.values = deployed
@@ -91,8 +80,7 @@ func TestABoxWithNoRecordedPortKeepsThePortItsReleaseHas(t *testing.T) {
 	if got := portIn(t, f.rel.upgraded[0]); got != legacyPeerPort {
 		t.Fatalf("the peer port this apply installed = %d, want the release's %d", got, legacyPeerPort)
 	}
-	// Nothing about it is a change: the box is on that port already, and the
-	// diff is what says so.
+	// The box is on that port already, so the diff is empty.
 	for _, ch := range res.Changes {
 		if ch.Path == peerPortKey {
 			t.Fatalf("the port this box already had is shown as a change: %+v", ch)
@@ -103,8 +91,6 @@ func TestABoxWithNoRecordedPortKeepsThePortItsReleaseHas(t *testing.T) {
 	}
 }
 
-// A box whose grant records a port keeps it: the adoption is for a box that has
-// none, and a working port is never moved to the number the chart used to ship.
 func TestARecordedPortIsNotMovedByTheAdoption(t *testing.T) {
 	f, chart := peerFakes(t)
 	rewrite(t, f.grantPath, map[string]string{
@@ -127,9 +113,6 @@ func TestARecordedPortIsNotMovedByTheAdoption(t *testing.T) {
 	}
 }
 
-// A first install with no recorded port has nothing to keep, and the chart ships
-// no default: apply refuses and names init, which picks one, rather than put a
-// new box on the old default.
 func TestAFirstInstallWithNoRecordedPortIsRefused(t *testing.T) {
 	f, _ := peerFakes(t)
 	f.rel.exists = false
@@ -143,8 +126,6 @@ func TestAFirstInstallWithNoRecordedPortIsRefused(t *testing.T) {
 	}
 }
 
-// A release from before the peer port, or one without qBittorrent, is never
-// given the key: its own schema would refuse the install.
 func TestAChartWithoutThePeerPortIsNotGivenOne(t *testing.T) {
 	f := newFakes(t)
 	f.rel.exists = false

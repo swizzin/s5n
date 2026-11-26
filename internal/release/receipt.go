@@ -7,9 +7,7 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// wiringName is what box calls the wiring Job: the row its receipt folds to, the
-// row a wait that ran out of time leaves, the line the live wait shows, and the
-// container the chart gives the Job's pod.
+// wiringName is what box calls the wiring Job in rows, waits and its container.
 const wiringName = "wiring"
 
 // The receipt's two not-ok results, as the Job writes them in status.json.
@@ -18,18 +16,10 @@ const (
 	stateFailed  = "failed"
 )
 
-// ReportReceipt folds a wiring receipt into the lines a person reads. A receipt
-// whose every check passed is one row: what the Job checked, and how long it
-// took. A check that failed, and one that waits on a person, are one row each,
-// with the reason under it; everything else stays in the run log.
-//
-// The whole receipt -- every check, its result and its detail -- goes to the
-// run log either way, because the row that folded thirty-four checks into a
-// count is also the row that threw the evidence away.
-//
-// rehearsal is a box built from a rehearsal snapshot. It has no internet, so a
-// check that waits on a claim or a sign-in is not one to clear here: the rows
-// say that the real run clears them.
+// ReportReceipt folds a receipt into rows: all passing is one row with a count;
+// a failed or pending check gets its own row and reason. The whole receipt still
+// goes to the run log, because the folded row throws the evidence away. A
+// rehearsal box's pending checks clear on the real run.
 func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 	if rec.Status == "" && len(rec.Steps) == 0 {
 		return
@@ -37,9 +27,7 @@ func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 	logReceipt(r, rec)
 	rows, pending, hasFailed := receiptRows(rec)
 	if rec.Status == "ok" && !hasFailed {
-		// What went to plan is a count. What waits on a person is still a row:
-		// a healthy Job with an unclaimed Plex has done its work and needs the
-		// person for the next part.
+		// A pending check still needs the person even when the Job is healthy.
 		r.Rows([]say.Row{{Mark: say.MarkDone, Name: wiringName, Facts: receiptFacts(rec)}})
 		r.Rows(rows)
 		if rehearsal && pending > 0 {
@@ -56,9 +44,7 @@ func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 	}
 }
 
-// receiptRows are the checks that are not ok: one row each, in the Job's own
-// order, because that is the order the run reached them in. pending counts the
-// ones that wait on a person.
+// receiptRows is the non-ok checks in the Job's order; pending wait on a person.
 func receiptRows(rec Receipt) (rows []say.Row, pending int, hasFailed bool) {
 	for _, step := range rec.Steps {
 		switch step.Result {
@@ -73,16 +59,13 @@ func receiptRows(rec Receipt) (rows []say.Row, pending int, hasFailed bool) {
 	return rows, pending, hasFailed
 }
 
-// rehearsalRow is the line a rehearsal box's pending rows end with: they are
-// the real run's to clear, and this box is going away.
+// rehearsalRow says pending rows clear on the real run.
 func rehearsalRow() say.Row {
 	return say.Row{Mark: say.MarkNote, Facts: []string{"rehearsal", "pending rows clear on the real run"}}
 }
 
-// receiptFacts are the one row a healthy receipt gets: how many checks it ran,
-// and the Job's own duration. A Job that finished inside a second says one
-// second, so the column is never empty where every other receipt has a number;
-// a receipt with no duration at all (an older Job) says the count alone.
+// receiptFacts is the check count and duration; a sub-second Job says one
+// second, an older Job without a duration says the count alone.
 func receiptFacts(rec Receipt) []string {
 	facts := []string{fmt.Sprintf("%d %s", len(rec.Steps), plural(len(rec.Steps), "check", "checks"))}
 	if rec.Duration > 0 {
@@ -95,8 +78,7 @@ func receiptFacts(rec Receipt) []string {
 	return facts
 }
 
-// logReceipt is the receipt's detail, one line per check, in the run log's own
-// shape: the same words a row would have said, with nothing folded away.
+// logReceipt writes every check into the run log, nothing folded.
 func logReceipt(r say.Reporter, rec Receipt) {
 	for _, step := range rec.Steps {
 		detail := step.Detail

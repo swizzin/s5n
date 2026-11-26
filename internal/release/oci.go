@@ -26,46 +26,32 @@ import (
 )
 
 // DefaultChartRepo is where s5n publishes its chart (docs/box.md, "Where a
-// release lives"). box pulls a chart by version from here; it never reads
-// charts/ from its own tree.
+// release lives"); box never reads charts/ from its own tree.
 const DefaultChartRepo = "oci://ghcr.io/swizzin/charts/s5n"
 
-// MaxChartArchive bounds the packaged chart box will accept from a registry.
-// The real chart is well under a megabyte; the cap is here because the artifact
-// is untrusted input to a process that may run as root. Helm's own loader caps
-// what an archive may decompress to (100 MiB); this caps what box downloads at
-// all.
+// MaxChartArchive bounds a downloaded chart: the artifact is untrusted input to
+// a root process. Helm's loader caps decompression (100 MiB); this caps what box
+// downloads at all.
 const MaxChartArchive = 8 << 20
 
-// OCIChart pulls a published chart release with Helm's registry client, which
-// is the only registry code box has: the same code that pushes a chart reads
-// it, so the tag-to-version mapping (an OCI tag, plus Helm's `_` for `+` rule)
-// is not reimplemented here.
+// OCIChart pulls a chart with Helm's registry client, the same code that pushes
+// it, so the tag-to-version mapping (`_` for `+`) is not reimplemented.
 //
-// The pulled artifact is untrusted: the archive is capped before it is
-// unpacked, the files box reads are capped individually, and the schema is
-// compiled with external $refs refused (internal/seedbox.Validate). Nothing
-// here executes anything the chart ships.
+// The artifact is untrusted: the archive is capped before unpacking, files are
+// capped individually, and schema $refs are refused (internal/seedbox.Validate).
 type OCIChart struct {
-	// BoxVersion is this box's version. "dev" (a build without -X
-	// main.version) skips the min-box check and says so once.
+	// BoxVersion is this box's version; "dev" skips the min-box check once.
 	BoxVersion string
 	// Say receives the one line about a release box skipped. Nil is silent.
 	Say say.Reporter
-	// Retry is the policy a failed registry request is retried under: the
-	// same rule bootstrap's downloads use (internal/fetch), so an upstream
-	// 5xx during apply's chart pull is retried instead of aborting the
-	// operator's apply. The zero value is box's policy: GET/HEAD only, 5xx
-	// and 429 and a refused, reset or timed-out connection, four attempts.
+	// Retry is bootstrap's download policy (internal/fetch): GET/HEAD, 5xx,
+	// 429, a refused, reset or timed-out connection, four attempts.
 	Retry fetch.Policy
 
 	devOnce sync.Once
 
-	// mu guards pulled. `box update` asks for every published release's
-	// annotations to plan its steps and then loads the two it installs; one
-	// pull per version is the whole point, so the cache outlives a single
-	// Load. It never holds a failed pull: a registry that refused once is
-	// asked again by the next call rather than remembered as absent.
+	// mu guards pulled. One pull per version: update asks for every release's
+	// annotations, then loads the ones it installs. A failed pull is not cached.
 	mu     sync.Mutex
 	pulled map[string]Chart
 }
@@ -77,14 +63,10 @@ func (o *OCIChart) logf(format string, args ...any) {
 	o.Say.Line(fmt.Sprintf(format, args...))
 }
 
-// Load pulls one chart release, or the newest this box can install when
-// ref.Version is empty. The min-box refusal happens here, before Applier has a
-// cluster client, so a chart box is too old for cannot have written anything.
-//
-// The context is the pull's: Helm's registry client builds its requests with
-// context.Background() and takes none, so the transport installs it on every
-// attempt (see transport). A cancelled apply therefore stops a pull in flight,
-// and stops the wait between a retried attempt.
+// Load pulls one release, or the newest this box can install. The min-box
+// refusal is here, before Applier has a cluster client. The context reaches
+// Helm's background-context requests through the transport, so a cancelled
+// apply stops a pull in flight and the wait between attempts.
 func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 	p, err := o.open(ctx, ref)
 	if err != nil {
@@ -128,27 +110,12 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 	return o.chart(p, chosen)
 }
 
-// Releases lists every release the repository publishes at or above floor, with
-// the annotations an update plans with, oldest first.
-//
-// floor is the release the box is on, and an update only ever steps forward, so
-// a version below it is never pulled. A repository keeps every chart ever
-// published, and not every old one is a chart today's box can read: a release
-// from before platform.yaml shipped has no platform pins at all, and one from
-// before the schema shipped has no values schema. A listing that read all of
-// them would fail on history before an update had chosen a target, and it costs
-// one pull per version ever published. The installed release itself is listed --
-// Load has already pulled and cached it -- and an empty floor lists everything.
-//
-// A release at or above the floor that cannot be read is still an error: that is
-// a broken release, not history. An empty listing is not an error either: a box
-// on the newest release, or on one ahead of everything published, has nothing to
-// do, and the caller reads that as current.
-//
-// Each pulled chart is cached on this OCIChart, so the release an update settles
-// on is not downloaded again when Load fetches it to install. Tags that are not
-// versions, and prereleases, are left out for the same reason SelectVersion
-// leaves them out: they are not releases box installs unasked.
+// Releases lists published releases at or above floor, oldest first. Old charts
+// may not be readable by today's box (no platform pins, no schema), so starting
+// at the installed release avoids failing on history. A release at or above the
+// floor that cannot be read is still an error; an empty listing is current.
+// Pulled charts are cached, so the settled release is not downloaded twice.
+// Non-version tags and prereleases are left out: box never installs one unasked.
 func (o *OCIChart) Releases(ctx context.Context, ref ChartRef, floor string) ([]Published, error) {
 	p, err := o.open(ctx, ref)
 	if err != nil {
@@ -160,8 +127,7 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef, floor string) ([]
 	if err != nil {
 		return nil, o.pullError(p.repo, "", err)
 	}
-	// An unreadable floor lists everything rather than nothing: a box that
-	// cannot say where it is must never be told it is current.
+	// An unreadable floor lists everything: never call such a box current.
 	var from *semver.Version
 	if f := strings.TrimSpace(floor); f != "" {
 		if v, err := semver.NewVersion(f); err == nil {
@@ -200,9 +166,7 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef, floor string) ([]
 	return out, nil
 }
 
-// puller is one registry session: the repository in both spellings box needs,
-// the client, and the private Helm home the client's credentials file points
-// into. Close removes the home.
+// puller is one registry session and its private Helm home; Close removes it.
 type puller struct {
 	repo, base string
 	client     *helmregistry.Client
@@ -215,9 +179,8 @@ func (p *puller) Close() {
 	}
 }
 
-// open validates the repository and builds the client Load and Releases share.
-// The Helm home is private to the call and removed by puller.Close, so nothing
-// of the operator's Helm configuration can redirect or poison a pull.
+// open builds the client Load and Releases share. The private Helm home means
+// the operator's Helm configuration cannot redirect or poison a pull.
 func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -247,9 +210,7 @@ func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 	return &puller{repo: repo, base: base, client: client, env: env}, nil
 }
 
-// chart is one version's chart, pulled at most once per OCIChart. The pull's
-// context rides on the session's transport (see puller), not an argument. A
-// failed pull is not remembered: the next call asks the registry again.
+// chart pulls a version at most once; a failure is not remembered.
 func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	o.mu.Lock()
 	chart, ok := o.pulled[version]
@@ -270,15 +231,9 @@ func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	return chart, nil
 }
 
-// client builds the registry client. Helm writes "Pulled: ... Digest: ..." to
-// its own writer, which would be box's voice saying someone else's lines, so it
-// is discarded; the HTTP client caps what one response may be and refuses to
-// wait on a registry forever.
-//
-// env is the private Helm home the client's credentials file points into, and
-// the authorizer carries no credential, so no credentials store -- Helm's
-// registry/config.json or docker's config.json -- is ever queried: every pull
-// is anonymous.
+// client builds the registry client, discarding Helm's own output. The
+// authorizer carries no credential, so neither Helm's nor docker's config.json
+// is queried: every pull is anonymous.
 func (o *OCIChart) client(ctx context.Context, env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
 	httpClient := &http.Client{
 		Transport: o.transport(ctx, nil),
@@ -296,16 +251,10 @@ func (o *OCIChart) client(ctx context.Context, env *helmEnv, plainHTTP bool) (*h
 	return helmregistry.NewClient(opts...)
 }
 
-// transport is what every request of one pull goes through, outermost first:
-//
-//	capped  refuses a response over MaxChartArchive
-//	pull    gives the attempt the pull's context
-//	retry   fetch.Transport's policy, the one bootstrap's downloads use
-//	net     base, or http.DefaultTransport
-//
-// The cap is outside the retry on purpose: the body that survives the retries
-// is the one capped, and a 5xx body is never read. base is the network; nil
-// means http.DefaultTransport, and a test replaces it.
+// transport layers, outermost first: capped (refuses over MaxChartArchive),
+// pull (installs the pull's context), retry (bootstrap's policy), net. The cap
+// is outside the retry so the surviving body is the one capped and a 5xx body
+// is never read.
 func (o *OCIChart) transport(ctx context.Context, base http.RoundTripper) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
@@ -316,15 +265,9 @@ func (o *OCIChart) transport(ctx context.Context, base http.RoundTripper) http.R
 	}}}
 }
 
-// pullContext installs the pull's context on a request Helm's registry client
-// built with context.Background() (v4.3.1, registry/generic.go: every request
-// of a pull). Without it neither a cancelled apply nor the retry policy's wait
-// could see the context, because the policy reads the request's own.
-//
-// The request's context stays the parent: http.Client.Timeout puts its
-// deadline there, and replacing it would turn a stalled registry into an
-// unbounded wait. The two are joined instead, so a cancelled apply and a
-// timed-out request both stop it.
+// pullContext installs the pull's context on requests Helm built with
+// context.Background() (v4.3.1, registry/generic.go). The request's own context
+// stays the parent, so the client's deadline survives; a child joins the two.
 type pullContext struct {
 	ctx  context.Context
 	base http.RoundTripper
@@ -332,20 +275,17 @@ type pullContext struct {
 
 func (t pullContext) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.ctx.Done() == nil {
-		// Nothing can cancel this pull (context.Background): the request's
-		// own context already carries the client's deadline, and there is
-		// no registration worth making.
+		// Nothing can cancel this pull; the request already carries a deadline.
 		return t.base.RoundTrip(req)
 	}
 	ctx, cancel := context.WithCancel(req.Context())
-	// The pull ending cancels this request. Nothing stops the registration
-	// here: when the client is done with the response it stops its timer and
-	// cancels the request's context, which releases this child with it.
+	// The pull ending cancels this request; the client releases the child when
+	// it cancels the request's context.
 	_ = context.AfterFunc(t.ctx, cancel)
 	return t.base.RoundTrip(req.WithContext(ctx))
 }
 
-// pull downloads one version and reads it the way Helm will install it.
+// pull downloads one version and loads it as Helm will.
 func (o *OCIChart) pull(client *helmregistry.Client, repo, base, version string) (Chart, error) {
 	ref := base + ":" + version
 	got, err := client.Pull(ref)
@@ -375,11 +315,8 @@ func (o *OCIChart) pull(client *helmregistry.Client, repo, base, version string)
 	return chart, nil
 }
 
-// pullError is box's voice for a registry that answered nothing usable. A
-// missing or private release is the common case (a fresh project, a typo'd
-// --chart-version), and Helm's own text for it is a chain of ORAS errors that
-// names no release. 403 is what ghcr answers for a package that is not there
-// or not public, so it means the same thing to box as 404.
+// pullError is box's voice for a registry that answered nothing usable.
+// ghcr's 403 for a missing or private package means the same as 404.
 func (o *OCIChart) pullError(repo, version string, err error) error {
 	if version == "" {
 		if notPublished(err) {
@@ -396,17 +333,12 @@ func (o *OCIChart) pullError(repo, version string, err error) error {
 	return fmt.Errorf("cannot pull release %s from %s: %w", version, repo, err)
 }
 
-// noVersionError says why the default version is not there: either the
-// repository publishes nothing box recognises as a release, or every release
-// needs a newer box. selectVersion already names the skips, so this keeps the
-// reason and adds the ref.
+// noVersionError keeps selectVersion's reason and adds the ref.
 func (o *OCIChart) noVersionError(repo string, err error) error {
 	return fmt.Errorf("%s: %v", repo, err)
 }
 
-// chartRepo validates an --chart-repo value and returns it in both forms box
-// needs: the oci:// reference it prints, and the scheme-stripped reference
-// Helm's client takes.
+// chartRepo returns the oci:// reference and the scheme-stripped one Helm takes.
 func chartRepo(ref string) (display, base string, err error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -426,10 +358,8 @@ func chartRepo(ref string) (display, base string, err error) {
 	return ref, base, nil
 }
 
-// plainHTTPFor says whether a repository may be spoken to over plain HTTP.
-// Only a loopback registry may: it is a test's local registry, reached over a
-// socket on this host. A registry anywhere else gets TLS, because a chart is
-// what box installs as root.
+// plainHTTPFor allows plain HTTP only for a loopback registry; a chart is what
+// box installs as root.
 func plainHTTPFor(base string) (bool, error) {
 	ref, err := orasregistry.ParseReference(base)
 	if err != nil {
@@ -449,8 +379,7 @@ func plainHTTPFor(base string) (bool, error) {
 	return false, nil
 }
 
-// chartName is the repository's last path element: the chart's name, for the
-// one line box prints about a release it skipped.
+// chartName is the repository's last path element, for a skipped-release line.
 func chartName(repo string) string {
 	base := strings.TrimPrefix(strings.TrimSuffix(repo, "/"), "oci://")
 	if i := strings.LastIndex(base, "/"); i >= 0 {
@@ -475,13 +404,9 @@ func notPublished(err error) bool {
 	return errors.Is(err, errdef.ErrNotFound)
 }
 
-// cappedTransport refuses a response larger than max. It is what keeps a
-// hostile registry from making box allocate an unbounded download before any
-// size check could see it: the check has to be on the way in, not after.
-//
-// It is the outer layer of transport: base is the retrying fetch under it, so
-// what the cap sees is the response that survived the retries, and a retried
-// body is still capped.
+// cappedTransport refuses a response larger than max on the way in, so a
+// hostile registry cannot make box allocate before a size check. It is the
+// outer layer, so the capped body is the one that survived the retries.
 type cappedTransport struct {
 	max  int64
 	base http.RoundTripper

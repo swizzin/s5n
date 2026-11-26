@@ -24,8 +24,7 @@ import (
 
 	"github.com/distribution/distribution/v3/configuration"
 	"github.com/distribution/distribution/v3/registry/handlers"
-	// The registry in this test stores everything in memory: no disk, no
-	// daemon. Importing the driver is how distribution registers it.
+	// In-memory registry: no disk, no daemon; importing registers the driver.
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
@@ -36,10 +35,8 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// registryHandler is the in-process OCI registry's handler: distribution's app
-// over its in-memory driver. It is the same server Helm's own registry tests
-// run against, so the round trip below exercises the real push and pull paths,
-// not a fake of them.
+// registryHandler is distribution's app over its in-memory driver: the real
+// push and pull paths, not a fake.
 func registryHandler(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := &configuration.Configuration{
@@ -64,8 +61,7 @@ func registry(t *testing.T) string {
 	return strings.TrimPrefix(srv.URL, "http://")
 }
 
-// pushChart packages charts/s5n from this checkout and pushes it, the way the
-// release workflow does with helm package and helm push.
+// pushChart packages this checkout's chart and pushes it, as the workflow does.
 func pushChart(t *testing.T, host string) []byte {
 	t.Helper()
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -84,9 +80,7 @@ func pushChart(t *testing.T, host string) []byte {
 	return data
 }
 
-// packageChart builds a chart archive in memory. helm package is not available
-// to a Go test, and an archive is what a registry carries: the files, under a
-// <name>/ prefix, gzipped and tarred.
+// packageChart builds the archive a registry carries: files under <name>/, tarred.
 func packageChart(t *testing.T, dir string) []byte {
 	t.Helper()
 	ch, err := loader.LoadDir(dir)
@@ -132,16 +126,10 @@ func packageChart(t *testing.T, dir string) []byte {
 	return buf.Bytes()
 }
 
-// TestOCIRoundTrip: the chart this checkout ships, pushed to a registry and
-// pulled by version, is the same Chart the fixture loader reads from the
-// directory. box reads one chart, not two dialects of it; the directory is a
-// test fixture, never a source box installs from.
 func TestOCIRoundTrip(t *testing.T) {
 	host := registry(t)
 	want := pushChart(t, host)
-	// The box a release ships is built at the chart's own version, so it
-	// meets the chart's min-box; a box older than that is refused, which is
-	// TestCheckMinBox's business, not this test's.
+	// The box is the chart's own version, so it meets min-box.
 	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want)}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: chartVersion(t, want),
@@ -166,8 +154,7 @@ func TestOCIRoundTrip(t *testing.T) {
 	if pulled.Annotations[MinBoxAnnotation] != fromDir.Annotations[MinBoxAnnotation] {
 		t.Fatalf("min-box = %q, want %q", pulled.Annotations[MinBoxAnnotation], fromDir.Annotations[MinBoxAnnotation])
 	}
-	// The pins carry the k0s checksums too, a map, so the comparison is by
-	// value rather than by struct identity.
+	// The pins include a map, so compare by value.
 	if !reflect.DeepEqual(pulled.Pins, fromDir.Pins) {
 		t.Fatalf("pins = %+v, want the directory's %+v", pulled.Pins, fromDir.Pins)
 	}
@@ -190,8 +177,6 @@ func TestOCIRoundTrip(t *testing.T) {
 	}
 }
 
-// TestOCINoPublishedRelease: a tag nobody published is box's sentence, not
-// Helm's error chain.
 func TestOCINoPublishedRelease(t *testing.T) {
 	host := registry(t)
 	pushChart(t, host)
@@ -208,8 +193,6 @@ func TestOCINoPublishedRelease(t *testing.T) {
 	}
 }
 
-// TestOCIEmptyRepository: a repository nothing has been published to is box's
-// sentence, and it is not the same sentence as a version that is missing.
 func TestOCIEmptyRepository(t *testing.T) {
 	host := registry(t)
 	repo := "oci://" + host + "/charts/s5n"
@@ -223,13 +206,9 @@ func TestOCIEmptyRepository(t *testing.T) {
 	}
 }
 
-// TestOCIPicksTheNewestReleaseBoxCanUse: pushing two releases and adding a
-// floor to the newer one selects the older, and says which one it skipped and
-// why. The skip is on stdout, in box's voice.
 func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	host := registry(t)
-	// This box is the one the shipped chart was released with, so the shipped
-	// chart is the newest release it can use.
+	// This box matches the shipped chart, the newest it can use.
 	box := chartVersion(t, pushChart(t, host))
 
 	// A second release, 0.9.0, whose floor is above this box.
@@ -257,9 +236,6 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	}
 }
 
-// TestOCIRefusesAFloorAboveBox: an explicitly requested release box is too old
-// for is refused, naming both versions, and the refusal happens before apply
-// has a cluster client — so nothing can have been written.
 func TestOCIRefusesAFloorAboveBox(t *testing.T) {
 	host := registry(t)
 	pushChart(t, host)
@@ -293,8 +269,6 @@ func TestOCIRefusesAFloorAboveBox(t *testing.T) {
 	}
 }
 
-// TestOCIDevBoxSkipsTheFloorOnce: a box built without a version cannot be
-// compared with a floor. It skips the check and says so exactly once per run.
 func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 	host := registry(t)
 	pushChart(t, host)
@@ -310,9 +284,6 @@ func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 	}
 }
 
-// TestOCIReleasesListsTheFloorsUpdatePlansWith: `box update` decides its steps
-// from every published release's two annotations, so the listing has to carry
-// them, in semver order, without the tags that are not releases.
 func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
 	host := registry(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -345,10 +316,8 @@ func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
 	}
 }
 
-// vintageChart is this tree's chart as a release from before platform.yaml
-// shipped: an older version, and no platform pins at all. The published
-// repository still holds releases of that shape, and box cannot read one, which
-// is why a listing must pass over it rather than pull it.
+// vintageChart is a release from before platform.yaml: box cannot read it, so a
+// listing passes over it rather than pulling it.
 func vintageChart(t *testing.T, base []byte, version string) []byte {
 	t.Helper()
 	ch, err := loader.LoadArchive(bytes.NewReader(base))
@@ -366,11 +335,6 @@ func vintageChart(t *testing.T, base []byte, version string) []byte {
 	return archiveChart(t, ch)
 }
 
-// TestOCIReleasesNeverPullsBelowTheFloor: an update only ever steps forward, so
-// its listing starts at the release the box is on. A repository keeps every
-// chart ever published, and one from before platform.yaml cannot be read at
-// all: the floor is what lets the listing pass over history instead of failing
-// on it before an update has chosen a target.
 func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
 	host := registry(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -408,9 +372,6 @@ func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
 	}
 }
 
-// TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty: a box on the newest release,
-// or ahead of every published one, has nothing to do. That is an empty listing,
-// not an error: the error is for a repository that publishes no release at all.
 func TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty(t *testing.T) {
 	host := registry(t)
 	pushChart(t, host)
@@ -427,9 +388,6 @@ func TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty(t *testing.T) {
 	}
 }
 
-// TestOCIReleasesFailsOnAnUnreadableReleaseAtOrAboveTheFloor: a release at or
-// above the installed one that cannot be read is a broken release, not history,
-// and stops the listing loudly.
 func TestOCIReleasesFailsOnAnUnreadableReleaseAtOrAboveTheFloor(t *testing.T) {
 	host := registry(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -455,17 +413,13 @@ func chartVersion(t *testing.T, data []byte) string {
 	return ch.Metadata.Version
 }
 
-// setChartVersion rewrites Chart.yaml's version, appVersion and min-box, so a
-// test can publish a release whose floor differs from the one in this checkout.
-// It edits the bytes the chart was loaded from, which is what helm package
-// ships.
+// setChartVersion rewrites the chart bytes helm package would ship.
 func setChartVersion(t *testing.T, ch *chartv2.Chart, version, minBox string) {
 	t.Helper()
 	setChartFloors(t, ch, version, minBox, "")
 }
 
-// setChartFloors is setChartVersion with upgrade-from as well, which is the
-// annotation `box update` steps through releases with.
+// setChartFloors adds upgrade-from, which update steps with.
 func setChartFloors(t *testing.T, ch *chartv2.Chart, version, minBox, upgradeFrom string) {
 	t.Helper()
 	annotations := "annotations:\n  " + MinBoxAnnotation + ": \"" + minBox + "\"\n"
@@ -491,8 +445,7 @@ func setChartFloors(t *testing.T, ch *chartv2.Chart, version, minBox, upgradeFro
 	t.Fatal("the chart has no Chart.yaml")
 }
 
-// archiveChart writes a modified chart back to an archive, the shape helm
-// package would produce.
+// archiveChart writes a modified chart as helm package would.
 func archiveChart(t *testing.T, ch *chartv2.Chart) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -533,8 +486,6 @@ func pushData(t *testing.T, ref string, data []byte) error {
 	return nil
 }
 
-// TestChartRepoRefusesAURL: --chart-repo is an OCI reference; an https URL is
-// a mistake box can explain rather than a TLS failure to decode.
 func TestChartRepoRefusesAURL(t *testing.T) {
 	_, _, err := chartRepo("https://ghcr.io/swizzin/charts/s5n")
 	if err == nil || !strings.Contains(err.Error(), "oci://") {
@@ -554,10 +505,6 @@ func TestChartRepoRefusesAURL(t *testing.T) {
 	}
 }
 
-// TestUnreadableRegistryIsNotAStackOfHelm: a registry that answers 500 is not
-// "no published release"; box says what it tried and keeps the cause. Two
-// attempts with no wait: the point is the sentence, and the backoff is the
-// other tests'.
 func TestUnreadableRegistryIsNotAStackOfHelm(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no", http.StatusInternalServerError)
@@ -577,16 +524,9 @@ func TestUnreadableRegistryIsNotAStackOfHelm(t *testing.T) {
 	}
 }
 
-// poisonRegistryHome writes the operator Helm state a pull must never read and
-// points the process environment at it. The registry config is not valid JSON:
-// Helm's registry client parses its credentials file when it is constructed, so
-// if box let that path default to helmpath.ConfigPath (HELM_REGISTRY_CONFIG,
-// then ~/.config/helm) the pull would fail before it reached the registry. A
-// stale repository entry and a plugin getter are there for the same reason they
-// are in the platform test: none of root's Helm environment decides what box
-// installs.
-//
-// It returns the root of the poisoned tree, for a before/after comparison.
+// poisonRegistryHome writes the operator Helm state a pull must never read: an
+// invalid registry config (parsed at client construction), a stale repository
+// entry and a plugin getter. It returns the tree root for a before/after check.
 func poisonRegistryHome(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -628,8 +568,8 @@ downloaders:
 	return root
 }
 
-// treeSnapshot renders every entry under root: path, mode, size, mtime and the
-// content hash of a file. Directory mtimes are included so a write Helm cleans
+// treeSnapshot renders every entry: path, mode, size, mtime and content hash.
+// Directory mtimes are included so a write Helm cleans
 // up again -- the shape of helmpath's scratch index -- is still visible.
 func treeSnapshot(t *testing.T, root string) string {
 	t.Helper()
@@ -665,9 +605,6 @@ func treeSnapshot(t *testing.T, root string) string {
 	return b.String()
 }
 
-// TestOCIPullIgnoresTheOperatorsRegistryConfig: root's Helm registry config is
-// unparseable and its repository state is stale, and box still pulls a public
-// chart anonymously. Nothing in that tree is read for a secret or written to.
 func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 	host := registry(t)
 	want := pushChart(t, host)
@@ -690,10 +627,6 @@ func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 	}
 }
 
-// TestOCIPullLeavesNoTemporaryHelmHome: the private home lives for one pull.
-// TMPDIR is a sandbox, so a leftover directory is visible; the failure path is
-// checked too, because a missing release is the common case and a defer is easy
-// to miss on it.
 func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
 	host := registry(t)
 	want := pushChart(t, host)
@@ -783,10 +716,6 @@ func chartRequest(t *testing.T) *http.Request {
 	return req
 }
 
-// TestOCIPullRetriesATransientRegistryFailure: a registry that answers 503
-// once, in the middle of a pull, does not abort apply's chart pull. It is the
-// same rule bootstrap's downloads follow, and it is the failure that made a
-// first install fail right after a bootstrap that survived it.
 func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
 	host, failures, served := unhealthyRegistry(t)
 	want := pushChart(t, host)
@@ -807,8 +736,6 @@ func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
 	}
 }
 
-// TestChartTransportRetriesAServerError: a 503 once then a 200 is one retried
-// attempt, not a failed pull, and the body that arrives is the second one.
 func TestChartTransportRetriesAServerError(t *testing.T) {
 	stub := &stubTransport{reply: func(try int, req *http.Request) (*http.Response, error) {
 		if try == 1 {
@@ -834,8 +761,6 @@ func TestChartTransportRetriesAServerError(t *testing.T) {
 	}
 }
 
-// TestChartTransportDoesNotRetryANotFound: a 404 is the registry's answer. A
-// second attempt would get the same one, so the retry must not make it.
 func TestChartTransportDoesNotRetryANotFound(t *testing.T) {
 	stub := &stubTransport{reply: func(_ int, req *http.Request) (*http.Response, error) {
 		return stubResponse(req, http.StatusNotFound, `{"errors":[]}`, -1), nil
@@ -854,9 +779,6 @@ func TestChartTransportDoesNotRetryANotFound(t *testing.T) {
 	}
 }
 
-// TestChartTransportCapsTheBodyAfterARetry: the size cap is outside the retry,
-// so the body a retry landed on is capped exactly like a first attempt's --
-// both when the registry declares the length and when it streams it.
 func TestChartTransportCapsTheBodyAfterARetry(t *testing.T) {
 	const over = int64(MaxChartArchive) + 1
 	for name, reply := range map[string]func(req *http.Request) *http.Response{
@@ -893,9 +815,6 @@ func TestChartTransportCapsTheBodyAfterARetry(t *testing.T) {
 	}
 }
 
-// TestChartTransportStopsWhenThePullIsCancelled: a cancelled apply does not sit
-// out the backoff. Helm's registry client gives its requests no context, so the
-// transport installs the pull's; this is the proof it reaches the wait.
 func TestChartTransportStopsWhenThePullIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -14,8 +14,7 @@ import (
 	"testing"
 )
 
-// fakeSecret is the release Secret: one map, with the reads and writes counted
-// so a test can prove the step never touched it.
+// fakeSecret counts reads and writes so a test proves the step stayed out.
 type fakeSecret struct {
 	data    map[string]string
 	getErr  error
@@ -44,12 +43,10 @@ func (s *fakeSecret) Set(_ context.Context, key, value string) error {
 	return nil
 }
 
-// plexPrefs is the token a claimed server was signed in with.
+// plexPrefs is a claimed server's token.
 const plexPrefs = "table-token-abc123"
 
-// plexBox is an installed box that runs Plex, with the settings file a claimed
-// server keeps its token in. Plex is switched on in the grant, because that is
-// what decides whether an app runs at all.
+// plexBox is an installed box running Plex with a claimed settings file.
 func plexBox(t *testing.T) (*fakes, *fakeSecret) {
 	t.Helper()
 	f := newFakes(t)
@@ -59,8 +56,7 @@ func plexBox(t *testing.T) (*fakes, *fakeSecret) {
 	chart := testChart(t)
 	f.rel.values = deployedFor(t, f, chart)
 	f.rel.exists = true
-	// The box was installed by an earlier run: its namespace, its claims and its
-	// release are all there, so this run has nothing of its own to write.
+	// An earlier run installed it: namespace, claims and release all exist.
 	f.store.nsExists = true
 	f.store.nsEnforce = podSecurityRestricted
 	for _, claim := range []string{"testbox-s5n-data", "testbox-s5n-config"} {
@@ -71,8 +67,7 @@ func plexBox(t *testing.T) (*fakes, *fakeSecret) {
 	return f, sec
 }
 
-// writePlexPrefs writes a claimed server's Preferences.xml the way Plex does:
-// one element, the account and its token as attributes.
+// writePlexPrefs writes a claimed Preferences.xml as Plex does.
 func writePlexPrefs(t *testing.T, configRoot, content string) string {
 	t.Helper()
 	dir := filepath.Join(configRoot, plexApp, "Library", "Application Support", "Plex Media Server")
@@ -91,9 +86,6 @@ func prefsWith(token string) string {
 		`<Preferences MachineIdentifier="machine-1" FriendlyName="box" PlexOnlineUsername="alice" PlexOnlineToken="` + token + `" />` + "\n"
 }
 
-// A box claimed since it was installed has its token in Plex's settings and
-// nothing in the release Secret: apply reads the one and writes the other, and
-// installs the release again so the wiring Job this run runs can use it.
 func TestApplySeedsThePlexTokenFromPlexItself(t *testing.T) {
 	f, sec := plexBox(t)
 	writePlexPrefs(t, f.configPath, prefsWith(plexPrefs))
@@ -108,8 +100,7 @@ func TestApplySeedsThePlexTokenFromPlexItself(t *testing.T) {
 	if !res.PlexToken {
 		t.Fatalf("result does not say the run wrote the token: %+v", res)
 	}
-	// Nothing else about the release changed, and it is installed again all the
-	// same: the wiring Job is a hook, and it is what turns the token into a link.
+	// It installs again anyway: the wiring Job turns the token into a link.
 	if f.rel.upgrades != 1 {
 		t.Fatalf("upgrades = %d, want the one install that re-runs the wiring", f.rel.upgrades)
 	}
@@ -120,8 +111,7 @@ func TestApplySeedsThePlexTokenFromPlexItself(t *testing.T) {
 	if !strings.Contains(out, "running its hooks") {
 		t.Fatalf("apply did not say what it installs the unchanged release for:\n%s", out)
 	}
-	// The token itself is never printed: not by this step, and not by the diff,
-	// the values or the receipt.
+	// The token is never printed by the step, diff, values or receipt.
 	if strings.Contains(out, plexPrefs) {
 		t.Fatalf("apply printed the token:\n%s", out)
 	}
@@ -132,8 +122,6 @@ func TestApplySeedsThePlexTokenFromPlexItself(t *testing.T) {
 	}
 }
 
-// A token the Secret already holds is never written over, whoever put it there:
-// it is the person's own answer, and Plex's copy is only a fallback.
 func TestApplyLeavesAPlexTokenTheSecretAlreadyHolds(t *testing.T) {
 	f, sec := plexBox(t)
 	sec.data[plexTokenKey] = "a-token-a-person-set"
@@ -149,8 +137,7 @@ func TestApplyLeavesAPlexTokenTheSecretAlreadyHolds(t *testing.T) {
 	if len(sec.setKeys) != 0 || res.PlexToken {
 		t.Fatalf("apply wrote the Secret (%v) although it held a token", sec.setKeys)
 	}
-	// With nothing else to do the run is a no-op, which is the proof that the
-	// token is not re-read into a write on every apply.
+	// A no-op proves the token is not re-read into a write every apply.
 	if f.rel.upgrades != 0 {
 		t.Fatalf("upgrades = %d, want none", f.rel.upgrades)
 	}
@@ -159,8 +146,6 @@ func TestApplyLeavesAPlexTokenTheSecretAlreadyHolds(t *testing.T) {
 	}
 }
 
-// A Secret a person named with secrets.existingSecret is theirs: box neither
-// reads a key of it nor writes one.
 func TestApplyNeverTouchesAnExistingSecret(t *testing.T) {
 	f, sec := plexBox(t)
 	f.writeValues(t, "secrets:\n  existingSecret: the-users-own-keys\n")
@@ -174,8 +159,6 @@ func TestApplyNeverTouchesAnExistingSecret(t *testing.T) {
 	}
 }
 
-// A token in the values file is the person's too, and the chart renders it over
-// whatever the Secret holds: there is nothing for apply to fill in.
 func TestApplyLeavesPlexToATokenInTheValues(t *testing.T) {
 	f, sec := plexBox(t)
 	f.writeValues(t, "secrets:\n  plexToken: a-token-from-the-values\n")
@@ -189,8 +172,6 @@ func TestApplyLeavesPlexToATokenInTheValues(t *testing.T) {
 	}
 }
 
-// A first install has no Plex state to read: nothing has started Plex yet, and a
-// migration seeds the token before its own install.
 func TestAFirstInstallSeedsNoPlexToken(t *testing.T) {
 	f, sec := plexBox(t)
 	f.rel.exists = false
@@ -206,8 +187,6 @@ func TestAFirstInstallSeedsNoPlexToken(t *testing.T) {
 	}
 }
 
-// A box that does not run Plex has no Plex settings to read, whatever is on the
-// host.
 func TestApplySkipsTheTokenWhenPlexIsOff(t *testing.T) {
 	f := newFakes(t)
 	chart := testChart(t)
@@ -225,8 +204,6 @@ func TestApplySkipsTheTokenWhenPlexIsOff(t *testing.T) {
 	}
 }
 
-// An unclaimed server holds no token: apply writes nothing, says nothing and
-// leaves the wiring's pending row as it is.
 func TestAnUnclaimedPlexWritesNoToken(t *testing.T) {
 	f, sec := plexBox(t)
 	writePlexPrefs(t, f.configPath, prefsWith(""))
@@ -242,8 +219,6 @@ func TestAnUnclaimedPlexWritesNoToken(t *testing.T) {
 	}
 }
 
-// A Preferences.xml that does not parse is one line naming the file, and the
-// apply goes on: a token is a convenience, never a reason to fail an apply.
 func TestAGarbledPreferencesIsOneLineAndTheApplyGoesOn(t *testing.T) {
 	f, sec := plexBox(t)
 	path := writePlexPrefs(t, f.configPath, "<Preferences PlexOnlineToken=\"never closed\n")
@@ -264,8 +239,6 @@ func TestAGarbledPreferencesIsOneLineAndTheApplyGoesOn(t *testing.T) {
 	}
 }
 
-// A Secret that cannot be read is the same kind of line: the token is a
-// convenience, and the apply still installs what it was asked to.
 func TestASecretThatCannotBeReadIsOneLineAndTheApplyGoesOn(t *testing.T) {
 	f, sec := plexBox(t)
 	sec.getErr = errors.New("the server refused the read")
@@ -283,8 +256,7 @@ func TestASecretThatCannotBeReadIsOneLineAndTheApplyGoesOn(t *testing.T) {
 	}
 }
 
-// anyString flattens a values document, so a test can look for one string
-// anywhere in it.
+// anyString flattens values so a test can find one string.
 func anyString(v any) string {
 	var b strings.Builder
 	var walk func(any)

@@ -8,15 +8,12 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// A transient answer is one that outlives no file: `box init` asks for the Plex
-// claim token after the confirm, hands it to this one apply, and never writes it
-// to the grant or the values file (docs/box.md, "The catalog and box"). Two
-// things follow, and they live here so Apply's main path stays readable.
+// A transient answer outlives no file: init asks for the Plex claim token after
+// the confirm, hands it to one apply, and never writes it (docs/box.md, "The
+// catalog and box").
 
-// withoutTransient drops the changes that name a transient answer. Helm stores
-// the values it rendered with, so the previous revision holds the last answer;
-// comparing it with the file's empty default would print the secret on the very
-// next run. Dropping it is also what keeps a re-run a no-op.
+// withoutTransient drops changes naming a transient answer: the stored previous
+// value would otherwise print the secret and break a no-op re-run.
 func withoutTransient(changes []seedbox.Change, keys []string) []seedbox.Change {
 	if len(keys) == 0 || len(changes) == 0 {
 		return changes
@@ -35,15 +32,9 @@ func withoutTransient(changes []seedbox.Change, keys []string) []seedbox.Change 
 	return out
 }
 
-// mergeTransient sets the answers from AfterConfirm into the document handed to
-// Helm, by dotted values path. An empty answer is skipped: an optional question
-// the operator pressed enter on is not a value, and the chart treats an empty
-// string as absent anyway.
-//
-// A transient answer may not set a grant key. The manifest cannot ask for one
-// (internal/catalog refuses that), but this does not depend on the manifest
-// being right: an answer that arrives after the confirm is still an answer, and
-// the grant is root's.
+// mergeTransient sets AfterConfirm's answers by dotted path; an empty answer is
+// skipped. It refuses a grant key even though the catalog cannot ask for one:
+// an answer after the confirm is still an answer, and the grant is root's.
 func mergeTransient(values map[string]any, extra map[string]any) error {
 	keys := make([]string, 0, len(extra))
 	for k := range extra {
@@ -77,9 +68,7 @@ func mergeTransient(values map[string]any, extra map[string]any) error {
 	return nil
 }
 
-// setPath writes one value into a decoded values document, creating the
-// sections on the way. It refuses to replace a scalar with a section: that
-// would be box silently changing a value nobody asked it to touch.
+// setPath creates sections on the way but refuses to replace a scalar.
 func setPath(values map[string]any, keys []string, value any) error {
 	cur := values
 	for i, key := range keys {

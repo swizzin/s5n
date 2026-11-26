@@ -8,39 +8,23 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// peerPortKey is where a seedbox's peer port lives: a port on the node, shared
-// with every other box on it, so it is a grant key (internal/seedbox/grant.go)
-// and a values file may not set it.
+// peerPortKey is the peer port, a node port shared with other boxes: a grant
+// key (internal/seedbox/grant.go), never a values key.
 const peerPortKey = "apps.qbittorrent.torrent.port"
 
 // peerPortApp is the app that holds it. Nothing else in the catalog exposes a
 // port on the node.
 const peerPortApp = "qbittorrent"
 
-// legacyPeerPort is the port the chart defaulted to before it shipped no
-// default at all. A box installed while it did has no port in either of its
-// files, and its release renders this one.
+// legacyPeerPort is the chart's old default; a box from then has no port in
+// either file and its release renders this one.
 const legacyPeerPort = 31111
 
-// keepPeerPort writes the peer port into the values a box with none recorded is
-// about to install, and checks the document it wrote against the chart's own
-// schema.
-//
-// A box has no port recorded for one of two reasons, and both must keep running
-// rather than be refused by a chart that ships no default: it was installed
-// while the chart defaulted the port to 31111, or its release was installed
-// without box. The number such a box already runs is in the release's own
-// values -- Helm stores what it was given, and an old box's stored values carry
-// the chart's old default -- so that is the number this run keeps: moving the
-// port a box's peers already announce would drop every connection until the
-// next tracker announce, and moving it is never this command's business. A
-// release that records no port either falls back to the same old default, which
-// is the port its Service is on. A first install with no port is refused: there
-// is nothing to keep, and init is what picks.
-//
-// Nothing is written for a release that has no peer port at all (a chart from
-// before the key, or one without qBittorrent): its own schema would refuse it,
-// and box does not invent a key its release cannot take.
+// keepPeerPort keeps a box's running peer port when neither file records one,
+// and validates the result. Moving a port peers already announce would drop
+// connections until the next announce, so the stored value (or the chart's old
+// 31111 default) is written instead. A first install with no port is refused:
+// init picks it. A chart without the key is left alone.
 func keepPeerPort(values, deployed map[string]any, exists bool, schema []byte, r say.Reporter) error {
 	if !appEnabled(values, peerPortApp) {
 		return nil
@@ -52,10 +36,7 @@ func keepPeerPort(values, deployed map[string]any, exists bool, schema []byte, r
 		return nil
 	}
 	if !exists {
-		// A first install has no port to keep, and picking one needs the
-		// cluster, which init asks and apply does not. Falling back to the old
-		// default here would put a new box on the very number the chart
-		// stopped shipping.
+		// A first install has nothing to keep; picking needs init, not apply.
 		return fmt.Errorf("%s is not recorded in the grant: run `box init` to pick one", peerPortKey)
 	}
 	if port, ok := portAt(deployed); ok {
@@ -102,8 +83,7 @@ func setValue(values map[string]any, path string, value any) {
 	}
 }
 
-// portAt is the peer port one values document records. A document read from
-// YAML has an int and one read back from Helm has a float64, so both count.
+// portAt is the peer port; YAML gives an int, Helm a float64, so both count.
 func portAt(values map[string]any) (int, bool) {
 	raw, ok := valueAt(values, peerPortKey)
 	if !ok {

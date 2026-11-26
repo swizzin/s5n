@@ -6,9 +6,7 @@ import (
 	"testing"
 )
 
-// chartWithOIDC is the fixture chart with auth.oidc.gatewayIP declared, which
-// is what makes seedbox.Effective carry the grant's record into the values and
-// the chart render OIDC for an app whose catalog entry says so.
+// chartWithOIDC declares gatewayIP, so the grant's record reaches the values.
 func chartWithOIDC(t *testing.T) Chart {
 	t.Helper()
 	c := testChart(t)
@@ -34,8 +32,7 @@ func chartWithOIDC(t *testing.T) Chart {
 	return c
 }
 
-// grantWithOIDC adds the grant's record of the Gateway's proxy address: root's
-// decision, and the only thing that makes an app's pod reach the issuer.
+// grantWithOIDC adds the Gateway's proxy address: what reaches the issuer.
 func grantWithOIDC(t *testing.T, f *fakes) {
 	t.Helper()
 	rewrite(t, f.grantPath, map[string]string{
@@ -43,8 +40,7 @@ func grantWithOIDC(t *testing.T, f *fakes) {
 	})
 }
 
-// sonarrNewlyEnabled is a box whose release is deployed with sonarr off: the
-// grant enables it, so this run turns on the fixture catalog's OIDC app.
+// sonarrNewlyEnabled is deployed with sonarr off; the grant turns it on.
 func sonarrNewlyEnabled(t *testing.T, f *fakes) {
 	t.Helper()
 	deployed := deployedValues(t, f)
@@ -57,11 +53,6 @@ func sonarrNewlyEnabled(t *testing.T, f *fakes) {
 	f.store.existing["testbox-s5n-config"] = true
 }
 
-// TestANewClientIsRegisteredBeforeTheRelease: an apply that turns on an app
-// signing in through the login is a run with login work even when every object
-// the login renders is already right -- the client it needs is not there yet.
-// The reconcile has to come before Helm, because the app's pod mounts the
-// Secret that reconcile writes and Helm waits on that pod.
 func TestANewClientIsRegisteredBeforeTheRelease(t *testing.T) {
 	f := newFakes(t)
 	sonarrNewlyEnabled(t, f)
@@ -85,11 +76,6 @@ func TestANewClientIsRegisteredBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// TestFirstApplyWritesTheClientBeforeTheRelease: a first install has no
-// namespace until apply creates one, so the login's plan says "a client is
-// missing" before there is anywhere to write it. The write still has to happen
-// after CreateNamespace and before Helm -- that is the order a fresh box needs,
-// and it is why a missing namespace is not a reason to plan nothing.
 func TestFirstApplyWritesTheClientBeforeTheRelease(t *testing.T) {
 	f := newFakes(t) // no namespace and no release: the fixture's fresh cluster
 	f.hosts = &fakeHosts{loginPending: true, events: &f.events}
@@ -110,10 +96,6 @@ func TestFirstApplyWritesTheClientBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// TestAUserApplyRefusesAClientItCannotRegister: the app signs in through the
-// login and has no client, and this identity cannot write one -- so the run
-// stops before the confirm, with nothing written and no plan shown as if it
-// would work. The sentence names the command that can.
 func TestAUserApplyRefusesAClientItCannotRegister(t *testing.T) {
 	f := newFakes(t)
 	chart := chartWithOIDC(t)
@@ -153,9 +135,6 @@ func TestAUserApplyRefusesAClientItCannotRegister(t *testing.T) {
 	}
 }
 
-// TestAUserApplyAllowsAReEnableWhoseClientIsThere: an app root turned off keeps
-// its client Secret and its digest, so turning it back on works for the user
-// whose box it is. Only the Secret's absence refuses.
 func TestAUserApplyAllowsAReEnableWhoseClientIsThere(t *testing.T) {
 	f := newFakes(t)
 	chart := chartWithOIDC(t)
@@ -173,15 +152,11 @@ func TestAUserApplyAllowsAReEnableWhoseClientIsThere(t *testing.T) {
 	}
 }
 
-// TestNoRefusalWithoutTheGatewayAddress: the chart renders no OIDC without
-// auth.oidc.gatewayIP, so the app's pod mounts no client Secret and the release
-// needs nothing from the login. The refusal must not fire on a grant that has
-// no address, whatever the catalog says.
 func TestNoRefusalWithoutTheGatewayAddress(t *testing.T) {
 	f := newFakes(t)
 	chart := chartWithOIDC(t)
 	f.chart = &chart
-	// The fixture grant, which carries no auth.oidc.
+	// The fixture grant carries no auth.oidc.
 	sonarrNewlyEnabled(t, f)
 	f.hosts = &fakeHosts{loginPending: true}
 
@@ -196,8 +171,6 @@ func TestNoRefusalWithoutTheGatewayAddress(t *testing.T) {
 	}
 }
 
-// TestNoRefusalForRoot: root's apply is the identity that registers the client,
-// so the same missing Secret is work this run does, not a refusal.
 func TestNoRefusalForRoot(t *testing.T) {
 	f := newFakes(t)
 	chart := chartWithOIDC(t)

@@ -10,9 +10,7 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// fakeSnapshots is the snapshot step for the tests that prove where in the
-// apply it runs: it shares the fakes' event log with fakeRelease and
-// fakeStorage, so one test can assert the whole order.
+// fakeSnapshots shares the event log, so one test asserts the whole order.
 type fakeSnapshots struct {
 	work       SnapshotWork
 	dirs       SnapshotDirs
@@ -53,8 +51,7 @@ func (f *fakeSnapshots) log(event string) {
 	}
 }
 
-// movingSnapshots is the step's answer for an apply that moves sonarr: one app
-// with state to copy, and the directory the copy goes in.
+// movingSnapshots is one moving app with state to copy.
 func (f *fakes) movingSnapshots() *fakeSnapshots {
 	f.snaps = &fakeSnapshots{
 		work: SnapshotWork{
@@ -73,8 +70,7 @@ func (f *fakes) movingSnapshots() *fakeSnapshots {
 	return f.snaps
 }
 
-// installed is one apply that has already installed the release, so the next
-// one has a diff to make and a release to move.
+// installed is one apply that already installed, so the next has a diff.
 func installed(t *testing.T) *fakes {
 	t.Helper()
 	f := newFakes(t)
@@ -86,7 +82,7 @@ func installed(t *testing.T) *fakes {
 	return f
 }
 
-// assertSequence fails unless the events contain want in order.
+// assertSequence checks that the events contain want in order.
 func assertSequence(t *testing.T, events []string, want ...string) {
 	t.Helper()
 	at := 0
@@ -105,9 +101,6 @@ func assertSequence(t *testing.T, events []string, want ...string) {
 	}
 }
 
-// A values change that moves an image is copied before the release moves, and
-// only after the operator said yes: the app is down for the copy, and a "no"
-// must leave it running.
 func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 	f := installed(t)
 	snaps := f.movingSnapshots()
@@ -125,8 +118,7 @@ func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 		t.Fatalf("pending/take/prune calls = %d/%d/%d, want 1/1/1",
 			len(snaps.pendings), len(snaps.takes), len(snaps.prunes))
 	}
-	// The step is given the release being installed, the values this apply
-	// renders and the grant's config root -- the same inputs the plan had.
+	// Take gets the release, values and config root the plan had.
 	plan := snaps.takes[0]
 	if plan.Chart.Version == "" || plan.Namespace != "testbox" || plan.ConfigRoot != f.configPath {
 		t.Fatalf("take plan = %+v, want the chart, testbox and %s", plan, f.configPath)
@@ -137,7 +129,7 @@ func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 	out := f.out.String()
 	for _, want := range []string{
 		"snapshots:\n  sonarr: stopped and snapshotted before it moves from 4.9.0 to 5.0.0\n",
-		// After the release is up, the run says where the copy is.
+		// After the release, the run says where the copy is.
 		"the snapshot of sonarr is in " + snaps.dirs["sonarr"] + "; `box rollback sonarr` puts it back\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -146,9 +138,6 @@ func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 	}
 }
 
-// The plan's row for a move box cannot copy says what it could not learn, so
-// the operator sees it before the question: an app whose bytes cannot be named
-// still moves, and the row is the safeguard instead of a refusal.
 func TestSnapshotRowForAMoveItCannotCopy(t *testing.T) {
 	ran := snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0"}
 	movedTo := snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: "sha256:bbbb"}
@@ -193,9 +182,6 @@ func TestSnapshotRowForAMoveItCannotCopy(t *testing.T) {
 	}
 }
 
-// An app the catalog gives nothing to copy moves without one, and the plan says
-// so rather than leaving it out: it is never stopped, and box never rolls it
-// back.
 func TestApplyPlansAnUncopiedMoveWithoutStoppingIt(t *testing.T) {
 	f := installed(t)
 	f.snaps = &fakeSnapshots{
@@ -221,9 +207,6 @@ func TestApplyPlansAnUncopiedMoveWithoutStoppingIt(t *testing.T) {
 	}
 }
 
-// A values change that moves no image prints nothing new, and a run with no
-// change at all still says "nothing to change" without reading the cluster's
-// apps.
 func TestApplyWithoutAMovingImagePlansNoSnapshot(t *testing.T) {
 	f := installed(t)
 	f.snaps = &fakeSnapshots{events: &f.events}
@@ -242,8 +225,7 @@ func TestApplyWithoutAMovingImagePlansNoSnapshot(t *testing.T) {
 		t.Fatalf("upgrades = %d, want the changed values applied", f.rel.upgrades)
 	}
 
-	// The installed release again: nothing differs, so there is no question to
-	// ask and no reason to read the apps.
+	// Nothing differs: no question and no app reads.
 	f.snaps = &fakeSnapshots{events: &f.events}
 	noop, err := f.apply(t)
 	if err != nil {
@@ -257,8 +239,6 @@ func TestApplyWithoutAMovingImagePlansNoSnapshot(t *testing.T) {
 	}
 }
 
-// A first install has nothing to migrate: no release is deployed, so no app's
-// image can have moved and nothing is read.
 func TestFirstInstallTakesNoSnapshot(t *testing.T) {
 	f := newFakes(t)
 	f.movingSnapshots()
@@ -273,8 +253,6 @@ func TestFirstInstallTakesNoSnapshot(t *testing.T) {
 	}
 }
 
-// Saying no writes nothing, so the app is not stopped for a copy nobody asked
-// for.
 func TestDeclinedApplyNeverCopies(t *testing.T) {
 	f := installed(t)
 	f.movingSnapshots()
@@ -290,8 +268,6 @@ func TestDeclinedApplyNeverCopies(t *testing.T) {
 	}
 }
 
-// A copy box cannot take refuses the run before the question, so an app is
-// never stopped for a snapshot that would fail.
 func TestARefusedSnapshotStopsTheApplyBeforeTheQuestion(t *testing.T) {
 	f := installed(t)
 	f.snaps = &fakeSnapshots{pendingErr: errors.New("sonarr: its config directory is not there"), events: &f.events}
@@ -314,8 +290,6 @@ func TestARefusedSnapshotStopsTheApplyBeforeTheQuestion(t *testing.T) {
 	}
 }
 
-// A release that fails after the copy leaves the apps down: the error says
-// where the state they had is, and the one command that puts it back.
 func TestAFailedUpgradeSaysWhereTheSnapshotIs(t *testing.T) {
 	f := installed(t)
 	snaps := f.movingSnapshots()
@@ -331,16 +305,12 @@ func TestAFailedUpgradeSaysWhereTheSnapshotIs(t *testing.T) {
 		t.Fatalf("error does not say where the copy is:\n%v", err)
 	}
 
-	// The copy is the newest one per app, so a prune after a failed release
-	// never runs: there is nothing newer than it.
+	// Prune after a failed release never runs: nothing is newer than the copy.
 	if len(snaps.prunes) != 0 {
 		t.Fatalf("a failed apply pruned: %+v", snaps.prunes)
 	}
 }
 
-// A release that installs but whose wiring fails leaves the moved apps
-// running on the new image: the error says where the copy is, as a failed
-// upgrade's does.
 func TestAFailedWiringSaysWhereTheSnapshotIs(t *testing.T) {
 	f := installed(t)
 	snaps := f.movingSnapshots()
@@ -357,8 +327,6 @@ func TestAFailedWiringSaysWhereTheSnapshotIs(t *testing.T) {
 	}
 }
 
-// A copy that cannot be pruned costs disk, not the apply: the run still ends
-// with the release installed and a warning.
 func TestAPruneFailureIsAWarning(t *testing.T) {
 	f := installed(t)
 	f.movingSnapshots()
