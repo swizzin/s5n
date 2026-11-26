@@ -1,34 +1,27 @@
 package plan
 
-// defaults.go is what a plan says it decided by itself: the rules discovery
-// wrote as a default and the operator never answered. A default is never
-// silent, so the screen before the one confirm names what they did with them;
-// the ones that changed an app's own address are counted in that app's row, and
-// the ones that leave a stored value alone are said out loud.
+// defaults.go is what a plan decided by itself: a default is never silent, so
+// the screen before the confirm names each one and what it did.
 
 import "strconv"
 
 // Default is one rule the plan decided by itself, in the form a grouped screen
-// needs: what box decided about, in what words, and which app it settled as.
+// needs.
 type Default struct {
-	// App is the instance the address was rewritten to, "" for a rule that
-	// leaves the stored value alone and for a path rule, which names its
-	// instance in What.
+	// App is the instance the address was rewritten to; empty for a rule that
+	// leaves the value alone and for a path rule, which names it in What.
 	App string
-	// What is the subject of the line: the address and port box found, or
-	// "<instance>: <path>".
+	// What is the address and port box found, or "<instance>: <path>".
 	What string
-	// Why is the one line saying what box does with it and why. A rule with
-	// Default set but no Why is refused by the plan validation, so this is
-	// never empty.
+	// Why is the line saying what box does and why; plan validation refuses a
+	// default without one, so it is never empty.
 	Why string
-	// Kind is "address" or "path": what sort of stored value the rule is
-	// about, which is what a count of them is a count of.
+	// Kind is "address", "path" or "folder".
 	Kind string
 }
 
-// DefaultRules is every default rule in the plan, in the order Defaults prints
-// them: the host rules first, then each app's path rules.
+// DefaultRules is every default rule, hosts first, then each app's path
+// rules.
 func (p *Plan) DefaultRules() []Default {
 	var out []Default
 	for _, r := range p.Hosts {
@@ -52,9 +45,8 @@ func (p *Plan) DefaultRules() []Default {
 			out = append(out, Default{What: name + ": " + r.From, Why: r.Why, Kind: "path"})
 		}
 	}
-	// A library directory discovery had to choose between is a default too: it
-	// is a rename of the operator's own data, and the reason says which
-	// directory it took and which it did not.
+	// A library directory discovery had to choose is a default too: it renames
+	// the operator's own data.
 	if p.Data != nil {
 		for _, f := range p.Data.Folders {
 			if !f.Default {
@@ -66,10 +58,8 @@ func (p *Plan) DefaultRules() []Default {
 	return out
 }
 
-// Defaults is every default rule as the line a report says it in: what box
-// decided about and, in parentheses, what it will do and why. A rule with
-// Default set but no Why is refused by the plan validation, so a line here
-// never reads as an unexplained decision.
+// Defaults is every default rule as a report line: what box decided about and,
+// in parentheses, what it will do and why.
 func (p *Plan) Defaults() []string {
 	rules := p.DefaultRules()
 	out := make([]string, 0, len(rules))

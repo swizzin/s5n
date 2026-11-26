@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// hostsPlan is a source where the Arrs and the torrent client ran in one
-// namespace and a Seerr reached them by Service name. Every name is invented.
+// hostsPlan: the Arrs and the torrent client in one namespace, a Seerr reaching
+// them by Service name. Every name is invented.
 const hostsPlan = `version: 2
 data:
   root: /srv/library
@@ -74,9 +74,8 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-// pathsPlan is a source whose Ingress serves several apps on one public name,
-// which is the shape box itself installs: each app under its own path. One host
-// serves one app at every path, and one address is left alone.
+// pathsPlan: several apps on one public name, each under a path (box's own
+// shape), one host serving one app at every path, one address left alone.
 const pathsPlan = `version: 2
 apps:
   qbittorrent:
@@ -115,10 +114,8 @@ hosts:
     leave: true
 `
 
-// TestResolveURL: a host that serves several apps says which one an address
-// meant by its path -- the deepest path that covers it wins, on a segment
-// boundary -- and a host that only has path rules never answers an address with
-// no path, because the answer would be a guess between its apps.
+// TestResolveURL: the deepest path covering an address wins on a segment
+// boundary, and a host that only has path rules never answers one with no path.
 func TestResolveURL(t *testing.T) {
 	p := mustParse(t, pathsPlan)
 	tests := []struct {
@@ -152,10 +149,8 @@ func TestResolveURL(t *testing.T) {
 	}
 }
 
-// TestResolveNeverPicksAmongPaths: an address with no path is not evidence for
-// any of a host's apps, so Resolve -- which is what a caller without a path gets
-// -- leaves a host that only has path rules unclassified rather than naming one
-// of them.
+// TestResolveNeverPicksAmongPaths: an address with no path is no evidence for any
+// of a host's apps, so Resolve leaves it unclassified.
 func TestResolveNeverPicksAmongPaths(t *testing.T) {
 	p := mustParse(t, pathsPlan)
 	if got := p.Resolve("prowlarr", "panel.example.com", 443); got.Verdict != Unclassified {
@@ -230,9 +225,7 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 			}
 		})
 	}
-	// The same host at several paths, or at several ports, is several rules
-	// rather than a repeat: a host that serves the apps under paths is box's
-	// own shape, and a Service answers on more than one port.
+	// The same host at several paths or ports is several rules, not a repeat.
 	const many = "hosts: [{host: c, path: /a, app: q}, {host: c, path: /b, app: q}, {host: c, port: 80, app: q}, {host: c, port: 443, app: q}, {service: s.ns, app: q}]\n"
 	if _, err := Parse([]byte(base + many)); err != nil {
 		t.Errorf("a host at several paths or ports and a service is several rules, and Parse refused it: %v", err)
@@ -242,9 +235,6 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 	}
 }
 
-// TestOutsideNamesWorkloadsAndContainers: an outside entry is a workload, or one
-// container of one -- the sidecar in a catalog app's pod that the chart's pod
-// does not carry -- and both read back from the file.
 func TestOutsideNamesWorkloadsAndContainers(t *testing.T) {
 	p := mustParse(t, "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n"+
 		"outside: [media/gluetun, media/plex/plex-exporter]\n")
