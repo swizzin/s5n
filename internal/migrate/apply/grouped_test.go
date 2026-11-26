@@ -117,10 +117,6 @@ apps           carries    changes
 	}
 }
 
-// TestTheNotesAreSaidOnce: a note two apps report is one row naming both, not
-// two rows saying the same thing -- the report's duplicate that made the old
-// confirm four lines about one RemotePathMappings. The screen counts them; the
-// report is the page that names them.
 func TestTheNotesAreSaidOnce(t *testing.T) {
 	if rendered := renderGrouped(groupedFixture()); strings.Contains(rendered, "RemotePathMappings") {
 		t.Errorf("the screen lists a note, and the notes are a count with the report:\n%s", rendered)
@@ -135,9 +131,6 @@ func TestTheNotesAreSaidOnce(t *testing.T) {
 	}
 }
 
-// TestADefaultThatRewroteAnAddressIsCounted: the plan's own address decision is
-// one of that app's rewrites, so it is in the count and is not a line of its
-// own; a default that left a value alone is said once, by what it is.
 func TestADefaultThatRewroteAnAddressIsCounted(t *testing.T) {
 	rendered := renderGrouped(groupedFixture())
 	if strings.Contains(rendered, "10.244.0.5:8989") {
@@ -151,10 +144,6 @@ func TestADefaultThatRewroteAnAddressIsCounted(t *testing.T) {
 	}
 }
 
-// TestTheNotMigratedListFoldsToItsCount: the workloads box has no app for are a
-// count on the screen and one row per namespace in the report. A person deciding
-// to move a seedbox reads the apps; the list of what stays behind is a page, not
-// a paragraph before the question (rule 7).
 func TestTheNotMigratedListFoldsToItsCount(t *testing.T) {
 	rendered := renderGrouped(groupedFixture())
 	if strings.Contains(rendered, "actualbudget") {
@@ -181,8 +170,6 @@ func TestTheNotMigratedListFoldsToItsCount(t *testing.T) {
 	}
 }
 
-// TestAFinalRunHasNoRehearsalLead: the lead line is what a rehearsal is; a real
-// run's own facts are the renames under data.
 func TestAFinalRunHasNoRehearsalLead(t *testing.T) {
 	s := groupedFixture()
 	s.Rehearsal = false
@@ -191,9 +178,6 @@ func TestAFinalRunHasNoRehearsalLead(t *testing.T) {
 	}
 }
 
-// TestANoteTheConfirmShowedIsNotPrintedAgain: the Write pass reports the same
-// notes its Check did, and the confirm already showed those once. Only a note
-// nobody could see before the write belongs after the run.
 func TestANoteTheConfirmShowedIsNotPrintedAgain(t *testing.T) {
 	shown := []string{"its own login is switched off; you sign in through the box"}
 	wrote := append(append([]string(nil), shown...), "one table was emptied on purpose")

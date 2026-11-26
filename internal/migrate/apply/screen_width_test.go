@@ -10,9 +10,6 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// A column is as wide as a person sees it, not as many bytes as it holds: an
-// arrow is one column and three bytes, and a row with one would push every
-// column after it out of line.
 func TestAColumnWithAnArrowLinesUp(t *testing.T) {
 	var buf bytes.Buffer
 	out := &say.Plain{W: &buf, Err: &buf}
@@ -46,8 +43,6 @@ func TestAColumnWithAnArrowLinesUp(t *testing.T) {
 	}
 }
 
-// Wrapping counts columns too: a line of arrows that fits in the width is one
-// line, not two.
 func TestWrapCountsColumnsNotBytes(t *testing.T) {
 	text := strings.Repeat("a → b · ", 9) // 72 columns, 108 bytes
 	text = strings.TrimSpace(text)

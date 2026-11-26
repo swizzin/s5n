@@ -1,14 +1,8 @@
 package apply
 
-// decide.go is the guided run's half of settle.go: the operator answers each
-// default, and the answers become the plan's rules.
-//
-// A default is a decision Settle made because nothing else could, and the
-// maintainer's rule is that a default is never silent. So a guided run shows
-// the same lines report.txt carries, asks one question per address, and writes
-// every answer into the rule it replaces. An unattended run takes them all and
-// says so; this file is what makes the answered default a rule the operator
-// chose rather than a default nobody looked at.
+// decide.go is settle.go's guided half: the operator answers each address default
+// and the answer becomes the rule. A default is never silent, so each is asked and
+// written into the rule it replaces; an unattended run takes them all and says so.
 
 import (
 	"fmt"
@@ -33,14 +27,9 @@ type Choice struct {
 	Holds []SettledHold
 }
 
-// Decide asks about every address Settle left as a default, and writes the
-// answers into the plan. ask answers one choice with the app to point it at, or
-// "" to leave it as it is.
-//
-// It returns the decisions as they now stand: an answered value moves to the
-// group its answer names, carries the answer as its reason, and stops being a
-// default. Nothing else in the list changes, and a plan with no address default
-// is returned as it was.
+// Decide asks about every address default and writes the answers in; ask returns
+// the app or "" to leave it. Answered values stop being defaults; nothing else in
+// the list changes.
 func Decide(p *plan.Plan, s Settled, ask func(Choice) (string, error)) (Settled, error) {
 	if p == nil {
 		return nil, fmt.Errorf("decide: no plan: there is nothing to decide")
@@ -49,9 +38,7 @@ func Decide(p *plan.Plan, s Settled, ask func(Choice) (string, error)) (Settled,
 	for _, g := range s {
 		for _, it := range g.Items {
 			if it.Host == "" {
-				// A path or a check: box has no alternative to offer. The
-				// decision stands and stays in the list, so the report still
-				// says what happens to it.
+				// A path or a check has no alternative: it stays in the list.
 				out.add(g.Action, it)
 				continue
 			}
@@ -85,8 +72,7 @@ func Decide(p *plan.Plan, s Settled, ask func(Choice) (string, error)) (Settled,
 	return out, nil
 }
 
-// answerWhy is what an answered value's line says: the decision is the
-// operator's now, and the report keeps the reason it was asked about.
+// answerWhy says the decision is the operator's, keeping the reason asked about.
 func answerWhy(app string) string {
 	if app == "" {
 		return "you chose to leave it as stored"
@@ -94,9 +80,8 @@ func answerWhy(app string) string {
 	return "you chose " + app
 }
 
-// setAddressRule writes one answer into the rule Settle made for an address.
-// Only a default is ever replaced: a rule the operator wrote is the answer
-// already, and Settle never asks about one.
+// setAddressRule writes one answer into Settle's rule; only a default is ever
+// replaced.
 func setAddressRule(p *plan.Plan, host string, port int, app string) error {
 	for i := range p.Hosts {
 		r := &p.Hosts[i]
@@ -112,8 +97,8 @@ func setAddressRule(p *plan.Plan, host string, port int, app string) error {
 	return fmt.Errorf("%s:%d is not a default in this plan, so there is no rule for the answer", host, port)
 }
 
-// sameAddress compares two stored hosts the way a rule does: DNS names are
-// case-insensitive, and brackets or a trailing dot are spelling.
+// sameAddress compares hosts as a rule does: case-insensitive, brackets and a
+// trailing dot are spelling.
 func sameAddress(a, b string) bool {
 	key := func(h string) string { return strings.ToLower(strings.TrimSuffix(strings.Trim(h, "[]"), ".")) }
 	return key(a) == key(b)

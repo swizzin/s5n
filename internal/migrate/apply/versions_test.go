@@ -13,9 +13,6 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// TestATagReadsAsTheVersionAPersonSeesIt: the tags apps really publish, and the
-// part of each that is the version. The build (Plex's 1.43.5.11079, Sonarr's
-// 5.0.0.3041) and the packaging (qBittorrent's -lt1.2) are not it.
 func TestATagReadsAsTheVersionAPersonSeesIt(t *testing.T) {
 	for _, tc := range []struct {
 		image string
@@ -43,9 +40,6 @@ func TestATagReadsAsTheVersionAPersonSeesIt(t *testing.T) {
 	}
 }
 
-// TestTheReleaseAgainstTheSource: the order the column shows, by the parts a
-// person reads. A build number is not a version, so two builds of one version are
-// one version.
 func TestTheReleaseAgainstTheSource(t *testing.T) {
 	for _, tc := range []struct {
 		source, release string
@@ -73,9 +67,6 @@ func TestTheReleaseAgainstTheSource(t *testing.T) {
 	}
 }
 
-// TestTheColumnSaysOneVersionOrTwo: one version when there is nothing to say,
-// the pair with its direction when there is, `?` when a side could not be read,
-// and nothing at all when this run had no chart.
 func TestTheColumnSaysOneVersionOrTwo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -108,9 +99,6 @@ func versionFixture() Summary {
 	return s
 }
 
-// TestTheVersionColumnIsATableColumn: the heading, and the versions lined up in
-// it, with each row's own direction. A downgrade is a row in the block that needs
-// a person, because it is the one thing here that refuses.
 func TestTheVersionColumnIsATableColumn(t *testing.T) {
 	var out strings.Builder
 	for _, block := range versionFixture().Grouped().Blocks {
@@ -134,8 +122,6 @@ func TestTheVersionColumnIsATableColumn(t *testing.T) {
 	}
 }
 
-// TestTheReportCarriesTheSameColumn: the page has the version where the screen
-// has it, so the two cannot disagree about which version a person agreed to.
 func TestTheReportCarriesTheSameColumn(t *testing.T) {
 	doc := versionFixture().Report("final", "/var/lib/s5n/migrate/x.tar.gz", time.Date(2026, 11, 23, 4, 50, 0, 0, time.UTC), "0.6.3")
 	var apps string
@@ -161,10 +147,6 @@ func TestTheReportCarriesTheSameColumn(t *testing.T) {
 	}
 }
 
-// TestAPlanWithNoChartSaysNothingAboutVersions: a summary built without one is
-// the screen box printed before this column existed, which is what keeps a caller
-// that cannot ask the chart (a test, an older flow) honest rather than a column of
-// question marks.
 func TestAPlanWithNoChartSaysNothingAboutVersions(t *testing.T) {
 	m := &migration{p: &plan.Plan{Apps: map[string]plan.App{"sonarr": {Kind: plan.Kubernetes}}}, env: Env{}}
 	if got := m.version("sonarr"); got.Cell() != "" {

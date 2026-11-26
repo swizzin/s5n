@@ -1,15 +1,10 @@
 package apply
 
-// carry.go is what one run stages out of an app whose config is more than its
-// state: the tree the snapshot carries, or -- when the plan says the tree and the
-// config path cannot hold it -- the state alone, with the numbers.
-//
-// The snapshot's own copy is the read's decision (cmd/box, `--plex-minimal`), and
-// it is in the plan. This is the other end: the config root the copy lands on,
-// which on a host that is both ends of the migration is the same machine and may
-// be a smaller filesystem. A run that finds no room there carries less than the
-// plan says and says so, because the alternative is failing after the box is
-// installed with a snapshot that cannot be used at all.
+// carry.go is what a run stages of a config that is more than its state: the tree,
+// or the state alone when the config root cannot hold it. The snapshot's copy is
+// the read's decision in the plan; this is the other end, which may be a smaller
+// filesystem. A run that finds no room carries less and says so, rather than
+// failing after the install with an unusable snapshot.
 
 import (
 	"fmt"
@@ -22,16 +17,9 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/space"
 )
 
-// Bulk is what a snapshot holds of one app's config beyond the extract apply's
-// checks read: the whole data of the one app whose config is a library as well as
-// its state (Plex's artwork and thumbnails), which is tens of gigabytes and which
-// no check reads.
-//
-// A migration stages that bulk once, out of the snapshot itself, straight into the
-// staging tree that becomes the app's config directory: it is never extracted
-// beside the checks, never copied into a second temporary tree, and its numbers
-// come from the pass that verified the archive rather than a walk of a tree that
-// is not on the host.
+// Bulk is what a snapshot holds beyond the extract the checks read: Plex's artwork
+// and thumbnails. A run stages it once, straight from the snapshot into the staging
+// tree, and its numbers come from the verifying pass rather than a walk.
 type Bulk interface {
 	// HoldsTree reports whether the snapshot's copy of one instance is its whole
 	// data, and the extract apply reads kept the state alone. A run stages what
@@ -40,8 +28,7 @@ type Bulk interface {
 	// Measure is what staging one instance writes at the config root, counted as
 	// the snapshot was verified.
 	Measure(instance string) (Staged, error)
-	// Stage writes the whole of one instance's config into dst, which must not
-	// exist, owned by uid:gid, and reports what it wrote.
+	// Stage writes one instance's whole config into dst, owned by uid:gid.
 	Stage(instance, dst string, uid, gid int) (Staged, error)
 }
 
@@ -64,10 +51,8 @@ func (m *migration) decideCarry() error {
 		app := m.p.Apps[name]
 		d := carryDecision{Full: app.Carry == plan.CarryFull}
 		if d.Full && m.env.Bulk != nil && !m.env.Bulk.HoldsTree(name) {
-			// A plan that says the whole data over a snapshot that carried the
-			// state is a plan edited by hand: what this run stages is the state,
-			// and the row says what the bytes are rather than what the plan
-			// hoped.
+			// A hand-edited plan claiming whole data over a state snapshot: the run
+			// stages the state and says what the bytes are.
 			d.Full = false
 		}
 		if d.Full {
@@ -79,11 +64,8 @@ func (m *migration) decideCarry() error {
 			if err != nil {
 				return fmt.Errorf("apps.%s: the room its whole data needs at %s: %w", name, m.env.ConfigRoot, err)
 			}
-			// One copy: the snapshot is written already, and what lands here is
-			// the instance's directory. The staging tree it is written into is
-			// on the same filesystem and is what moves into place, so the two
-			// are one copy, not two. A run that extracted part of the snapshot
-			// beside it has already spent those bytes, and this asks what is left.
+			// One copy: the staging tree is what moves into place. Bytes already
+			// extracted beside it are spent, so the remaining room is asked.
 			if v := space.Choose(size, []space.Place{{Path: m.env.ConfigRoot, Free: free}}); !v.Fits() {
 				d.Full = false
 				d.Short = fmt.Sprintf("%s: its whole data needs %s and %s is free at %s; carrying its state instead, so Plex builds its artwork, thumbnails and detection again",
@@ -98,9 +80,7 @@ func (m *migration) decideCarry() error {
 	return nil
 }
 
-// carrySize is how many bytes one app's whole data is: what the snapshot holds of
-// it when the caller can say (the pass that verified the archive counted it), and
-// the tree this run has beside its checks otherwise.
+// carrySize is the whole data's bytes, from the verifying pass when it can say.
 func (m *migration) carrySize(name string) (int64, error) {
 	if m.env.Bulk != nil {
 		staged, err := m.env.Bulk.Measure(name)
@@ -136,14 +116,8 @@ func (m *migration) freeAt(path string) (int64, error) {
 	return disk.Free(path)
 }
 
-// carried is what one app's config holds once this run has staged it: the note a
-// report and a confirm say, and the phrase the app's row carries. Both are empty
-// for every app whose config is its state.
-//
-// What it says follows the bytes this run writes, not the plan alone: decideCarry
-// has already been through the snapshot's own copy (Bulk.HoldsTree, which is what
-// the archive holds) and the room at the config root, so Full is the tree when the
-// tree is what lands there, and the state when it is not.
+// carried is what an app's config holds after staging, following the bytes written
+// rather than the plan: tree when it lands, state when not.
 func (m *migration) carried(name string) (note, phrase string) {
 	if CatalogApp(name, m.env.Catalog) != appPlex {
 		return "", ""
@@ -162,17 +136,9 @@ func appText(name, line string) string {
 	return strings.TrimSpace(strings.TrimPrefix(line, name+": "))
 }
 
-// stageTrimmed stages one app's state out of a config directory that holds its
-// whole data: the files the plan's minimal carry names, under the directory the
-// app's home is in, with the directories above them, under the same rules as a
-// whole-tree copy (modes and times kept, links carried or skipped by
-// internal/linktree).
-//
-// The state is written where the app reads it. A config directory whose home is
-// one directory down (the image's own /config/Library/Application Support) stages
-// the state under that path, not at the top of the mount: an app that finds no
-// Preferences.xml writes itself a new identity, which is the one thing a
-// migration must not make it do.
+// stageTrimmed stages the state under the app's home, not at the mount's top: an
+// app that finds no Preferences.xml writes itself a new identity, the one thing a
+// migration must not cause.
 func stageTrimmed(dst, src string, state plex.Scope, uid, gid int) (Staged, error) {
 	names := make([]string, len(state.Files))
 	for i, f := range state.Files {
@@ -181,9 +147,7 @@ func stageTrimmed(dst, src string, state plex.Scope, uid, gid int) (Staged, erro
 	return copyFiles(dst, src, names, uid, gid)
 }
 
-// homeRelative is where one app's home is inside the config directory at dir, in
-// slash form: empty when it is the directory itself, which is a path.Join with
-// nothing in front of it.
+// homeRelative is the app's home inside its config directory, empty for the root.
 func homeRelative(dir string, state plex.Scope) string {
 	home, err := filepath.Rel(dir, carriedDir(dir, state.Sub))
 	if err != nil || home == "." {
@@ -192,9 +156,7 @@ func homeRelative(dir string, state plex.Scope) string {
 	return filepath.ToSlash(home)
 }
 
-// carriedDir is where one app's own data is inside the config directory the
-// snapshot carries: Plex's home, or the directory itself when the source kept its
-// files at the top of the mount.
+// carriedDir is the app's own data directory inside the snapshot's copy.
 func carriedDir(dir, sub string) string {
 	if home, err := plex.Home(dir); err == nil {
 		return filepath.Join(dir, filepath.FromSlash(home))

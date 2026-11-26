@@ -120,10 +120,6 @@ func (f *plexFixture) plan() (*plan.Plan, []byte) {
 	return p, []byte(f.doc)
 }
 
-// A migrated Plex that was signed in to an account carries the account's token
-// in its own settings file, and the release Secret is where every Plex-dependent
-// app reads it from: the run seeds it, says so on the confirm's Plex row, and
-// names the key it wrote.
 func TestMigrateSeedsThePlexTokenFromPreferences(t *testing.T) {
 	f := newPlexFixture(t, plexPrefs)
 	var shown Summary
@@ -155,9 +151,6 @@ func TestMigrateSeedsThePlexTokenFromPreferences(t *testing.T) {
 	}
 }
 
-// A person's own token wins. The release Secret's plex-token is the one key a
-// box can be given before a migration, and a run that wrote the source's over it
-// would silently move every Plex-dependent app onto a different account.
 func TestMigrateNeverWritesOverAPlexTokenTheBoxAlreadyHas(t *testing.T) {
 	f := newPlexFixture(t, plexPrefs)
 	const handSet = "token-a-person-supplied"
@@ -186,11 +179,6 @@ func TestMigrateNeverWritesOverAPlexTokenTheBoxAlreadyHas(t *testing.T) {
 	}
 }
 
-// A Plex that was never signed in has no token to seed: the Secret keeps no
-// plex-token, the confirm says nothing about one, and the rows that need it
-// report pending -- which is the wiring's business, not this run's. (A copy with
-// no Preferences.xml at all is Plex's own check's business: it refuses a config
-// directory that holds neither that file nor the library database.)
 func TestMigrateSeedsNothingWhenPlexWasNeverSignedIn(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -216,9 +204,6 @@ func TestMigrateSeedsNothingWhenPlexWasNeverSignedIn(t *testing.T) {
 	}
 }
 
-// A rehearsal is the same read: the token comes from the snapshot's own copy, so
-// the box's lock (no internet egress) changes nothing here. What it wrote before
-// the lock is what the wiring Job then reads.
 func TestMigrateSeedsThePlexTokenInARehearsalToo(t *testing.T) {
 	f := newPlexFixture(t, plexPrefs)
 	env := f.env(yes(t, &Summary{}))
@@ -236,11 +221,6 @@ func TestMigrateSeedsThePlexTokenInARehearsalToo(t *testing.T) {
 	}
 }
 
-// The pass before an install promises the Plex token too. That pass stages
-// nothing of a Plex whose whole data travels -- the snapshot is counted, not
-// copied -- so a token read out of the staged copy is there for the run and not
-// for the question, and the run refuses itself for saying more than it was
-// agreed to. Both passes read the token out of the snapshot's own copy.
 func TestThePassBeforeAnInstallPromisesThePlexToken(t *testing.T) {
 	env, p, raw, bulk := plexSplitEnv(t)
 	env.Disk = shortDisk{free: 1 << 40}

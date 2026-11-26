@@ -129,9 +129,6 @@ func (f *fixture) writeSonarrInstance(name, folder, category string) {
 	)
 }
 
-// TestRunRenamesTheLibraryOntoBoxsCategories: the source's TV and 4K/TV become
-// media/tv and media/tv-4k, the emptied 4K parent goes, and the download tree is
-// not touched at all.
 func TestRunRenamesTheLibraryOntoBoxsCategories(t *testing.T) {
 	f := mediaFixture(t)
 	downloadsBefore := hashTree(t, filepath.Join(f.dataRoot, "Downloads"))
@@ -167,8 +164,6 @@ func TestRunRenamesTheLibraryOntoBoxsCategories(t *testing.T) {
 	}
 }
 
-// TestRunLeavesTheLibraryAloneInARehearsal: a rehearsal renames nothing on disk,
-// and its summary promises nothing it will not do.
 func TestRunLeavesTheLibraryAloneInARehearsal(t *testing.T) {
 	f := mediaFixture(t)
 	before := hashTree(t, f.dataRoot)
@@ -186,9 +181,6 @@ func TestRunLeavesTheLibraryAloneInARehearsal(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAFullTargetBeforeItMoves: a directory already at the category's
-// name with files in it is the operator's data, and moving the source onto it
-// would either lose it or copy it. Nothing moves.
 func TestRunRefusesAFullTargetBeforeItMoves(t *testing.T) {
 	f := mediaFixture(t)
 	writeFile(t, filepath.Join(f.dataRoot, "media", "tv", "theirs.mkv"), "someone else's\n", 0o644)
@@ -203,9 +195,6 @@ func TestRunRefusesAFullTargetBeforeItMoves(t *testing.T) {
 	sameTree(t, "the data root", before, hashTree(t, f.dataRoot))
 }
 
-// TestRunResumesARenameItDidNotRecord: a run that renamed a directory and
-// stopped before recording it leaves the target where it belongs, so the next
-// run records it and does the rest instead of renaming the source again.
 func TestRunResumesARenameItDidNotRecord(t *testing.T) {
 	f := mediaFixture(t)
 	if err := os.Rename(filepath.Join(f.dataRoot, "media", "TV"), filepath.Join(f.dataRoot, "media", "tv")); err != nil {
@@ -227,9 +216,6 @@ func TestRunResumesARenameItDidNotRecord(t *testing.T) {
 	}
 }
 
-// TestRunRenamesNestedDirectoriesInTheLibrarysOwnName: the source's library is
-// called something else, so the two contract renames come first and the folders
-// are renamed inside the name box gives it.
 func TestRunRenamesNestedDirectoriesInTheLibrarysOwnName(t *testing.T) {
 	f := mediaFixture(t)
 	f.doc = strings.Replace(f.doc, "  media: media\n", "  media: library\n", 1)

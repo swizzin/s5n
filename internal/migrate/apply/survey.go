@@ -1,20 +1,10 @@
 package apply
 
-// survey.go is the summary before there is a box: the same Preflight, staging
-// copy and Check pass Run makes, with the one thing a host with no seedbox cannot
-// do left to the run after the install.
-//
-// A migration on a host with no box installs a cluster, a platform layer and an
-// empty release, and only then adopts into it. Asking its one question after all
-// that is asking about writes that already happened, so the question comes first
-// and is asked of what the run would do: this pass. What it cannot know is the
-// one app whose rewriter runs the app's own image -- there is no release to run
-// one in yet -- so that app's check is deferred, its row says so, and the run
-// after the install makes it before anything of the snapshot moves (Run).
-//
-// The pass writes only inside the config root it is given, which the caller
-// throws away: staging is how a copy is measured, and the bytes it measures are
-// not a seedbox.
+// survey.go is the summary before there is a box: Preflight, staging and Check as
+// Run makes them, with the app whose rewriter needs its own image deferred to the
+// run after the install. The question must come before a host installs anything,
+// so it is asked of what that run would do. The pass writes only inside the config
+// root the caller throws away.
 
 import (
 	"context"
@@ -24,15 +14,9 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// Survey is the pre-install pass: the summary Run would show, from the same plan
-// and the same snapshot, without a cluster.
-//
-// env.ConfigRoot must be a directory the caller owns and removes: the staging
-// copy, the state record and everything else this pass writes live inside it, and
-// nothing else on the host is touched. env.Run, env.Secret, env.Owned and
-// env.Values are not used: the apps that would need them are the ones whose
-// check is deferred, and this pass writes no key, adopts no connection and
-// switches nothing on.
+// Survey is the pre-install pass from the same plan and snapshot, without a
+// cluster. env.ConfigRoot is the caller's to remove; Run, Secret, Owned and Values
+// are unused, since this pass writes no key and switches nothing on.
 func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summary, error) {
 	env.deferred = true
 	m := &migration{p: p, env: env, id: PlanID(planBytes), checks: map[string]rewrite.Report{}, deferred: map[string]bool{}}
@@ -66,25 +50,15 @@ func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summa
 // the same way in the grouped screen and the plain list.
 func deferredSentence(app string) string {
 	if app == appPlex {
-		// Plex is the app whose config is a database only Plex's own binary may
-		// write, so its check is a query through the pinned image rather than a
-		// read of the file.
+		// Plex's check needs its own image, not a read of the file.
 		return "its databases are checked once Plex's image runs"
 	}
 	return "its config is checked once the app's image runs"
 }
 
-// Holds reports whether s is the summary the operator agreed to: the same lines,
-// except the rows of the apps the agreement said would be checked once their
-// image runs, and of an app that this run finds no room for at the config root.
-// Both sides of those exceptions are dropped, because neither is something the
-// question could know: the check runs after the install, and the room is the
-// config path's, which a host with no box is asked for later.
-//
-// The snapshot and the plan are read twice, so a difference that is not one of
-// those is a fault: the operator agreed to one summary, and the run would do
-// another. The returned sentence names the first difference, and is empty when
-// the two summaries are the same.
+// Holds reports whether s is the summary agreed to, ignoring what the question
+// could not know: a deferred check's rows and an app the disk forced smaller. Any
+// other difference names the first.
 func (s Summary) Holds(agreed Summary) string {
 	deferred := map[string]bool{}
 	short := map[string]bool{}
@@ -118,12 +92,9 @@ func (s Summary) Holds(agreed Summary) string {
 	return ""
 }
 
-// linesFor is the summary's lines with the named apps reduced to the one thing this
-// comparison is allowed to know about them: that they are there, and what they
-// carry. A deferred app's check has not run on one side and has on the other, so
-// everything its check reports is dropped from both; an app whose carry a run
-// had to cut down for room is dropped the same way, down to the bytes it staged,
-// because the question could not see the disk it lands on.
+// linesFor reduces the named apps to what the comparison may know: that they are
+// there and what they carry, dropping a check that ran on one side and a cut-down
+// carry the question could not see.
 func (s Summary) linesFor(deferred, short map[string]bool) []string {
 	if len(deferred) == 0 && len(short) == 0 {
 		return s.Lines()

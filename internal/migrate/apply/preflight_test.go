@@ -136,11 +136,6 @@ func TestPreflightRefusals(t *testing.T) {
 	}
 }
 
-// TestPreflightAcceptsTheBoxsOwnRenameTarget: the release's wiring Job makes
-// /data/downloads/<category> for every Arr the seedbox runs, so a box that was
-// installed with any Arr on hands migrate a target that exists and holds only
-// empty directories. That is not the operator's data to move: the rename
-// removes it and proceeds.
 func TestPreflightAcceptsTheBoxsOwnRenameTarget(t *testing.T) {
 	f := newFixture(t)
 	for _, dir := range []string{"downloads/movies", "downloads/tv/subdir"} {
@@ -154,8 +149,6 @@ func TestPreflightAcceptsTheBoxsOwnRenameTarget(t *testing.T) {
 	}
 }
 
-// TestPreflightCollectsEveryProblem: one pass names everything, not the first
-// thing, because the plan is a page a person edits.
 func TestPreflightCollectsEveryProblem(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -173,8 +166,6 @@ func TestPreflightCollectsEveryProblem(t *testing.T) {
 	}
 }
 
-// TestPreflightRefusesAHalfDoneOtherPlan: two plans share two roots, so the
-// second has to wait for the first to finish.
 func TestPreflightRefusesAHalfDoneOtherPlan(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -211,9 +202,6 @@ func TestPreflightRefusesAHalfDoneOtherPlan(t *testing.T) {
 	}
 }
 
-// TestPreflightRefusesWhateverTheRecordSaysWhenTheRootsDisagree: the state file
-// excuses the two checks it records (the instance directory and the renames),
-// and nothing else.
 func TestPreflightExcusesOnlyWhatItRecorded(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
@@ -260,9 +248,6 @@ func (liar) Write(context.Context, rewrite.Input) (rewrite.Report, error) {
 	return rewrite.Report{Changes: []rewrite.Change{{File: "x.db", Where: "T.C", What: "path", Count: 2}}}, nil
 }
 
-// TestRunRefusesAWriteThatDiffersFromItsCheck: the second pass is what the
-// operator approved, and anything else is a rewriter bug that must not reach
-// the config root.
 func TestRunRefusesAWriteThatDiffersFromItsCheck(t *testing.T) {
 	f := newFixture(t)
 	doc := "version: 2\napps:\n  " + testApp + ":\n    kind: kubernetes\n    source: " + testApp +

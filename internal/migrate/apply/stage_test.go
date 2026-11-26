@@ -140,12 +140,6 @@ func TestCopyTreeRefusesWhatCanLeave(t *testing.T) {
 	}
 }
 
-// TestCopyTreeSkipsAKernelLink: the images point their log at the container's
-// own stdout, so every qBittorrent config directory a real host holds carries a
-// link into /proc. That is the pod's plumbing, not a file in the tree: the copy
-// leaves it out and the app writes it again on start. Refusing it made a real
-// qBittorrent install uncopyable, which is how this was found (hack/e2e-box.sh,
-// migrate).
 func TestCopyTreeSkipsAKernelLink(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "qBittorrent", "qBittorrent.conf"), "conf", 0o600)
@@ -168,8 +162,6 @@ func TestCopyTreeSkipsAKernelLink(t *testing.T) {
 	}
 }
 
-// TestCopyTreeChownsToTheRelease: every entry belongs to the release's uid, not
-// to whoever ran box.
 func TestCopyTreeChownsToTheRelease(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a", "b.txt"), "b", 0o600)

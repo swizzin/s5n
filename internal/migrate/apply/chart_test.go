@@ -66,9 +66,6 @@ func chartValues(t *testing.T) map[string]any {
 	return values
 }
 
-// TestTargetsCoverEveryCatalogApp: every app the chart installs has an endpoint,
-// named after the instance the chart names its Service after, on the port the
-// chart's values give it.
 func TestTargetsCoverEveryCatalogApp(t *testing.T) {
 	apps := catalogApps(t)
 	values := chartValues(t)
@@ -111,10 +108,6 @@ func TestTargetsCoverEveryCatalogApp(t *testing.T) {
 	}
 }
 
-// TestURLBasesMatchTheTemplates: the URL base is the one thing about an endpoint
-// the values cannot say, because the chart computes it from the instance name.
-// Each app's answer is checked against the template that gives it, and an app
-// with no answer of its own is refused by Targets rather than guessed at.
 func TestURLBasesMatchTheTemplates(t *testing.T) {
 	apps := catalogApps(t)
 	workloads := readChart(t, filepath.Join("templates", "workloads.yaml"))
@@ -191,8 +184,6 @@ func topLevelBlock(doc, name string) string {
 	return strings.Join(lines[start+1:], "\n")
 }
 
-// TestCatalogAppNamesInstances: the instance-to-app mapping is discovery's rule
-// read backwards, so the two cannot disagree about which app a plan entry is.
 func TestCatalogAppNamesInstances(t *testing.T) {
 	catalog := []string{"sonarr", "radarr", "qbittorrent", "prowlarr"}
 	cases := []struct{ instance, app, suffix string }{
@@ -217,9 +208,6 @@ func TestCatalogAppNamesInstances(t *testing.T) {
 	}
 }
 
-// TestInstancesMatchesTheChart: the instance list is s5n.instances, read for
-// the endpoints a rewriter may meet. An app switched off is not an endpoint; an
-// instance entry that is off is not one either.
 func TestInstancesMatchesTheChart(t *testing.T) {
 	values := map[string]any{"apps": map[string]any{
 		"sonarr": map[string]any{"enabled": true, "port": 8989, "instances": []any{
@@ -244,9 +232,6 @@ func TestInstancesMatchesTheChart(t *testing.T) {
 	}
 }
 
-// TestImageResolvesLikeTheTemplate: the image a Job runs is the one the chart
-// renders for the app, tag and digest together, with a values pin winning the
-// way _helpers.tpl lets it.
 func TestImageResolvesLikeTheTemplate(t *testing.T) {
 	variants := []byte(readChart(t, "variants.yaml"))
 	values := chartValues(t)
@@ -284,8 +269,6 @@ func TestImageResolvesLikeTheTemplate(t *testing.T) {
 	}
 }
 
-// TestIntValue: the values documents box holds carry Go ints, and one that came
-// through JSON carries a float; both are the port a chart value names.
 func TestIntValue(t *testing.T) {
 	for _, tc := range []struct {
 		in   any
@@ -307,10 +290,6 @@ func TestIntValue(t *testing.T) {
 	}
 }
 
-// TestWiringImageIsTheOneTheReleaseRuns: the rehearsal's probe pods run the s5n
-// image the release's own Job runs, resolved the way the chart's template does.
-// The chart's s5n variant carries no tag of its own; the release's appVersion
-// is what fills it, and a pinned tag or digest narrows it inside the repository.
 func TestWiringImageIsTheOneTheReleaseRuns(t *testing.T) {
 	variants := []byte(readChart(t, "variants.yaml"))
 	img, err := WiringImage(variants, "0.5.0", chartValues(t))

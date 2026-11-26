@@ -1,10 +1,8 @@
 package apply
 
-// grouped.go is the confirm's summary as a person reads it: one row per app
-// with what it carries and what changes, one block for what needs them, one for
-// the notes, and what was not migrated folded by namespace. The per-column list
-// (Summary.Lines) stays the report's and `--details`' account of the same run:
-// this file only decides what a review screen shows, never what apply does.
+// grouped.go is the confirm's summary as a person reads it. Summary.Lines remains
+// the report's account; this file decides what a review screen shows, never what
+// apply does.
 
 import (
 	"fmt"
@@ -25,39 +23,28 @@ const (
 	stateKept = "kept"
 )
 
-// Group is one block of the confirm: its heading, the columns its rows read in,
-// and the rows. A group with Columns is a table -- the heading, then one column
-// heading per fact -- and one without is a list of rows whose facts are a
-// sentence each. The block itself is say's, so the confirm and every other
-// command's table are one mechanism.
+// Group is one block: a heading, columns and rows; the block itself is say's, so
+// every command's table is one mechanism.
 type Group = say.Group
 
 // Grouped is the summary as the one confirm shows it.
 type Grouped struct {
-	// Lead is the first line: what this run is, when that is not obvious from
-	// the rows (a rehearsal leaves this box and renames nothing).
+	// Lead is the first line, when the rows do not say what the run is.
 	Lead string
-	// Blocks are the tables, in the order a person reads them: the apps,
-	// the data that moves, what needs them, what to know, what is not coming.
+	// Blocks are the tables in reading order.
 	Blocks []Group
 	// Footer points at the whole account of the run.
 	Footer string
 }
 
-// Grouped renders the summary in the shape the confirm uses. It reads nothing
-// but the summary: the same run rendered with --details prints Lines instead.
-//
-// The notes are counted, not listed: a note is something to know, and a dozen of
-// them is the paragraph before the question that rule 7 replaced with a page
-// (Summary.Report). What a person must act on stays as its own row.
+// Grouped renders the confirm's shape from the summary alone. Notes are counted,
+// not listed (rule 7); what a person must act on keeps its own row.
 func (s Summary) Grouped() Grouped {
 	var g Grouped
 	if s.Rehearsal {
 		g.Lead = "rehearsal · nothing leaves this box · no data is renamed"
 	}
-	// The version column exists when this run had a chart to compare against: a
-	// caller with none says nothing about versions rather than a column of
-	// question marks.
+	// No chart means no version column, rather than a column of question marks.
 	versions := s.versions()
 	columns := []string{"carries", "changes"}
 	if versions {
@@ -89,13 +76,10 @@ func (s Summary) versions() bool {
 	return false
 }
 
-// foldAt is how many apps the confirm lists before it folds the rest into one
-// row: a person deciding to move a seedbox reads the apps, and a list past a
-// dozen is one nobody reads (rule 7). The report and --details carry every row.
+// foldAt folds a list past a dozen into one row (rule 7); the report carries all.
 const foldAt = 8
 
-// footer is the one line under the blocks: what a person did not get to see in
-// full, by count, and the flag that shows it.
+// footer is the line under the blocks: what was not shown, by count, and the flag.
 func (s Summary) footer() string {
 	var facts []string
 	if notes := s.noteCount(); notes > 0 {
@@ -137,11 +121,8 @@ func (s Summary) leftCount() int {
 	return n
 }
 
-// appRows is one row per app: what it carries, the version it moves from and to,
-// and the one or two facts a person acts on.
-//
-// The first two facts are columns, so the sizes and the versions line up and a
-// person compares them down the block; everything else is what changes.
+// appRows is one row per app: carried size and versions in columns, then what
+// changes.
 func (s Summary) appRows(versions bool) []say.TableRow {
 	rows := make([]say.TableRow, 0, len(s.Instances)+1)
 	for i, in := range s.Instances {
@@ -169,8 +150,7 @@ func (s Summary) appRows(versions bool) []say.TableRow {
 	return rows
 }
 
-// changesOf is one app's row after the column: what it carries that is not a
-// size, and every count of what changes.
+// changesOf is what a row says after the columns.
 func changesOf(in InstanceSummary) string {
 	var facts []string
 	if in.Carry != "" {
@@ -201,10 +181,7 @@ func changesOf(in InstanceSummary) string {
 	return strings.Join(facts, " · ")
 }
 
-// appFacts is one app's row: carried size, the counts of what changes, then the
-// things that are not a count -- an account renamed, a connection kept, its own
-// key kept, torrents stopped, and the check a pre-install pass left to the run
-// after the install.
+// appFacts is a row's facts: counts, then what is not a count.
 func appFacts(in InstanceSummary) []string {
 	var facts []string
 	if in.Staged.Files > 0 {
@@ -241,9 +218,7 @@ func appFacts(in InstanceSummary) []string {
 	return facts
 }
 
-// changeFacts counts a report's changes by what they are: paths in a database
-// or a config, addresses between apps, and everything else a setting. A count
-// is what a person reviews; which column and which row is the report's.
+// changeFacts counts changes by kind; the report carries where they are.
 func changeFacts(changes []rewrite.Change) []string {
 	var paths, addresses, settings int
 	for _, c := range changes {
@@ -283,12 +258,8 @@ func ownedPhrase(o rewrite.Owned) string {
 	return fmt.Sprintf("%s %q", kind, o.Name)
 }
 
-// CheckedRows is the rows an agreement left to this run, now that it has run: one
-// row per app whose check the question deferred, and one for an app the run had
-// to carry less of than the question promised because the config root had no room,
-// in the shape the confirm showed it. The question said the app's databases would
-// be checked once its image ran; this is what that check found, said in the same
-// place, and the second is what the disk turned out to be.
+// CheckedRows is what the question deferred, said in the confirm's shape: a
+// deferred check's finding, and an app the disk forced to carry less.
 func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	var rows []say.TableRow
 	for _, was := range agreed.Instances {
@@ -305,10 +276,7 @@ func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	return rows
 }
 
-// dataRows is what the run does to the data root: the directories renamed to
-// box's names on one line, and the library's own directories renamed to the
-// categories that hold them on the next. A rehearsal renames nothing and has no
-// row.
+// dataRows is what the run renames; a rehearsal has no row.
 func (s Summary) dataRows() []say.TableRow {
 	var rows []say.TableRow
 	if facts := renameFacts(s.Renames, s.Rehearsal); facts != "" {

@@ -449,9 +449,6 @@ func rehearsalHosts(plex bool) string {
 	return hosts
 }
 
-// TestSettleCallsOutEveryUnsettledValue is the case the first real run met,
-// settled: nothing blocks, every decision is in the plan with its reason, and the list
-// says what box will do with each one.
 func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 	ctx := context.Background()
 	r := newRehearsal(t, rehearsalHosts(true), true)
@@ -511,9 +508,6 @@ func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 	}
 }
 
-// TestSettledPlanIsAValidPlan: what Settle writes is a plan this box reads back,
-// with every default carrying its reason. A rule the plan validation refuses
-// would reach the operator as a broken file instead of a decision.
 func TestSettledPlanIsAValidPlan(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false), false)
 	settled, _, err := Settle(context.Background(), r.plan(), r.settleInput())
@@ -532,9 +526,6 @@ func TestSettledPlanIsAValidPlan(t *testing.T) {
 	}
 }
 
-// TestHandWrittenRuleIsNeverReplaced: a rule the operator wrote is the answer,
-// so a default is only ever added beside it, and the plan it was written in
-// comes back as it was.
 func TestHandWrittenRuleIsNeverReplaced(t *testing.T) {
 	ctx := context.Background()
 	hosts := rehearsalHosts(false) + `  - host: 198.51.100.20
@@ -571,11 +562,6 @@ func TestHandWrittenRuleIsNeverReplaced(t *testing.T) {
 	}
 }
 
-// TestSettleLeavesAnAmbiguousLocalhostAddressToThePlan: a localhost address is
-// settled by the apps' ports and by nothing else, and a rule may not name one
-// (the plan validation refuses it). A plan whose ports settle it twice is a plan
-// this box cannot apply, so Settle stops and says so rather than writing a rule
-// that would never be read.
 func TestSettleLeavesAnAmbiguousLocalhostAddressToThePlan(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false), false)
 	p := r.plan()
@@ -592,10 +578,6 @@ func TestSettleLeavesAnAmbiguousLocalhostAddressToThePlan(t *testing.T) {
 	}
 }
 
-// TestApplyWritesWhatSettleCalledOut: the settled plan is what apply runs with,
-// and it refuses nothing. What each decision says is what the migrated config
-// holds: the two rewrites point at the box, and every value left as it is is
-// exactly as the source stored it.
 func TestApplyWritesWhatSettleCalledOut(t *testing.T) {
 	ctx := context.Background()
 	r := newRehearsal(t, rehearsalHosts(true), true)
@@ -687,10 +669,6 @@ func TestApplyWritesWhatSettleCalledOut(t *testing.T) {
 	}
 }
 
-// TestSettleLeavesAnUncoveredPathAsItIs: a path no rule covers becomes an
-// identity rule — left exactly as it is, with the reason — in the table of the
-// app whose filesystem it is on. Two keys holding one directory make one rule,
-// because two rules for one From is a plan the validation refuses.
 func TestSettleLeavesAnUncoveredPathAsItIs(t *testing.T) {
 	ctx := context.Background()
 	r := newRehearsal(t, rehearsalHosts(false), false)
@@ -771,11 +749,6 @@ func TestSettleLeavesAnUncoveredPathAsItIs(t *testing.T) {
 	}
 }
 
-// TestSettleRecordsAConfigItCannotRead: a read with no source tree behind it (a
-// survey from saved manifests, or a host that does not hold the configs) has
-// nothing to check, and that is recorded rather than failed. A survey that
-// refused to be written would be a read with nothing to show for it, and the
-// addresses are still checked at apply, where the snapshot's bytes are.
 func TestSettleRecordsAConfigItCannotRead(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false), false)
 	in := r.settleInput()
@@ -810,9 +783,6 @@ func TestSettleRecordsAConfigItCannotRead(t *testing.T) {
 	}
 }
 
-// TestSummaryNamesEveryDefaultAndLeft: the screen before the one confirm names
-// what the plan decided by itself and what apply will leave exactly as it is.
-// A default is never silent, and neither is a value box refuses to touch.
 func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	ctx := context.Background()
 	r := newRehearsal(t, rehearsalHosts(true), true)
@@ -862,12 +832,6 @@ func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	}
 }
 
-// TestSettleReadsARunningAppsConfig: a check is taken from a source that may
-// still be running, and a running app's config directory holds what only its own
-// process can use: qBittorrent's ipc-socket. A check reads files, so the socket
-// is left out of its private copy rather than refused -- refusing it stopped a
-// rehearsal of a live source. apply's staging copy still refuses one, because
-// what apply carries becomes the release's config.
 func TestSettleReadsARunningAppsConfig(t *testing.T) {
 	r := newRehearsal(t, rehearsalHosts(false), false)
 	socket := filepath.Join(r.path("qbittorrent"), "qBittorrent", "ipc-socket")
