@@ -8,20 +8,15 @@ import (
 	"helm.sh/helm/v4/pkg/cli"
 )
 
-// helmEnv is a private Helm home for one chart fetch: every path Helm would take from
-// the invoking user's environment -- repository file, repo and content caches, registry
-// credentials, plugins -- points inside a temporary directory box creates (0700) and
-// removes when the fetch ends.
+// helmEnv is a private Helm home for one chart fetch: every path Helm would take from the
+// user's environment points inside a 0700 temporary directory box removes when the fetch
+// ends.
 //
-// box runs as root, and root's Helm state is the operator's: a stale repository entry
-// makes every chart URL fail with "no cached repo found", a cached chart is preferred
-// over the pinned one, and credentials or getter plugins there would decide what box
-// downloads and run code in its process. box pulls public artifacts only, so an empty
-// private home is the whole state (docs/box.md).
-//
-// The settings are a literal rather than cli.New(), which reads the environment as it
-// constructs. Only the path fields are consulted by a fetch; box passes its kubeconfig
-// to Helm's action configuration separately.
+// box runs as root and root's Helm state is the operator's: a stale repository entry
+// fails every chart URL with "no cached repo found", a cached chart wins over the pinned
+// one, and a getter plugin would run code in box's process. box pulls public artifacts
+// only, so an empty home is the whole state (docs/box.md). The settings are a literal
+// rather than cli.New(), which reads the environment as it constructs.
 type helmEnv struct {
 	dir      string
 	settings *cli.EnvSettings

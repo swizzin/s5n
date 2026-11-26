@@ -38,10 +38,9 @@ type Options struct {
 	Background bool
 }
 
-// UI is setup.Prompter on huh. One small form per call: init's questions depend
-// on earlier answers, so the flow is the wizard and huh draws one field at a
-// time. That also keeps the transcript, each answered form staying on screen
-// above the next masthead, which is what makes a run reviewable by scrolling back.
+// UI is setup.Prompter on huh. One form per call: init's questions depend on earlier
+// answers, so the flow is the wizard and huh draws one field at a time, which keeps the
+// transcript reviewable by scrolling back.
 type UI struct {
 	in     io.Reader
 	out    io.Writer
@@ -115,10 +114,9 @@ func New(o Options) *UI {
 	return u
 }
 
-// Close puts the terminal's own background back. Safe to call twice, and meant to
-// be deferred, so the reset happens on a normal return, an error and a panic;
-// Ctrl-C and SIGTERM reach the reporter's handler, which closes before it exits.
-// kill -9 and a dropped connection leave the colour behind.
+// Close puts the terminal's background back: safe to call twice, and deferred so it
+// runs on a return, an error and a panic. Ctrl-C and SIGTERM reach the reporter's
+// handler; kill -9 and a dropped connection leave the colour behind.
 func (u *UI) Close() { u.painter.reset() }
 
 // Palette is the variant this UI draws with, resolved and in force.
@@ -199,12 +197,9 @@ func (u *UI) run(field huh.Field, answered func()) error {
 	return err
 }
 
-// record is the one line a finished form leaves in the scrollback: what was asked,
-// then what was answered. huh clears its own drawing when the form ends, and
-// without this the transcript keeps each question's title and drops the answer--
-// the part a run is reviewed for. The value is the answer as a person would say
-// it (an option's label), a secret is recorded as hidden, and NO_COLOR keeps the
-// same words with no escapes.
+// record is the line a finished form leaves: what was asked, then the answer as a
+// person would say it (an option's label, a secret hidden). huh clears its own drawing,
+// and without this the transcript keeps the title and drops the answer.
 func (u *UI) record(label, value string) {
 	label = strings.TrimSpace(label)
 	value = strings.TrimSpace(value)
@@ -391,15 +386,10 @@ func (u *UI) Select(f setup.Select) (string, error) {
 // it and toggle an app.
 const multiSelectHelp = "space toggles · ctrl+a all/none · enter continues"
 
-// pickerField is the app picker: the options with their help column, the keys
-// above them, and a height that holds the whole list.
-//
-// The height must be the field's total, not the list's: huh's WithHeight "sets
-// the total height of the multi-select field. Including padding and help menu
-// heights", and its viewport is that total minus title and description. One row
-// per app left the viewport a row short whenever there was a hint, so the list
-// scrolled under a static hint and bubbletea's inline renderer left the unaccounted
-// rows on screen: the repeated hint and the first apps above the list.
+// pickerField is the app picker. Its height must be the field's total, not the list's:
+// huh's viewport is WithHeight minus title and description, so one row per app left it
+// a row short with a hint, the list scrolled under it, and bubbletea's inline renderer
+// left the unaccounted rows on screen.
 func (u *UI) pickerField(f setup.MultiSelect, keys []huh.Option[string], value *[]string) *huh.MultiSelect[string] {
 	// huh wraps the hint to the width less its own two-column indent, so measuring
 	// it that way keeps the height right in a narrow terminal.

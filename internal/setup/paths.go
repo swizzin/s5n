@@ -282,10 +282,9 @@ func under(path, point string) bool {
 	return strings.HasPrefix(path, strings.TrimSuffix(point, "/")+"/")
 }
 
-// makeDirs creates the directories init owns, each with the box's owner: the path
-// roots it may create and one directory per app instance under the config path,
-// which the chart mounts as `subPath: <instance>`. A kubelet creating a missing one
-// makes it root-owned: an app that starts and cannot save its settings.
+// makeDirs creates the directories init owns with the box's owner: the path roots and one
+// per app instance under the config path, which the chart mounts as `subPath`. A kubelet
+// creating a missing one makes it root-owned: an app that cannot save its settings.
 func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	seen := map[string]bool{}
 	var created []string
@@ -305,11 +304,9 @@ func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	return created, nil
 }
 
-// SettingsDirs is the per-instance list under the config path, named as the chart
-// names the workload (sonarr, sonarr-4k), which is the subPath each pod mounts. The
-// instances come from the grant's values, so this agrees with the chart without box
-// knowing which apps are Arrs. init creates these, update copies them, and both name
-// them here rather than each deriving a subPath.
+// SettingsDirs is the per-instance list under the config path, named as the chart names
+// the workload. The instances come from the grant's values, so this agrees with the chart
+// without box knowing which apps are Arrs; init creates them and update copies them.
 func SettingsDirs(configPath string, apps []string, values map[string]any) []string {
 	var out []string
 	for _, name := range apps {

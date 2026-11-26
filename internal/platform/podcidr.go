@@ -10,18 +10,11 @@ import (
 
 // PodCIDRs is the cluster's pod network, one CIDR per node.
 //
-// It is what an app trusting a forwarded address must be told: the peer that connects
-// is the Gateway's proxy *pod*, which changes on every restart, and the connection
-// carries the person's real address in X-Forwarded-For, so the network it lives in is
-// the only stable answer.
-//
-// The read is the Nodes' spec.podCIDR, where the cluster says which range it hands
-// pods (kube-controller-manager, and k0s the same way). A node naming none is skipped,
-// and a cluster where none does returns an empty list, so the caller leaves the app's
-// setting alone rather than guessing.
-//
-// Not a namespace or a Service: a NetworkPolicy peer is a namespace (GatewayFrom) and
-// this is an address range -- who may connect, against whose word is trusted.
+// It is what an app trusting a forwarded address must be told: the peer is the Gateway's
+// proxy pod, which changes on every restart, so the network it lives in is the only
+// stable answer. The read is the Nodes' spec.podCIDR; a node naming none is skipped, and
+// none at all returns an empty list rather than a guess. Not a namespace (GatewayFrom):
+// this is whose word about the client is trusted once it connects.
 func PodCIDRs(ctx context.Context, kubeconfig string) ([]string, error) {
 	k, err := NewCluster(kubeconfig)
 	if err != nil {

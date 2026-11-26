@@ -26,19 +26,14 @@ type Host struct {
 	Detail string
 }
 
-// appHostsFor resolves every name an enabled app is served at, in catalog order, and
-// checks it answers where the domain does: a certificate for a name that does not
-// point at the box can never issue, so the run ends naming the record to add rather
-// than leaving a box half served.
+// appHostsFor resolves every name an enabled app is served at and checks it answers
+// where the domain does: a certificate for a name not pointing at the box can never
+// issue, so the run ends naming the record rather than leaving a box half served.
 //
-// A plain function because apply runs the same decision for a host with no listener
-// yet (TLSHosts.Ensure), and the two commands must not disagree about which name is
-// servable; command is the one box command the stop names.
-//
-// The two empty answers are a match on purpose: a test box with a made-up name
-// resolves nothing, and so does every name under it, so it gets self-signed
-// certificates until its records exist (docs/box.md). A real mismatch is one name
-// answering and the other not, or two answering with different addresses.
+// A plain function because apply makes the same decision (TLSHosts.Ensure). Two empty
+// answers are a match on purpose: a made-up name resolves nothing under it, so a test box
+// goes self-signed until its records exist. A real mismatch is one answering and the
+// other not.
 func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, domain string, dom hostAnswer, forced, command string, apps []string) ([]Host, error) {
 	var out []Host
 	for _, app := range apps {

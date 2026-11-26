@@ -11,10 +11,8 @@ import (
 	"github.com/swizzin/s5n/internal/catalog"
 )
 
-// The login's two questions. The name is a grant answer like the namespace: it lives
-// in the grant and is offered back on a re-run. The password is not an answer at
-// all: it is used once, hashed, and never written to a file, a log or either
-// document init edits.
+// The login's two questions: the name is a grant answer offered back on a re-run, the
+// password used once and hashed, never written to a file, a log or either document.
 
 // SeedboxNamespace is s5n-<login>, beside box's own s5n-system and s5n-gateway
 // (docs/box.md, "Scopes: root and users"). Root's seedbox is not special.
@@ -97,10 +95,9 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 	})
 }
 
-// askPassword is the password for one run: from --password-file, asked twice on a
-// terminal, or generated. newPassword says this run supplies one: an empty answer on
-// a box with a row means "keep it", so a re-run does not log everyone out, while on
-// a box with none box makes one and returns it as generated, to print once.
+// askPassword is the password for one run: --password-file, asked twice, or generated.
+// An empty answer on a box with a row keeps it, so a re-run does not log everyone out;
+// with none, box makes one and returns it to print once.
 func (d *Decision) askPassword(opts Options, login string) (password string, newPassword bool, generated string, err error) {
 	if opts.PasswordFile != "" {
 		password, err := readPasswordFile(opts.PasswordFile)

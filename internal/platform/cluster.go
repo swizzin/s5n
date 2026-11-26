@@ -256,13 +256,11 @@ type PolicyTarget struct {
 	SectionName string
 }
 
-// PolicyAccepted reads a policy's status for one target, from the document so a
-// captured status can be tested.
+// PolicyAccepted reads a policy's status for one target, from the document so a captured
+// status can be tested.
 //
-// Envoy Gateway puts no Accepted condition on the policy itself: the controller that
-// serves the target reports it under status.ancestors, one entry per target and
-// controller. Top-level status.conditions is not looked at -- reading them would make
-// the wait succeed on a document EG never writes.
+// Envoy Gateway reports acceptance under status.ancestors, not on the policy: reading
+// top-level conditions would pass the wait on a document EG never writes.
 func PolicyAccepted(status map[string]any, target PolicyTarget) (bool, string) {
 	ancestors, _ := status["ancestors"].([]any)
 	for _, raw := range ancestors {
@@ -363,18 +361,12 @@ func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name strin
 	return ready, reason, nil
 }
 
-// CertificateStatus answers whether a Certificate has issued its current generation,
-// with cert-manager's reason when it has not.
+// CertificateStatus answers whether a Certificate has issued its current generation.
 //
-// The generation is what makes a move visible: a new issuerRef bumps
-// metadata.generation while Ready keeps saying True for the old certificate, so a
-// condition-only read reports the move done before cert-manager has asked for
-// anything, serves the host behind the old certificate, and the next run sits out the
-// whole CertificateTimeout. That is what the e2e's ACME move caught.
-//
-// A condition without an observedGeneration is read as current: cert-manager has
-// stamped it on every condition since long before the pinned release, and treating it
-// as stale would time out every wait.
+// The generation makes a move visible: a new issuerRef bumps it while Ready still says
+// True for the old certificate, so a condition-only read serves the host behind the old
+// one and the next run sits out the whole CertificateTimeout (the e2e's ACME move
+// caught this). A condition without an observedGeneration is read as current.
 func CertificateStatus(status map[string]any, generation int64) (bool, string) {
 	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
 	for _, raw := range conditions {

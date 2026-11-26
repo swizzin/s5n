@@ -73,10 +73,9 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return res, fmt.Errorf("read cluster record: %w", err)
 	}
 
-	// 1. An explicit cluster: use it or fail, never fall back. With a record, the
-	// record's own kubeconfig is the recorded re-run (and keeps a k0s-managed box
-	// managed); any other file would move the host to another cluster, which only
-	// the operator may do: stop before any probe or write.
+	// 1. An explicit cluster: use it or fail. With a record, its own kubeconfig is the
+	// recorded re-run; any other file would move the host to another cluster, which only
+	// the operator may do.
 	if path := firstKubeconfig(opts.Kubeconfig, opts.KubeconfigEnv); path != "" {
 		if rec != nil {
 			if filepath.Clean(path) == filepath.Clean(rec.Kubeconfig) {
@@ -133,10 +132,7 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 	}
 
 	// 3. Something present but not usable, a dead distribution-owned kubeconfig
-	// included: the distribution wrote it when it installed a cluster, so the
-	// cluster is still on the host. Docker and containerd are notes, not blockers:
-	// they also run on clean k0s targets, and a runtime holding an API port is
-	// caught by the listening-port finding.
+	// included. Docker and containerd are notes: they also run on clean k0s targets.
 	blockers, notes := classifyFindings(d.Host.Present())
 	blockers = append(blockers, dead...)
 	if len(blockers) > 0 {
@@ -230,14 +226,9 @@ func (d *Decision) firewall() Firewall {
 	return Firewalld{}
 }
 
-// withFirewall fills a usable result's firewall half: what the platform plan prints
-// before its confirm, and on a cluster box installed k0s itself the one host change
-// it may make.
-//
-// Only a cluster box installed has networks box may trust: on one found or given,
-// box knows neither the pod nor the service network, and guessing at another
-// operator's would be worse than saying so, so the result carries the commands and
-// the plan warns instead.
+// withFirewall fills a usable result's firewall half. Only a cluster box installed has
+// networks box may trust: on one found or given, guessing at another operator's would be
+// worse than saying so, so the plan carries the commands and warns.
 func (d *Decision) withFirewall(ctx context.Context, res Result) Result {
 	if res.Action == ActionStop || !d.firewall().Running(ctx) {
 		return res
@@ -298,10 +289,8 @@ func (d *Decision) platformPins(ctx context.Context) (release.Versions, error) {
 	return pins, nil
 }
 
-// adoptInstalled is the second half of the clean-host path: k0s is up, so the same
-// probe every other path uses decides its distribution, platform layer and Gateway
-// class, and only then is it recorded. A cluster box started but cannot reach is
-// never recorded as one box manages.
+// adoptInstalled is the clean-host path's second half: k0s is up, so the same probe
+// decides its distribution, platform layer and class, and only then is it recorded.
 func (d *Decision) adoptInstalled(ctx context.Context, opts Options, k0s string) Result {
 	kc, err := d.Source.Read(K0sAdminConfig)
 	if err != nil {
@@ -317,11 +306,9 @@ func (d *Decision) adoptInstalled(ctx context.Context, opts Options, k0s string)
 	return res
 }
 
-// freshClusterAddresses settles the address question on a cluster box just started:
-// k0s hands out no LoadBalancer addresses and nothing else is installed yet, so auto
-// mode would only report AddressNotAssigned after the wait, and MetalLB is planned up
-// front. The record keeps the configured mode, so a later run asks as usual, and
-// external and managed modes are left alone.
+// freshClusterAddresses settles the address question on a cluster box just started: k0s
+// hands out no LoadBalancer addresses, so auto mode would only report AddressNotAssigned
+// after the wait and MetalLB is planned up front. The record keeps the mode.
 func freshClusterAddresses(components []ComponentResult) []ComponentResult {
 	out := append([]ComponentResult(nil), components...)
 	for i, c := range out {
@@ -334,9 +321,7 @@ func freshClusterAddresses(components []ComponentResult) []ComponentResult {
 }
 
 // previewComponents is the platform decision for a cluster box would create: every
-// capability is absent, and the address layer is installed rather than asked, as
-// adoptInstalled settles it. The same decision code, given the only probe outcome a
-// cluster that does not exist can have.
+// capability absent, the address layer installed rather than asked.
 func previewComponents(cfg PlatformConfig) []ComponentResult {
 	empty := PlatformProbe{
 		GatewayAPI:   OutcomeAbsent,
@@ -367,15 +352,11 @@ type clusterProbes struct {
 	dist    Distribution
 }
 
-// inspectCluster is the gate chain every path that uses a cluster runs, in the order
-// the gates need their evidence: /version answers, the identity can manage it, the
-// node list is readable, and the distribution and node count are ones box supports.
-// A gate returns the refusal Result and false, so no caller can probe capabilities
-// or write first.
-//
-// A recorded cluster runs the same chain (see useRecord): a record is a cached
-// decision, not evidence, and a cluster that has gone multi-node or been replaced is
-// refused with the wording a freshly found one gets.
+// inspectCluster is the gate chain every path that uses a cluster runs, in the order the
+// gates need their evidence: /version, admin rights, the node list, a supported
+// distribution and node count. A gate returns the refusal and false, so nothing probes
+// capabilities or writes first. A recorded cluster runs the same chain: a record is a
+// cached decision, not evidence.
 func (d *Decision) inspectCluster(ctx context.Context, kc []byte, path, how string) (clusterProbes, Result, bool) {
 	var obs clusterProbes
 	probe, err := d.NewProber(kc)
@@ -400,10 +381,9 @@ func (d *Decision) inspectCluster(ctx context.Context, kc []byte, path, how stri
 	return clusterProbes{probe: probe, cluster: cluster, dist: dist}, Result{}, true
 }
 
-// finishCluster probes the platform layer of a cluster inspectCluster accepted, then
-// computes the platform decisions and the record. id is the identity of the cluster
-// the kubeconfig reached, so the record says which cluster it describes and a re-run
-// can refuse a repointed file.
+// finishCluster probes the accepted cluster's platform layer, decides the components and
+// writes the record. id is the identity the kubeconfig reached, so a re-run can refuse a
+// repointed file.
 func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, id clusterIdentity, path string, source Source, how string) Result {
 	plat, err := obs.probe.Platform(ctx)
 	if err != nil {
@@ -461,16 +441,12 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 	return res
 }
 
-// useRecord handles a re-run. The record is a cached decision, not evidence: it says
-// which kubeconfig to read, who owns the lifecycle, the platform modes and the
-// GatewayClass, and every fact the cluster can answer is re-probed, so a cluster that
-// went multi-node or lost its layer stops or is repaired before anything is written.
+// useRecord handles a re-run: the record says which kubeconfig, who owns the lifecycle,
+// the modes and the class, and every fact the cluster can answer is re-probed.
 //
 // A record whose kubeconfig no longer answers stops, naming the record path, and never
-// falls through to the candidate scan and the installer: an unreachable recorded
-// cluster may still be there, and installing over it would destroy it. One that
-// reaches a different cluster stops before the probe, naming both servers: a file can
-// be repointed.
+// falls through to the installer: an unreachable cluster may still be there. One that
+// reaches a different cluster stops before the probe, naming both servers.
 func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 	if problem := supportProblem(rec.Distribution, rec.Nodes); problem != "" {
 		return stop(fmt.Sprintf("recorded %s cluster at %s: %s", rec.Source, rec.Kubeconfig, problem))
@@ -539,11 +515,9 @@ func describeSkip(path, stage string, err error) string {
 	return fmt.Sprintf("%s: %s: %v", path, stage, err)
 }
 
-// appendDeadCandidate marks a candidate whose kubeconfig cannot be used as a blocker
-// when a distribution owns that path: a dead admin kubeconfig is evidence of a broken
-// installation box must not build a second cluster over. ~/.kube/config is often a
-// remote cluster, so an unusable one is only a skip, and a dry run's ErrRemoteCluster
-// says nothing about health.
+// appendDeadCandidate marks an unusable kubeconfig as a blocker when a distribution owns
+// it: a dead admin kubeconfig is a broken installation box must not build over.
+// ~/.kube/config is often remote, so an unusable one is only a skip.
 func appendDeadCandidate(dead []Finding, cand Candidate, err error) []Finding {
 	if !cand.DistributionOwned || errors.Is(err, ErrRemoteCluster) {
 		return dead

@@ -36,13 +36,12 @@ func (NetResolver) LookupHost(ctx context.Context, host string) ([]string, error
 // rather than hanging init.
 const LookupTimeout = 5 * time.Second
 
-// classifyAddresses is the whole decision, as a pure function of what DNS
-// answered: a globally routable address picks Let's Encrypt; a private, loopback,
-// link-local or CGNAT address, or no answer, picks the self-signed issuer.
+// classifyAddresses is the decision as a pure function of what DNS answered: a routable
+// address picks Let's Encrypt, a private, loopback, link-local or CGNAT one, or no
+// answer, the self-signed issuer.
 //
 // It says nothing about the node's own address: a box behind NAT has a private node
-// address and a public name that still validates, so comparing the two picks wrong
-// for the common case.
+// address and a public name that still validates.
 func classifyAddresses(addrs []string) (issuer, why string) {
 	var public []string
 	var others []string
