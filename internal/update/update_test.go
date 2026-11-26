@@ -26,10 +26,7 @@ const (
 	digestE = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 )
 
-// fakeCharts is the repository: one chart per version, with the two
-// annotations an update reads. Load only serves a version the test published,
-// so a step that names a release the repository does not hold fails the same
-// way it would in the registry.
+// fakeCharts serves only published versions, as the registry would.
 type fakeCharts struct {
 	values   []byte
 	schema   []byte
@@ -38,8 +35,7 @@ type fakeCharts struct {
 	releases []release.Published
 	err      error
 	loads    []string
-	// floors is the floor each listing asked with, in order, so a test can
-	// assert what update told the repository to start from.
+	// floors is each listing's floor, in order.
 	floors []string
 }
 
@@ -55,9 +51,7 @@ func (f *fakeCharts) Load(_ context.Context, ref release.ChartRef) (release.Char
 	return chart, nil
 }
 
-// Releases is the listing with OCIChart's floor: nothing below it is published
-// as far as the caller is concerned, and what is left is still whatever the
-// test published, because the release list here is the test's own.
+// Releases applies the floor to the test's own list.
 func (f *fakeCharts) Releases(_ context.Context, _ release.ChartRef, floor string) ([]release.Published, error) {
 	f.floors = append(f.floors, floor)
 	if f.err != nil {
@@ -78,14 +72,12 @@ func (f *fakeCharts) Releases(_ context.Context, _ release.ChartRef, floor strin
 	return out, nil
 }
 
-// publish adds one release. The chart's variant digests are what update
-// compares; sonarrDigest is the one tests move.
+// publish adds one release; sonarrDigest is the one tests move.
 func (f *fakeCharts) publish(version, minBox, upgradeFrom, sonarrDigest string) {
 	f.publishVariants(version, minBox, upgradeFrom, variants(sonarrDigest))
 }
 
-// publishVariants adds one release with an explicit variants.yaml, for the tests
-// whose step moves more than one app.
+// publishVariants adds a release with an explicit variants.yaml.
 func (f *fakeCharts) publishVariants(version, minBox, upgradeFrom string, variants []byte) {
 	f.charts[version] = release.Chart{
 		Name:       "s5n",
@@ -103,10 +95,7 @@ func (f *fakeCharts) publishVariants(version, minBox, upgradeFrom string, varian
 	f.releases = append(f.releases, release.Published{Version: version, MinBox: minBox, UpgradeFrom: upgradeFrom})
 }
 
-// callLog is one ordered record of everything a step did, across Helm, the
-// cluster, the snapshotter and the apply. The order is part of the contract --
-// stop, wait for the pods, copy, then apply -- so one log shared by the fakes
-// is what lets a test assert it across three of them.
+// callLog orders every fake's calls; the order is part of the contract.
 type callLog struct {
 	calls []string
 }
@@ -115,7 +104,7 @@ func (l *callLog) add(format string, args ...any) {
 	l.calls = append(l.calls, fmt.Sprintf(format, args...))
 }
 
-// indexFrom is the index of want at or after from, or -1.
+// indexFrom is want's index at or after from, or -1.
 func (l *callLog) indexFrom(from int, want string) int {
 	for i := from; i < len(l.calls); i++ {
 		if l.calls[i] == want {
@@ -128,9 +117,7 @@ func (l *callLog) indexFrom(from int, want string) int {
 // fakeRelease is Helm's deployed release.
 type fakeRelease struct {
 	state release.ReleaseState
-	// stateErr fails every read; stateErrFrom fails from that read on, so a
-	// test can let the plan and the step's own read answer and fail only the
-	// read box makes after a gate.
+	// stateErr fails every read; stateErrFrom fails from that read on.
 	stateErr     error
 	stateErrFrom int
 	calls        int
@@ -147,22 +134,16 @@ func (f *fakeRelease) State(context.Context) (release.ReleaseState, error) {
 	return f.state, nil
 }
 
-// fakeCluster is the release's StatefulSets and pods. Scaling to zero empties
-// the app's pods, which is what the settle wait looks for. scaleErrs fails one
-// replica count, so a test can fail the stop and still have the restart work.
-// exitingFrom makes the gate see a crashloop only from that read on, so a test
-// proves box polls for it rather than assuming it.
+// fakeCluster's scale-to-zero empties pods for the settle wait; its failures
+// are per count so a stop can fail while the restart works.
 type fakeCluster struct {
 	replicas map[string]int32
 	pods     map[string]int
 	healthy  bool
 	exiting  []Exiting
-	// restarts is each moved app's container restart count, read after a
-	// failed apply to decide whether the step gets the health gate's watch.
+	// restarts is read after a failed apply to decide on the gate's watch.
 	restarts map[string]int32
-	// exitingFrom reports the crashloop only from that health read on, and
-	// exitingUntil stops reporting it after that read, so a test can let box
-	// roll the app back and pass the second gate.
+	// exitingFrom and exitingUntil bound the crashloop's reporting.
 	exitingFrom  int
 	exitingUntil int
 	healths      int
@@ -170,7 +151,7 @@ type fakeCluster struct {
 	neverGone    bool
 	scaleErrs    map[int32]error
 	healthErr    error
-	// running is what the cluster runs, for a read of each app's image.
+	// running is what each app runs.
 	running    map[string]Running
 	runningErr error
 	log        *callLog
@@ -214,8 +195,7 @@ func (f *fakeCluster) Health(_ context.Context, moving []string) (Health, error)
 	return Health{Ready: f.healthy, Exiting: f.exiting, Restarts: f.restarts}, nil
 }
 
-// Running is the image each app runs, as the test wrote it: what the StatefulSet
-// asks for and what the pods report.
+// Running is what each StatefulSet asks for and its pods report.
 func (f *fakeCluster) Running(context.Context) (map[string]Running, error) {
 	f.log.add("running")
 	if f.runningErr != nil {
@@ -224,7 +204,7 @@ func (f *fakeCluster) Running(context.Context) (map[string]Running, error) {
 	return f.running, nil
 }
 
-// fakeSnapshots records what was asked, copied, restored and pruned.
+// fakeSnapshots records what it was asked.
 type fakeSnapshots struct {
 	checks     []snapshotCall
 	takes      []snapshotCall
@@ -234,8 +214,7 @@ type fakeSnapshots struct {
 	takeErr    error
 	restoreErr error
 	log        *callLog
-	// taken is what Take answers: a step directory and one dir per app, so a
-	// test can assert what a rollback records and says.
+	// taken is what Take answers.
 	taken Taken
 }
 
@@ -272,32 +251,24 @@ func (f *fakeSnapshots) Prune(_ context.Context, step Step, apps []string) error
 	return nil
 }
 
-// fakeApply stands in for release.Applier.Apply. It moves the fake release's
-// state as a real apply would, so the next step sees the revision and version
-// that really happened. errSeq fails the next applies of a version, one error per
-// call, so a test can fail the step's apply and let the rollback's re-apply
-// succeed.
+// fakeApply moves the release state as a real apply would; errSeq fails one
+// apply per call so a step can fail and its re-apply succeed.
 type fakeApply struct {
 	calls  []release.Options
 	errFor map[string]error
 	errSeq map[string][]error
-	// statusSeq is the release status each apply leaves, one per call; a
-	// missing entry leaves the release deployed. A test uses it to hold Helm on
-	// "failed" while the gate reads the apps.
+	// statusSeq is the status each apply leaves; a missing entry is deployed.
 	statusSeq []string
 	applied   map[string]bool
 	managed   *fakeRelease
 	nextRev   int
 	log       *callLog
-	// receipt is what a hooks-on apply reports as its wiring receipt; a zero
-	// one is an apply whose chart ran no wiring.
+	// receipt is a hooks-on apply's wiring receipt.
 	receipt release.Receipt
 }
 
 func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Result, error) {
-	// The log is where the step's order is read: the apply that moves the
-	// release runs without the chart's hooks, and the one that follows the
-	// gate runs them.
+	// The apply that moves runs without hooks; the one after the gate runs them.
 	entry := "apply " + opts.ChartVersion
 	if opts.SkipHooks {
 		entry += " (no hooks)"
@@ -335,9 +306,7 @@ func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Resu
 	return res, nil
 }
 
-// fakeHolds is holds.json in memory: the plan reads it and a step that rolls an
-// app back writes it, so a test asserts both the file's content and the order
-// the write took in the step.
+// fakeHolds is holds.json in memory: the plan reads it, a step-back writes it.
 type fakeHolds struct {
 	holds []snapshot.Hold
 	root  string
@@ -381,13 +350,12 @@ func (f *fakeState) Save(state State) error {
 	return nil
 }
 
-// fakeConfirm answers the one question and counts it.
+// fakeConfirm answers and counts the one question.
 type fakeConfirm struct {
 	answer bool
 	err    error
 	asks   int
-	// questions are the words asked, in order, so a test can assert box's
-	// sentence rather than only that something was asked.
+	// questions are the words asked, in order.
 	questions []string
 }
 
@@ -397,7 +365,7 @@ func (f *fakeConfirm) Ask(question string, _ bool) (bool, error) {
 	return f.answer, f.err
 }
 
-// harness is one update wired to fakes, with a box on 0.4.0 at revision 3.
+// harness is one update on 0.4.0 at revision 3.
 type harness struct {
 	u       *Updater
 	charts  *fakeCharts

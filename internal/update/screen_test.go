@@ -10,17 +10,14 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// TestTheUpdateScreenIsTheReference is the layout every command is being
-// converted to, produced by the flow that owns it: one heading, then one row
-// per thing that happened, the failure and what box did about it, the wiring
-// folded to a count, and the hold the operator has to know about with the one
-// command that shows it. This is the screen docs/output.md points at.
+// The reference layout docs/output.md points at, produced by the flow that owns
+// it.
 func TestTheUpdateScreenIsTheReference(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestA)
 	h.charts.publish("0.6.0", "0.4.0", "0.4.0", digestB)
 	h.rel.state.ChartVersion = "0.5.0"
-	// One app moves and its new image keeps exiting; box puts it back.
+	// One app moves, keeps exiting, and is put back.
 	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
 	h.cluster.exitingUntil = 1
 	h.snaps.taken = Taken{
@@ -34,10 +31,7 @@ func TestTheUpdateScreenIsTheReference(t *testing.T) {
 		rec.Steps = append(rec.Steps, release.Step{Name: fmt.Sprintf("check%d", i), Result: "ok"})
 	}
 	h.app.receipt = rec
-	// The clock reads in the order the flow reads it -- the step's start, the
-	// copy's start, the copy's finish, the step's finish -- so the durations
-	// in the screen are the ones written down: six seconds to copy, forty-one
-	// for the step.
+	// Clock reads in flow order: six seconds to copy, forty-one for the step.
 	reads := []time.Duration{0, 0, 6 * time.Second, 41 * time.Second}
 	read := 0
 	clock := func() time.Time {
@@ -70,9 +64,6 @@ func TestTheUpdateScreenIsTheReference(t *testing.T) {
 	}
 }
 
-// TestAFailedStepLeavesOneCrossRow: a step that stops says which step stopped,
-// once, as a row -- and then whatever it could learn about where the release is
-// is the one error line the command prints.
 func TestAFailedStepLeavesOneCrossRow(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -91,8 +82,6 @@ func TestAFailedStepLeavesOneCrossRow(t *testing.T) {
 	}
 }
 
-// TestACurrentBoxIsOneNote: nothing to do is one line, and it is a note: a box
-// that is current has no rows to read.
 func TestACurrentBoxIsOneNote(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)

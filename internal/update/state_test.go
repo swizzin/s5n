@@ -51,9 +51,6 @@ func TestFileStateRoundTripsAndStartsEmpty(t *testing.T) {
 	}
 }
 
-// TestFileStateLoadsARecordFromBeforeRevisionMovedAndGate: the three new step
-// fields are additive, so the record an older box wrote still reads and the
-// release it failed on is still skipped.
 func TestFileStateLoadsARecordFromBeforeRevisionMovedAndGate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	old := `{
@@ -79,9 +76,6 @@ func TestFileStateLoadsARecordFromBeforeRevisionMovedAndGate(t *testing.T) {
 	}
 }
 
-// TestFileStateRefusesAnUnknownField: a hand-edited or newer record is a
-// refusal, not a guess. Silently dropping a field could forget the release a
-// box already failed on.
 func TestFileStateRefusesAnUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	if err := os.WriteFile(path, []byte(`{"lastCheck":"2026-01-02T03:04:05Z","mystery":true}`), 0o600); err != nil {
@@ -100,9 +94,6 @@ func TestFilePathIsBesideTheClusterRecord(t *testing.T) {
 	}
 }
 
-// TestFileStateRoundTripsHealth: the timer stores each app's readiness so the
-// next wake can tell a flip from a steady state, and the file is read strictly,
-// so the field has to survive a write and a read.
 func TestFileStateRoundTripsHealth(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	store := FileState{Path: path}
@@ -122,8 +113,6 @@ func TestFileStateRoundTripsHealth(t *testing.T) {
 	}
 }
 
-// TestStateDue: the timer wakes every fifteen minutes and box decides whether a
-// check is due, so this is the whole of "how often does it ask the registry".
 func TestStateDue(t *testing.T) {
 	at := time.Date(2026, 11, 15, 3, 12, 0, 0, time.UTC)
 	for _, c := range []struct {

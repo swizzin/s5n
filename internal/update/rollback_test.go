@@ -17,15 +17,13 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// The step a rollback reads in these tests: the one that moved sonarr from
-// 0.4.0 to 0.5.0, three days before the harness's now.
+// The step moved sonarr from 0.4.0 to 0.5.0, three days before now.
 const rollbackStep = "0.4.0-0.5.0-20251230T030405Z"
 
 const rollbackRepo = "registry.example.com/seedbox/sonarr"
 
-// rollbackVariants is the installed release's variants.yaml: sonarr on the tag
-// and digest the step moved it to, so a rollback's sentences can tell the image
-// it puts back from the one it avoids.
+// rollbackVariants pins sonarr where the step moved it, so the sentences can
+// tell the put-back image from the avoided one.
 func rollbackVariants() []byte {
 	return []byte(fmt.Sprintf(`qbittorrent:
   default:
@@ -45,8 +43,7 @@ radarr:
 `, rollbackRepo, digestB))
 }
 
-// fakeNewest is the newest-copy store: what Newest answers, one entry in the
-// shared call log for the restore, and the globs the restore was given.
+// fakeNewest is the newest-copy store, logging the restore and its globs.
 type fakeNewest struct {
 	found    AppSnapshot
 	err      error
@@ -71,9 +68,7 @@ func (f *fakeNewest) Restore(_ context.Context, snap AppSnapshot, globs []string
 	return f.restore
 }
 
-// rollbackHarness is one `box rollback sonarr` wired to fakes: a box on 0.5.0
-// whose newest copy of sonarr was taken three days ago, by the step that moved
-// it from 0.4.0.
+// rollbackHarness is one `box rollback sonarr` on 0.5.0 with a three-day copy.
 type rollbackHarness struct {
 	r       *Rollback
 	charts  *fakeCharts
@@ -139,8 +134,7 @@ func newRollbackHarness(t *testing.T) *rollbackHarness {
 	return h
 }
 
-// newest is the copy the step left: sonarr's one instance, taken three days
-// before now, holding the image it ran and the image the step moved it to.
+// newest is the copy the step left, holding both images.
 func (h *rollbackHarness) newest() *fakeNewest {
 	return &fakeNewest{
 		log: h.log,
@@ -169,8 +163,7 @@ func (h *rollbackHarness) run(t *testing.T, pin bool) (RollbackResult, error) {
 	})
 }
 
-// assertOrder fails unless every call appears, in the order given, in the one
-// log the cluster, the copy, the holds and the apply share.
+// assertOrder checks the shared call log's order.
 func (h *rollbackHarness) assertOrder(t *testing.T, want ...string) {
 	t.Helper()
 	at := 0
@@ -183,7 +176,7 @@ func (h *rollbackHarness) assertOrder(t *testing.T, want ...string) {
 	}
 }
 
-// scales is the scale calls in order, as "app=N".
+// scales is the scale calls as "app=N", in order.
 func (h *rollbackHarness) scales() []string {
 	var out []string
 	for _, call := range h.log.calls {
@@ -194,10 +187,6 @@ func (h *rollbackHarness) scales() []string {
 	return out
 }
 
-// TestRollbackSaysHowOldTheCopyIsThenHoldsTheApp: the default path stops the
-// app, restores the newest copy, writes the hold a step-back would write, and
-// re-applies the release that is installed -- in that order, so the restore
-// never runs against a writer and the chart renders the old image.
 func TestRollbackSaysHowOldTheCopyIsThenHoldsTheApp(t *testing.T) {
 	h := newRollbackHarness(t)
 
@@ -246,9 +235,6 @@ func TestRollbackSaysHowOldTheCopyIsThenHoldsTheApp(t *testing.T) {
 	}
 }
 
-// TestRollbackPinKeepsTheValuesFileAndWritesNoHold: --pin is the operator's own
-// hold. The values file is edited in place (comments and all), no hold is
-// written, and the done line names the file they remove the pin from.
 func TestRollbackPinKeepsTheValuesFileAndWritesNoHold(t *testing.T) {
 	h := newRollbackHarness(t)
 	h.values = filepath.Join(t.TempDir(), "values.yaml")
@@ -306,9 +292,6 @@ func TestRollbackPinKeepsTheValuesFileAndWritesNoHold(t *testing.T) {
 	}
 }
 
-// TestRollbackPinReplacesAHandPin: "--pin to replace it" is what the refusal
-// offers, so it has to work: the tag pin the user wrote becomes the image the
-// snapshot recorded.
 func TestRollbackPinReplacesAHandPin(t *testing.T) {
 	h := newRollbackHarness(t)
 	h.values = filepath.Join(t.TempDir(), "values.yaml")
@@ -344,9 +327,8 @@ func TestRollbackPinReplacesAHandPin(t *testing.T) {
 	}
 }
 
-// TestRollbackRefusesBeforeAnythingStops: every refusal is byte-exact and
-// happens before the first scale, because an app stopped for a rollback that
-// then refuses is a seedbox with an app down for nothing.
+// Every refusal is byte-exact and happens before the first scale: an app
+// stopped for a rollback that refuses is a seedbox down for nothing.
 func TestRollbackRefusesBeforeAnythingStops(t *testing.T) {
 	newerStep := "0.5.0-0.6.0-20260101T030405Z"
 	cases := []struct {
@@ -439,10 +421,6 @@ func TestRollbackRefusesBeforeAnythingStops(t *testing.T) {
 	}
 }
 
-// TestRollbackFailureAfterTheRestoreLeavesTheAppWhereItIs: the apply that
-// re-renders the old image can fail, and box then says what the release is on
-// and where the copy is. It does not restore again -- a second restore over a
-// half-restored config is worse than the failure it would be undoing.
 func TestRollbackFailureAfterTheRestoreLeavesTheAppWhereItIs(t *testing.T) {
 	h := newRollbackHarness(t)
 	h.app.errFor["0.5.0"] = errors.New("helm: timed out")
@@ -464,9 +442,6 @@ func TestRollbackFailureAfterTheRestoreLeavesTheAppWhereItIs(t *testing.T) {
 	}
 }
 
-// TestRollbackNewestSnapshotsReadsAndRestoresEveryInstance exercises the real
-// store: two instances of one app, each with a copy, and a live config tree the
-// restore has to put back.
 func TestRollbackNewestSnapshotsReadsAndRestoresEveryInstance(t *testing.T) {
 	root := t.TempDir()
 	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"instances": []any{
@@ -492,8 +467,7 @@ func TestRollbackNewestSnapshotsReadsAndRestoresEveryInstance(t *testing.T) {
 		if _, err := snapshot.Take(cfg, []string{"sonarr.db", "sonarr.db-wal"}, dest, images); err != nil {
 			t.Fatal(err)
 		}
-		// What the app wrote on the failed image: a database the restore has
-		// to replace, and a -wal the globs match that the copy does not hold.
+		// The failed image's database, and a -wal the copy does not hold.
 		if err := os.WriteFile(filepath.Join(cfg, "sonarr.db"), []byte("after "+instance), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -536,8 +510,6 @@ func TestRollbackNewestSnapshotsReadsAndRestoresEveryInstance(t *testing.T) {
 	}
 }
 
-// TestRollbackNewestSnapshotsWithoutACopy: an app no step copied comes back with
-// an empty Dir rather than an error, so the caller names the app.
 func TestRollbackNewestSnapshotsWithoutACopy(t *testing.T) {
 	store := &NewestSnapshots{ConfigRoot: t.TempDir(), Values: map[string]any{}}
 	found, err := store.Newest(context.Background(), "sonarr")
@@ -592,10 +564,6 @@ func TestStepVersions(t *testing.T) {
 	}
 }
 
-// TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith: a restore removes every
-// match the copy lacks, so it uses the globs the copy recorded. A catalog that
-// names more files since (here, the settings file) must not make a rollback
-// delete a file the snapshot never held.
 func TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith(t *testing.T) {
 	root := t.TempDir()
 	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{}}}
@@ -626,7 +594,7 @@ func TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Newest: %v", err)
 	}
-	// The catalog the box installs now also names config.xml.
+	// The installed catalog now also names config.xml.
 	if err := store.Restore(context.Background(), found, []string{"*.db", "*.xml"}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -636,10 +604,6 @@ func TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith(t *testing.T) {
 	}
 }
 
-// TestRollbackNamesTheAppNotAnInstance: a rollback is per app, because every
-// instance runs the one image the app pins. An instance name is refused with
-// the app to name instead, and a name the seedbox does not run lists the ones
-// it does.
 func TestRollbackNamesTheAppNotAnInstance(t *testing.T) {
 	values := map[string]any{"apps": map[string]any{
 		"sonarr": map[string]any{"enabled": true, "instances": []any{

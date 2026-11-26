@@ -12,29 +12,18 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// Step is one release-to-release move: the chart version the box is on and the
-// one this step installs. The pair names a snapshot, and the step records it as
-// the revision a rollback command returns past.
+// Step is one release-to-release move; the pair names a snapshot.
 type Step struct {
 	From string
 	To   string
 }
 
-// planSteps is the update path: the releases box has to install, in order, to
-// get from installed to target without skipping a migration.
-//
-// A release carries box.s5n/upgrade-from in its Chart.yaml: the oldest release
-// it can be installed over, because an older one's data was never migrated to
-// what this release expects. So the target is one step when its floor is at or
-// below the installed release. Otherwise the path steps to the newest release
-// between them whose floor the current release meets and whose min-box this box
-// meets, and repeats from there. Every release on the path is a published one:
-// a version box invented would be a migration nobody ran.
-//
-// It never steps backwards, prereleases are not on the path (they are not
-// releases box installs unasked), a release with no floor declares none, and an
-// annotation that is not a version is an error naming the release -- guessing
-// there would silently skip the release that carries the migration.
+// planSteps is the update path: the releases to install, in order, so no
+// migration is skipped. A release's box.s5n/upgrade-from is the oldest it can be
+// installed over; when the target's floor is above installed, step to the
+// newest release between that the current one meets and this box's min-box
+// allows. Every step is published -- an invented version is a migration nobody
+// ran -- and a malformed annotation is an error, never a skipped migration.
 func planSteps(installed, target, boxVersion string, releases []release.Published) ([]Step, error) {
 	cur, err := semver.NewVersion(installed)
 	if err != nil {
@@ -54,9 +43,8 @@ func planSteps(installed, target, boxVersion string, releases []release.Publishe
 		if err != nil {
 			continue
 		}
-		// Prereleases stay in the index: a prerelease is not a step box
-		// takes unasked, but one the operator named with --chart-version is
-		// the target, and the target has to be found here.
+		// A prerelease is never an unasked step, but --chart-version may name
+		// one as the target, so it must be found here.
 		byVersion[v.String()] = r
 	}
 
@@ -72,8 +60,7 @@ func planSteps(installed, target, boxVersion string, releases []release.Publishe
 				installed, target, from.Original())
 		}
 		if !version.GreaterThan(from) {
-			// Defensive: a release list that names a version below the one
-			// being stepped from must not loop or move a box backwards.
+			// Never loop or move a box backwards on a stale release list.
 			return nil, fmt.Errorf("cannot update from %s to %s: release %s does not move the box forward",
 				installed, target, next.Version)
 		}
@@ -83,9 +70,8 @@ func planSteps(installed, target, boxVersion string, releases []release.Publishe
 	return steps, nil
 }
 
-// nextStep is one hop: the target itself when its floor allows the current
-// release, otherwise the newest release between them that does and that this
-// box meets min-box for.
+// nextStep is one hop: the target when its floor allows it, else the newest
+// release between that does and that this box meets min-box for.
 func nextStep(from, target *semver.Version, boxVersion string, releases []release.Published, byVersion map[string]release.Published) (*release.Published, *semver.Version, error) {
 	targetRelease, ok := byVersion[target.String()]
 	if !ok {
@@ -131,8 +117,7 @@ func nextStep(from, target *semver.Version, boxVersion string, releases []releas
 	return best, bestVersion, nil
 }
 
-// upgradeFrom is one release's floor, or nil when it declares none (a chart
-// from before the annotation).
+// upgradeFrom is one release's floor, nil when it declares none.
 func upgradeFrom(r release.Published) (*semver.Version, error) {
 	if r.UpgradeFrom == "" {
 		return nil, nil
@@ -145,8 +130,7 @@ func upgradeFrom(r release.Published) (*semver.Version, error) {
 	return v, nil
 }
 
-// meetsMinBox is SelectVersion's rule for one release, applied to a candidate
-// step: a release this box is too old for is not a step on anyone's path.
+// meetsMinBox: a release this box is too old for is not a step.
 func meetsMinBox(r release.Published, boxVersion string) (bool, error) {
 	if r.MinBox == "" || release.IsDevVersion(boxVersion) {
 		return true, nil
@@ -163,44 +147,28 @@ func meetsMinBox(r release.Published, boxVersion string) (bool, error) {
 	return !own.LessThan(floor), nil
 }
 
-// ImageChange is one moving app's image on each side of a step: the one it ran
-// in the release the step starts from, and the one the step moves it to. They
-// travel with the plan because a snapshot records both -- the first is what a
-// rollback holds the app at, the second is what the hold avoids -- and nothing
-// after the release moves can say what the app used to run.
+// ImageChange is one app's image on each side of a step; the pair travels with
+// the plan because after the release moves nothing can say what it ran.
 type ImageChange struct {
 	Ran     snapshot.ImageRef
 	MovedTo snapshot.ImageRef
-	// Snapshot says the app's catalog entry names files an image upgrade can
-	// rewrite, so a step stops it and copies them before the release moves.
-	// An app without them is moved without a copy, is not stopped, and is
-	// never rolled back.
+	// Snapshot says the catalog names files an upgrade can rewrite, so the step
+	// stops and copies the app; one without them is moved uncopied, unstoppable
+	// and never rolled back.
 	Snapshot bool
 }
 
-// movingApps is the enabled apps whose image moves between two chart releases,
-// sorted, the apps the operator's values hold in place, and what each moving
-// app's image is on either side of the step. A database migrates when its image
-// changes, so Moving is exactly the set a step has to snapshot before it
-// installs the new release.
+// movingApps is the enabled apps whose image moves between two releases, the
+// ones a values pin or a hold keeps in place, and each move's image pair. A
+// database migrates when its image changes, so moving is exactly what a step
+// snapshots.
 //
-// The image is the one values select: apps.<app>.image.variant, "default" when
-// nothing says otherwise. A variant that exists in both releases is compared by
-// repository and digest, and by tag when neither release pins a digest: the
-// chart pins digest, so a tag that was re-pushed to new bytes is an image change
-// the digest sees, and a release that pins no digest at all (a locally built
-// image) changes the image by changing the tag. An app in only
-// one of the two releases is not moving (there is no install to migrate), and a
-// chart that ships no variants.yaml tells box nothing about images, so it moves
-// nothing.
+// The compared image is the selected variant's: repository and digest, by tag
+// when neither release pins a digest (a locally built image). An app in only one
+// release has nothing to migrate; a chart with no variants.yaml moves nothing.
 //
-// A pin in the values -- apps.<app>.image.digest, or a tag without a digest --
-// holds the app at one image whatever the chart published: the chart renders
-// the pinned digest on both sides, or no digest at all when the pin is a tag,
-// so the same bytes run before and after the step. Such an app is Held when it
-// would have moved without the pin, and it is neither stopped nor copied,
-// because nothing of it changes. A pin cannot hold an app whose repository
-// changes between the releases: that is a different image, pinned or not.
+// A values pin holds an app at one image on both sides, so it is neither
+// stopped nor copied. A pin cannot hold an app whose repository changes.
 func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.Hold) (moving, held, heldBack []string, images map[string]ImageChange, err error) {
 	if len(from.Variants) == 0 || len(to.Variants) == 0 {
 		return nil, nil, nil, nil, nil
@@ -236,18 +204,16 @@ func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.
 type appMove int
 
 const (
-	// moveNone: the app is not affected by this step.
+	// moveNone: not affected. moveMoves: image changes. moveHeld: a values pin
+	// holds it. moveHeldBack: a rollback hold keeps it on its image.
 	moveNone appMove = iota
-	// moveMoves: its image changes and the release will roll it out.
 	moveMoves
-	// moveHeld: the operator's values pin holds it where it is.
 	moveHeld
-	// moveHeldBack: a rollback hold keeps it on the image it ran.
 	moveHeldBack
 )
 
-// appDecision decides one app's fate in a step: the variant the values select, the
-// images both releases ship for it, and the operator's pins and the box's holds.
+// appDecision decides one app's fate: selected variant, both releases' images,
+// values pins and holds.
 func appDecision(app string, values map[string]any, oldImages, newImages map[string]map[string]admission.Image, holds []snapshot.Hold) (appMove, ImageChange) {
 	variant := variantOf(values, app)
 	oldImage, oldOK := oldImages[app][variant]
@@ -257,26 +223,22 @@ func appDecision(app string, values map[string]any, oldImages, newImages map[str
 	case oldOK && newOK:
 		return shippedMove(app, values, oldImage, newImage, holds)
 	case !oldApp && !newApp:
-		// Neither release ships this app: the values name something the
-		// chart would ignore, so there is no install to migrate.
+		// Neither release ships it: there is no install to migrate.
 		return moveNone, ImageChange{}
 	case oldApp && newApp:
-		// The app exists on both sides but the variant the values select
-		// does not: box cannot tell whether the image moved, so it takes the
-		// safe answer and snapshots. A pin does not change that -- box cannot
-		// say what the pin would hold. The side that ships no such variant
-		// leaves its image zero, and the copy refuses rather than record an
-		// image box never saw.
+		// The variant is missing on one side: box cannot tell whether the image
+		// moved, so snapshot. A zero image makes the copy refuse rather than
+		// record one box never saw.
 		return moveMoves, ImageChange{Ran: imageRef(oldImage), MovedTo: imageRef(newImage)}
 	default:
-		// The app is in one release only. There is nothing to migrate.
+		// The app is in one release only; nothing to migrate.
 		return moveNone, ImageChange{}
 	}
 }
 
-// shippedMove decides an app both releases ship the selected variant of: the
-// digest is the image, so a tag re-pushed to new bytes still reads as a move. The
-// operator's pin is applied first, and a hold only decides when no pin does.
+// shippedMove decides an app both releases ship: the digest is the image, so a
+// re-pushed tag reads as a move. A pin is applied first; a hold decides only
+// when no pin does.
 func shippedMove(app string, values map[string]any, oldImage, newImage admission.Image, holds []snapshot.Hold) (appMove, ImageChange) {
 	// What the chart did is remembered first, because the pin may hide it.
 	chartMoved := imageMoved(oldImage, newImage)
@@ -286,14 +248,11 @@ func shippedMove(app string, values map[string]any, oldImage, newImage admission
 	case digest != "":
 		oldImage.Digest, newImage.Digest = digest, digest
 	case tag != "":
-		// A tag pin drops the variant's digest, and box cannot see whether
-		// the two tags are the same bytes.
+		// A tag pin drops the digest: box cannot see whether the tags match.
 		oldImage.Digest, newImage.Digest = "", ""
 	}
 	if h, ok := holdFor(holds, app); ok && !pinned {
-		// The app runs what the rollback left it on, not what this release's
-		// chart says: its old side is the hold's image, and its new side stays
-		// that image until a release pins another.
+		// The app runs what the rollback left it on, not this chart's image.
 		moved := imageRef(newImage)
 		if !holdLapsed(moved, h) {
 			return moveHeldBack, ImageChange{}
@@ -312,15 +271,10 @@ func shippedMove(app string, values map[string]any, oldImage, newImage admission
 	return moveNone, ImageChange{}
 }
 
-// imageMoved reports whether two releases pin different images for one app, by
-// the identity a rollback reads (sameImage): the repository, then the digest
-// when either side has one, then the tag.
-//
-// The tag is the case the digest cannot answer. A release that pins no digest --
-// a locally built image, or a variant released before its first digest pin --
-// moves an app by tag alone: Helm rolls the pod and the app may migrate, so a
-// step that read that as no move would snapshot nothing, roll nothing back, and
-// say "no image moves" about a release that replaced every pod it names.
+// imageMoved compares two images by sameImage's identity. The tag is the case a
+// digest cannot answer: a release pinning none moves the app by tag alone, and
+// reading that as no move would snapshot nothing for a release that replaced
+// every pod.
 func imageMoved(oldImage, newImage admission.Image) bool {
 	return !sameImage(imageRef(oldImage), imageRef(newImage))
 }
@@ -330,9 +284,8 @@ func imageRef(img admission.Image) snapshot.ImageRef {
 	return snapshot.ImageRef{Repository: img.Repository, Tag: img.Tag, Digest: img.Digest}
 }
 
-// pinOf is the pin the values put on one app's image: the digest when they set
-// one, otherwise the tag, which drops the variant's digest. Values that set
-// neither leave the chart's own pin in place.
+// pinOf is the values' pin on one app: digest, else tag (which drops the
+// variant's digest); neither leaves the chart's.
 func pinOf(values map[string]any, app string) (tag, digest string) {
 	apps, _ := values["apps"].(map[string]any)
 	entry, _ := apps[app].(map[string]any)
@@ -342,9 +295,7 @@ func pinOf(values map[string]any, app string) (tag, digest string) {
 	return strings.TrimSpace(tag), strings.TrimSpace(digest)
 }
 
-// pinLabel names the pin the values hold an app at, for the plan: the tag when
-// they pin one, else the digest. renderPlan has no values of its own, so the
-// plan carries the labels.
+// pinLabel names the values' pin for the plan, which carries no values.
 func pinLabel(values map[string]any, app string) string {
 	tag, digest := pinOf(values, app)
 	if tag != "" {
@@ -358,8 +309,7 @@ func hasApp(images map[string]map[string]admission.Image, app string) bool {
 	return ok
 }
 
-// variantOf is the variant the values select for one app. Values own the
-// choice; the repository itself is always the chart's.
+// variantOf is the values' selected variant, defaulting to "default".
 func variantOf(values map[string]any, app string) string {
 	apps, _ := values["apps"].(map[string]any)
 	entry, _ := apps[app].(map[string]any)

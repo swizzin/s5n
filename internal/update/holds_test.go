@@ -8,8 +8,7 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// holdValuesChart is one release with sonarr pinned at digestB, for the overlay's
-// lapse decision.
+// holdValuesChart pins sonarr at digestB.
 func holdValuesChart() release.Chart {
 	return release.Chart{Name: "s5n", Version: "0.5.0", Variants: variants(digestB)}
 }
@@ -24,9 +23,6 @@ func heldSonarr() snapshot.Hold {
 	}
 }
 
-// TestHoldValuesKeepsTheAppOnItsOldImage: the release still pins the image the
-// rollback avoided, so the overlay names the image the app runs, digest and tag
-// both, and nothing lapses.
 func TestHoldValuesKeepsTheAppOnItsOldImage(t *testing.T) {
 	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"enabled": true}}}
 	overlay, lapsed, err := HoldValues(holdValuesChart(), values, []snapshot.Hold{heldSonarr()})
@@ -45,8 +41,6 @@ func TestHoldValuesKeepsTheAppOnItsOldImage(t *testing.T) {
 	}
 }
 
-// TestHoldValuesLosesToAUserPin: a hand pin is the operator's decision about the
-// app, so the hold says nothing about it, and it is not a hold the release lapsed.
 func TestHoldValuesLosesToAUserPin(t *testing.T) {
 	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{
 		"enabled": true,
@@ -61,9 +55,6 @@ func TestHoldValuesLosesToAUserPin(t *testing.T) {
 	}
 }
 
-// TestHoldValuesLapsesWhenTheReleaseMovesPastIt: the chart pins another image,
-// so the hold is over, and the sentence says which image the release chose and
-// which image the rollback avoided.
 func TestHoldValuesLapsesWhenTheReleaseMovesPastIt(t *testing.T) {
 	hold := heldSonarr()
 	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.5", Digest: digestC}
@@ -84,12 +75,8 @@ func TestHoldValuesLapsesWhenTheReleaseMovesPastIt(t *testing.T) {
 	}
 }
 
-// TestHoldValuesLapsesWhenTheReleasePinsAnotherTag: a release that names an
-// image by tag alone -- a locally built one, which has no digest to pin -- still
-// pins something other than the image the rollback avoided, so the hold lapses.
-// Comparing digests alone left it standing for good, because "" is the digest of
-// every tag-only image: the app would have stayed on its old image while box
-// said it was waiting for an image that release had already moved past.
+// A tag-only release still pins something other than the avoided image. Comparing
+// digests alone leaves the hold standing, because "" is every tag's digest.
 func TestHoldValuesLapsesWhenTheReleasePinsAnotherTag(t *testing.T) {
 	hold := heldSonarr()
 	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"}
@@ -111,9 +98,6 @@ func TestHoldValuesLapsesWhenTheReleasePinsAnotherTag(t *testing.T) {
 	}
 }
 
-// TestHoldValuesKeepsAReleaseThatPinsTheSameTagOnlyImage: the other half of the
-// tag comparison -- a release whose pin is still the avoided tag names the image
-// the rollback put the app back onto, so the hold stands.
 func TestHoldValuesKeepsAReleaseThatPinsTheSameTagOnlyImage(t *testing.T) {
 	hold := heldSonarr()
 	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"}
@@ -128,9 +112,6 @@ func TestHoldValuesKeepsAReleaseThatPinsTheSameTagOnlyImage(t *testing.T) {
 	}
 }
 
-// TestHoldValuesStandsWhenTheChartSaysNothing: a release box cannot compare the
-// app against is no reason to drop the hold -- the app stays where the rollback
-// left it, and the next release that ships variants decides.
 func TestHoldValuesStandsWhenTheChartSaysNothing(t *testing.T) {
 	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"enabled": true}}}
 	overlay, lapsed, err := HoldValues(release.Chart{Name: "s5n", Version: "0.5.0"}, values, []snapshot.Hold{heldSonarr()})

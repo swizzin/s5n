@@ -27,8 +27,7 @@ const (
 	sonarrAltDigest = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
 )
 
-// applyChart is the release an apply installs: the fixture chart with a
-// variants.yaml whose sonarr digest is the one a test moves to (digestB).
+// applyChart's sonarr digest is the one a test moves to (digestB).
 func applyChart(t *testing.T) release.Chart {
 	t.Helper()
 	read := func(name string) []byte {
@@ -49,10 +48,7 @@ func applyChart(t *testing.T) release.Chart {
 	}
 }
 
-// snapshotHarness is ApplySnapshots wired to fakes: a cluster that runs what the
-// test says, Helm's answer for the installed release, and a copy that records
-// what it was asked for. Everything logs to one call log, so the order across
-// the three is one assertion.
+// snapshotHarness wires ApplySnapshots to fakes that share one call log.
 type snapshotHarness struct {
 	hook    *ApplySnapshots
 	cluster *fakeCluster
@@ -62,8 +58,7 @@ type snapshotHarness struct {
 	chart   release.Chart
 }
 
-// newSnapshotHarness is the step wired to fakes, for an apply that installs a
-// chart pinning sonarr's digestB.
+// newSnapshotHarness installs a chart pinning sonarr's digestB.
 func newSnapshotHarness(t *testing.T) *snapshotHarness {
 	t.Helper()
 	h := &snapshotHarness{log: &callLog{}, chart: applyChart(t)}
@@ -87,8 +82,7 @@ func newSnapshotHarness(t *testing.T) *snapshotHarness {
 	return h
 }
 
-// plan is what apply hands the step: the release's namespace, the chart and
-// values it renders, and the grant's config root.
+// plan is what apply hands the step.
 func (h *snapshotHarness) plan(values map[string]any) release.SnapshotPlan {
 	return release.SnapshotPlan{
 		Namespace:  "testbox",
@@ -98,8 +92,7 @@ func (h *snapshotHarness) plan(values map[string]any) release.SnapshotPlan {
 	}
 }
 
-// applyValues is the values one apply renders: qbittorrent and sonarr enabled,
-// with whatever image keys the test puts on sonarr.
+// applyValues enables qbittorrent and sonarr with the test's image keys.
 func applyValues(sonarrImage map[string]any, enable ...string) map[string]any {
 	apps := map[string]any{
 		"qbittorrent": map[string]any{"enabled": true},
@@ -115,15 +108,13 @@ func applyValues(sonarrImage map[string]any, enable ...string) map[string]any {
 	return map[string]any{"apps": apps}
 }
 
-// runningQBT is qbittorrent as the fixture chart runs it, so it never moves.
+// runningQBT is qbittorrent as the chart runs it; it never moves.
 func runningQBT() Running {
 	return Running{Images: map[string]snapshot.ImageRef{
 		"qbittorrent": {Repository: "registry.example.com/seedbox/qbittorrent", Tag: "5.3.0", Digest: qbtDigest},
 	}}
 }
 
-// TestApplySnapshotMovesADigest: the chart pins the digest, so a tag that was
-// re-pushed to other bytes is a move the tag alone would not see.
 func TestApplySnapshotMovesADigest(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -150,8 +141,6 @@ func TestApplySnapshotMovesADigest(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotMovesATagOnlyPin: a values pin of a tag alone names no
-// digest, so the image the app ran is the one its pods report.
 func TestApplySnapshotMovesATagOnlyPin(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -180,8 +169,6 @@ func TestApplySnapshotMovesATagOnlyPin(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotMovesAVariant: the variant is another repository, which is a
-// different image whatever the tags say.
 func TestApplySnapshotMovesAVariant(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -205,8 +192,6 @@ func TestApplySnapshotMovesAVariant(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotSameRenderingDoesNotMove: what the chart renders and what the
-// app runs are the same image, so there is nothing to copy.
 func TestApplySnapshotSameRenderingDoesNotMove(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -224,8 +209,6 @@ func TestApplySnapshotSameRenderingDoesNotMove(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotFirstEnableDoesNotMove: the values just enabled radarr, and
-// an app that has never run has no state to migrate.
 func TestApplySnapshotFirstEnableDoesNotMove(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -243,10 +226,8 @@ func TestApplySnapshotFirstEnableDoesNotMove(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove: the values pin the tag
-// the StatefulSet already asks for, and the digest the pod reports is what
-// those bytes are, not a second reference. Reading it as one made every apply
-// on such a box stop and copy the app.
+// The pod's digest is what the pinned tag's bytes are, not a second reference:
+// reading it as one stopped and copied the app on every apply.
 func TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -265,9 +246,6 @@ func TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotSameTagOnlyPinWithoutADigestDoesNotMove: a pod that reports
-// nothing does not make an unchanged pin a move either. The digest is only
-// wanted once something is going to be copied.
 func TestApplySnapshotSameTagOnlyPinWithoutADigestDoesNotMove(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -285,9 +263,6 @@ func TestApplySnapshotSameTagOnlyPinWithoutADigestDoesNotMove(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotMovesWithoutACopyWhenNoPodReportsTheDigest: the apply that
-// pins a digest is the way out of a tag-only box, so it must not be the one
-// refused. The app moves, uncopied, and the plan says why before the question.
 func TestApplySnapshotMovesWithoutACopyWhenNoPodReportsTheDigest(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -317,9 +292,6 @@ func TestApplySnapshotMovesWithoutACopyWhenNoPodReportsTheDigest(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotMovesWithoutACopyOnDifferentDigests: the tag covered more
-// than one image while the app ran, so no one reference is what it ran. It
-// moves, uncopied, and the plan names the tag the instances disagree under.
 func TestApplySnapshotMovesWithoutACopyOnDifferentDigests(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -353,9 +325,6 @@ func TestApplySnapshotMovesWithoutACopyOnDifferentDigests(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotMovesWithoutACopyOnDifferentInstances: one instance's
-// StatefulSet was changed by hand, so no single reference is what the app runs.
-// Any instance the pin moves makes the app move, and the plan shows both.
 func TestApplySnapshotMovesWithoutACopyOnDifferentInstances(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
@@ -383,8 +352,6 @@ func TestApplySnapshotMovesWithoutACopyOnDifferentInstances(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotStartsAppsAgainWhenTheCopyFails: a failure before the release
-// moves is this run's own doing, so the apps it stopped are started again.
 func TestApplySnapshotStartsAppsAgainWhenTheCopyFails(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.snaps.takeErr = errors.New("disk full")
@@ -408,8 +375,6 @@ func TestApplySnapshotStartsAppsAgainWhenTheCopyFails(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotRefusesBeforeStoppingWhenItCannotCopy: the copy is asked
-// whether it can be taken first, so a box that cannot copy leaves the app up.
 func TestApplySnapshotRefusesBeforeStoppingWhenItCannotCopy(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.snaps.checkErr = errors.New("/srv/s5n/config/sonarr: stat: no such file")
@@ -433,18 +398,12 @@ func TestApplySnapshotRefusesBeforeStoppingWhenItCannotCopy(t *testing.T) {
 	}
 }
 
-// TestApplyWithAnUnchangedTagOnlyPinSaysNothingToChange: the box runs the tag
-// its values pin, and a re-apply of those values is the same no-op it always
-// was. The step is wired to a cluster that would report a pod digest, so a
-// comparison that read it would have a move to plan; a run with no change does
-// not even read the cluster's apps.
 func TestApplyWithAnUnchangedTagOnlyPinSaysNothingToChange(t *testing.T) {
 	log := &callLog{}
 	var out bytes.Buffer
 	chart := applyChart(t)
 
-	// The values the box already runs: the fixture values with sonarr pinned
-	// to the tag its StatefulSet asks for.
+	// The fixture values with sonarr pinned to the tag it already asks for.
 	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
 	values, err := os.ReadFile("testdata/values.yaml")
 	if err != nil {
@@ -510,8 +469,7 @@ func TestApplyWithAnUnchangedTagOnlyPinSaysNothingToChange(t *testing.T) {
 	}
 }
 
-// applyClient is release.ReleaseClient for the integration test: the values Helm
-// stored, the upgrade that ran and the receipt it published.
+// applyClient serves stored values, the upgrade, and the receipt.
 type applyClient struct {
 	deployed   map[string]any
 	upgradeErr error
@@ -522,8 +480,7 @@ func (c *applyClient) Deployed(context.Context) (map[string]any, bool, error) {
 	return c.deployed, true, nil
 }
 
-// State is the release Helm has: the chart these tests apply, deployed, so
-// what an apply decides comes from the values and the snapshot step alone.
+// State is the chart deployed, so only values and the snapshot step decide.
 func (c *applyClient) State(context.Context) (release.ReleaseState, error) {
 	return release.ReleaseState{Exists: true, ChartVersion: "0.5.0", Revision: 1, Status: "deployed"}, nil
 }
@@ -540,8 +497,7 @@ func (c *applyClient) Receipt(context.Context) (release.Receipt, error) {
 	return release.Receipt{Status: "ok", StartedAt: time.Now().Add(time.Minute)}, nil
 }
 
-// applyStorage is release.StorageClient over a namespace that exists with the
-// storage written: the integration test is about the copy, not the claims.
+// applyStorage exists so the test is about the copy, not the claims.
 type applyStorage struct{}
 
 func (applyStorage) PlanNamespace(context.Context) (release.NamespacePlan, error) {
@@ -558,7 +514,7 @@ func (applyStorage) Apply(context.Context, release.StorageObject) error { return
 
 func (applyStorage) Delete(context.Context, release.StorageObject) error { return nil }
 
-// loggingConfirm answers yes and records the answer in the call log.
+// loggingConfirm answers yes and records it.
 type loggingConfirm struct{ log *callLog }
 
 func (c loggingConfirm) Ask(string, bool) (bool, error) {
@@ -566,9 +522,6 @@ func (c loggingConfirm) Ask(string, bool) (bool, error) {
 	return true, nil
 }
 
-// TestApplyCopiesBeforeTheReleaseMoves is the whole order across apply's own
-// fakes and the snapshot step's: the question, the stop, the wait for the pods,
-// the copy, and only then the release.
 func TestApplyCopiesBeforeTheReleaseMoves(t *testing.T) {
 	log := &callLog{}
 	var out bytes.Buffer
