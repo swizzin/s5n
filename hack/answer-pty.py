@@ -32,8 +32,7 @@ import subprocess
 import sys
 
 PROMPTS = [
-    # A question whose default is yes is answered with a bare enter: the e2e
-    # proves the default a person's empty answer takes, not the keystroke.
+    # A yes-defaulted question is answered with a bare enter: the e2e proves the default.
     (re.compile(r"\[Y/n\] $"), b"\n"),
     (re.compile(r"\[[yY]/[nN]\] $"), b"y\n"),
     (re.compile(r": $"), b"\n"),
@@ -66,8 +65,7 @@ def main(argv):
                     break
                 out.write(chunk)
                 out.flush()
-                # Only the last line can be a prompt, and its text is what says
-                # which answer it wants.
+                # Only the last line can be a prompt, and its text says which answer it wants.
                 tail = (tail + chunk)[-512:]
             if child.poll() is not None and not ready:
                 break

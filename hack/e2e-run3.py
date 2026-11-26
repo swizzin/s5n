@@ -96,12 +96,11 @@ def setup(ctx, ns, work):
     radarr_key, radarr_port = arr_key(ctx, ns, "radarr"), arr_port(ctx, ns, "radarr")
     prowlarr_key, prowlarr_port = arr_key(ctx, ns, "prowlarr"), arr_port(ctx, ns, "prowlarr")
 
-    # sonarr: rename the owned client, change a non-owned field (priority) and
-    # an owned one (tvCategory) in the same save.
+    # sonarr: rename the owned client, and change a non-owned field (priority) and an
+    # owned one (tvCategory) in the same save.
     sonarr_url = f"http://localhost:{sonarr_port}/sonarr/api/v3/downloadclient"
     clients = curl_get(ctx, ns, "sonarr-0", sonarr_key, sonarr_url)
-    # The release runs two download clients: qBittorrent and, when the catalog
-    # has it, SABnzbd. This run edits the qBittorrent one.
+    # The release runs qBittorrent, and SABnzbd when the catalog has it; this edits the former.
     owned = next((c for c in clients if c.get("implementation") == "QBittorrent"), None)
     if owned is None:
         sys.exit(f"setup: sonarr has no qBittorrent download client: {clients!r}")
@@ -117,11 +116,9 @@ def setup(ctx, ns, work):
     if edited is None or edited["name"] != "qBit (renamed)" or edited.get("priority") != 7:
         sys.exit(f"setup: the rename/priority/tvCategory edit did not take: {after_edit!r}")
 
-    # sonarr: a second download client the Job never created and must never
-    # touch. Its password must be the real qBittorrent credential, not a
-    # placeholder: GET always masks the stored one (********), and a create
-    # with a password the live qBittorrent actually rejects fails validation
-    # outright even with forceSave=true.
+    # sonarr: a second client the Job never created and must never touch. Its password must
+    # be the real credential: GET always masks the stored one, and a create with a password
+    # qBittorrent rejects fails validation even with forceSave=true.
     qbit_password = qbittorrent_password(ctx, ns)
     mine = json.loads(json.dumps(owned))
     mine.pop("id", None)

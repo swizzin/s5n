@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
-# The release rehearsal: release.yaml's s5n steps, run through the scripts the
-# release itself calls (hack/release.sh) against the cases the path has met.
-# Two bugs lived in that path until the 0.3.0 tag -- a packaged chart rendered
-# with no auth.edge, and a first-tag grep that ended the step under pipefail --
-# so this runs the same code, never a copy of it: a copy passes while the
-# release fails, which is the failure that shipped both bugs.
+# The release rehearsal: release.yaml's s5n steps, run through the scripts the release
+# itself calls (hack/release.sh) against the cases the path has met. Two bugs lived in that
+# path until the 0.3.0 tag -- a packaged chart rendered with no auth.edge, and a first-tag
+# grep that ended the step under pipefail -- so this runs the same code, never a copy: a
+# copy passes while the release fails.
 #
-# The same goes for the decision in front of those steps: release.yaml is called
-# by ci.yaml, whose `github` context is a push to main, so route decides
-# called-or-tag from the version input and this runs it for both. The
-# automatic path is then driven by route's own output, not a hand-set flag.
+# The decision in front of those steps is the same: release.yaml is called by ci.yaml,
+# whose `github` context is a push to main, so route decides called-or-tag from the version
+# input and this runs it for both, feeding route's own answer into the next steps.
 #
-# CI runs it as test.yaml's release-rehearsal job; a maintainer runs it on a
-# checkout. It needs git, go, helm, kubeconform, jq and python3, builds no
-# image and touches no cluster. Tags are made and deleted only in a scratch
-# clone under $TMPDIR, which has its own origin: nothing is pushed.
+# CI runs it as test.yaml's release-rehearsal job. It needs git, go, helm, kubeconform, jq
+# and python3, builds no image and touches no cluster. Tags are made and deleted only in a
+# scratch clone under $TMPDIR, which has its own origin: nothing is pushed.
 #
 # Usage: hack/release-rehearsal.sh
 set -euo pipefail
@@ -29,8 +26,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0
 
-# The digest a release stamps is the one its image build returned; here it is
-# fixed, so the render check has something exact to look for.
+# The digest a release stamps is its image build's; here it is fixed, so the render check
+# has something exact to look for.
 digest="sha256:$(printf 'a%.0s' {1..64})"
 chart_version=$(awk '/^version:/ { print $2; exit }' charts/s5n/Chart.yaml)
 auto_version="${chart_version%.*}.$(( ${chart_version##*.} + 1 ))"
@@ -38,8 +35,8 @@ auto_version="${chart_version%.*}.$(( ${chart_version##*.} + 1 ))"
 ok() { echo "== $*"; }
 bad() { echo "FAIL: $*" >&2; fail=1; }
 
-# run keeps a command's exit status ours to read: under `set -e` the assignment
-# alone would end the script. Leaves $out and $rc for the caller.
+# run keeps a command's exit status ours to read: under `set -e` the assignment alone would
+# end the script. Leaves $out and $rc.
 run() {
   if out=$("$@" 2>&1); then rc=0; else rc=$?; fi
 }
@@ -95,9 +92,9 @@ hasnt() { # hasnt <name> <file> <text>
 }
 
 # ---- a. the packaged chart ---------------------------------------------------
-# Bug 1: the render check passed no values and the chart refuses to render
-# without auth.edge=true, so the step died after a successful package. Stamping
-# before packaging is the release's order, so the render sees the stamped copy.
+# Bug 1: the render check passed no values and the chart refuses to render without
+# auth.edge=true, so the step died after a successful package. Stamping before packaging is
+# the release's order, so the render sees the stamped copy.
 echo "== a. the packaged chart"
 work="$tmp/chart"
 run env VERSION="$chart_version" DIGEST="$digest" AUTOMATED=false "$release" stamp-digest "$work"
@@ -115,9 +112,8 @@ expect_ok "an automatic patch (${auto_version}) packages with --version/--app-ve
   env VERSION="$auto_version" DIGEST="$digest" AUTOMATED=true "$release" package-chart "$work"
 
 # ---- b and c. the tag states, in a scratch clone -----------------------------
-# The scripts ask git what the tags are, so the cases are made where the tags
-# are: a clone of this checkout whose origin is itself, so a `git fetch --tags`
-# inside a step cannot pull a released tag back into a case that needs it gone.
+# The scripts ask git what the tags are, so the cases are made where the tags are: a clone
+# of this checkout whose origin is itself, so a fetch cannot pull a released tag back in.
 echo "== b, c. tag states in a scratch clone"
 clone="$tmp/clone"
 git clone --no-local --quiet . "$clone"
@@ -125,25 +121,21 @@ git -C "$clone" remote set-url origin "$clone"
 git -C "$clone" tag -l 's5n-v*' | xargs -r git -C "$clone" tag -d >/dev/null
 git -C "$clone" config user.name rehearsal
 git -C "$clone" config user.email rehearsal@example.com
-# The clone runs this checkout's script, not the committed one, so a maintainer
-# rehearsing an edit does not rehearse the commit before it. In CI the tree is
-# clean and the two are the same bytes.
+# The clone runs this checkout's script, not the committed one, so a maintainer rehearsing
+# an edit does not rehearse the commit before it. In CI the two are the same bytes.
 cp -p "$release" "$clone/hack/release.sh"
 
-# b.1: no s5n-v* tag at all -- the --all branch, the first release's body. The
-# ref the step hands `go run ./hack/release notes --all` is the tag it is
-# releasing, and in this state that tag is gone, so the two lists come out
-# empty; the branch is what this case can prove, and b.2 proves the lists when
-# the tag is there. No workflow run reaches this state -- ci.yaml creates the
-# tag before it calls -- so the step's empty body here is recorded, not fixed.
+# b.1: no s5n-v* tag at all -- the --all branch, the first release's body. No workflow run
+# reaches this state (ci.yaml creates the tag before it calls), so the empty body here is
+# recorded, not fixed; b.2 proves the lists when the tag is there.
 body="$tmp/body-none.md"
 expect_ok "notes: no s5n-v* tag at all takes the --all branch" \
   "The first s5n release: every image and platform pin it ships." \
   env VERSION="$chart_version" "$clone/hack/release.sh" notes "$body"
 hasnt "notes: no tag -- not the diff body" "$body" "that moved since"
 
-# b.2: only the tag being released (bug 2 for notes). grep prints nothing, and
-# with the fix in place the step reaches the --all branch instead of ending.
+# b.2: only the tag being released (bug 2 for notes): grep prints nothing, and with the fix
+# the step reaches the --all branch instead of ending.
 git -C "$clone" tag "s5n-v${chart_version}"
 body="$tmp/body-first.md"
 expect_ok "notes: the tag being released is the only s5n-v* tag" "The first s5n release:" \
@@ -151,9 +143,8 @@ expect_ok "notes: the tag being released is the only s5n-v* tag" "The first s5n 
 has "notes: first tag -- the --all body, not an empty diff" "$body" "- qbittorrent: ghcr.io/home-operations/qbittorrent:"
 has "notes: first tag -- the platform pins are listed too" "$body" "### Platform pins"
 
-# b.3: a previous tag present -- the diff body. One variant's digest moves in
-# the clone, so the body has something specific to name and everything that did
-# not move has to stay out.
+# b.3: a previous tag present -- the diff body. One variant's digest moves in the clone, so
+# the body has something specific to name and everything else has to stay out.
 python3 - "$clone/charts/s5n/variants.yaml" <<'PY'
 import sys
 
@@ -173,8 +164,8 @@ has "notes: the diff body names the app that moved" "$body" "- qbittorrent: "
 hasnt "notes: the diff body is not the first-release body" "$body" "The first s5n release"
 hasnt "notes: the diff body lists only what moved" "$body" "- sonarr: "
 
-# c. the version check. Back to one previous tag (0.3.0) by this point, so the
-# automatic cases have exactly one tag to be one patch above.
+# c. the version check. Back to one previous tag by this point, so the automatic cases have
+# exactly one tag to be one patch above.
 git -C "$clone" tag -d "s5n-v${auto_version}" >/dev/null
 
 expect_ok "version check: a maintainer's tag equal to Chart.yaml passes" "releasing s5n ${chart_version}" \
@@ -196,24 +187,22 @@ expect_fail "version check: another major.minor than the chart's is refused" \
   "the automatic version 9.9.0 is not ${chart_version%.*}.x, charts/s5n/Chart.yaml's major.minor" \
   env VERSION=9.9.0 AUTOMATED=true "$clone/hack/release.sh" verify-version
 
-# c.6: the automatic release whose tag is the only s5n-v* tag (bug 2 for the
-# version check). The fixed step says there is no previous tag; without the fix
-# it ended at the assignment, silently.
+# c.6: the automatic release whose tag is the only s5n-v* tag (bug 2 for the version check):
+# without the fix it ended at the assignment, silently.
 git -C "$clone" tag -d "s5n-v${chart_version}" >/dev/null
 git -C "$clone" tag "s5n-v${auto_version}"
 expect_fail "version check: the tag being released is the only one -- says why" \
   "no previous s5n-v* tag for ${auto_version} to be one patch above" \
   env VERSION="$auto_version" AUTOMATED=true "$clone/hack/release.sh" verify-version
 
-# c.7: no s5n-v* tag at all. Same message, and it must still be said out loud
-# rather than the step dying on an empty grep.
+# c.7: no s5n-v* tag at all: the same message, said out loud rather than dying on grep.
 git -C "$clone" tag -d "s5n-v${auto_version}" >/dev/null
 expect_fail "version check: no s5n-v* tag at all -- says why" \
   "no previous s5n-v* tag for ${auto_version} to be one patch above" \
   env VERSION="$auto_version" AUTOMATED=true "$clone/hack/release.sh" verify-version
 
-# c.8: the hand-tag branch's other half -- the version matches and appVersion
-# has drifted, which would tag an image the chart does not name.
+# c.8: the version matches and appVersion has drifted, which would tag an image the chart
+# does not name.
 python3 - "$clone/charts/s5n/Chart.yaml" <<'PY'
 import sys
 
@@ -230,21 +219,16 @@ expect_fail "version check: a maintainer's tag equal to the version but not appV
   env VERSION="$chart_version" AUTOMATED=false "$clone/hack/release.sh" verify-version
 
 # ---- d. route: a call from ci.yaml, or a tag push ---------------------------
-# release.yaml is called by ci.yaml, and a called workflow's `github` context is
-# the caller's: in that release the event is the push to main and the ref name
-# is `main`, never workflow_call. So nothing in the release may ask the event
-# name which branch it is on -- route asks whether the version input is set,
-# and that input only exists under workflow_call. This section decides the four
-# cases route has met, and then feeds route's own answer into the next two
-# steps, so the automatic path is driven end to end by what route decided
-# rather than by a hand-set AUTOMATED.
+# A called workflow's `github` context is the caller's, so nothing may ask the event name
+# which branch it is on: route asks whether the version input is set, which only exists
+# under workflow_call. The four cases route has met are decided here, and route's own answer
+# then drives the next two steps, so the automatic path is not hand-set.
 echo "== d. route"
 rclone="$tmp/clone-route"
 git clone --no-local --quiet . "$rclone"
 git -C "$rclone" remote set-url origin "$rclone"
 git -C "$rclone" tag -l 's5n-v*' | xargs -r git -C "$rclone" tag -d >/dev/null
-# The previous release, so the automatic version route reports has a tag to be
-# one patch above.
+# The previous release, so the automatic version route reports has a tag above it.
 git -C "$rclone" tag "s5n-v${chart_version}"
 cp -p "$release" "$rclone/hack/release.sh"
 route_dir="$tmp/route"
@@ -258,9 +242,8 @@ expect_ok "route: the call from ci.yaml is the s5n tag it was told to build" \
 has "route: the call is automated" "$called_out" "automated=true"
 hasnt "route: the call builds the input's ref, not the caller's refs/heads/main" "$called_out" "refs/heads/main"
 
-# The reverse: no version input, so a tag push, even with EVENT saying
-# workflow_call. A step that reads the event name takes the called branch here
-# and finds no version to release.
+# The reverse: no version input, so a tag push, even with EVENT saying workflow_call. A
+# step reading the event name takes the called branch and finds no version.
 tag_out="$route_dir/tag.out"
 expect_ok "route: a maintainer's tag push is s5n at the pushed tag" \
   "family=s5n version=${chart_version} ref=refs/tags/s5n-v${chart_version}" \
@@ -283,10 +266,9 @@ expect_fail "route: a version that is not <major>.<minor>.<patch> is refused" \
   env IN_VERSION=0.3 IN_REF=s5n-v0.3 REF_NAME=main REF=refs/heads/main \
   "$release" route "$route_dir/badversion.out"
 
-# route's answer, read the way the workflow reads its outputs, drives the two
-# steps that used to build AUTOMATED from the event name themselves. If route
-# refused, they run without a version and fail with their own message: the
-# rehearsal reports that, it does not stop here.
+# route's answer, read the way the workflow reads its outputs, drives the two steps that
+# used to build AUTOMATED from the event name: if route refused, they fail with their own
+# message, and the rehearsal reports that rather than stopping.
 called_version=$(sed -n 's/^version=//p' "$called_out" || true)
 called_automated=$(sed -n 's/^automated=//p' "$called_out" || true)
 expect_ok "route -> verify-version: the automatic version route reported (${called_version}) is one patch above ${chart_version}" \
@@ -305,18 +287,14 @@ expect_ok "route -> package-chart: the automatic chart is packaged at ${called_v
   "$rclone/hack/release.sh" package-chart "$work"
 
 # ---- e. the signed checksums -------------------------------------------------
-# box runs as root and verifies the signature over sha256sums.txt before it
-# replaces itself, and it refuses a release it cannot verify rather than skipping
-# the check: a box release that ships without a signature reaches no host. So
-# the signing step is a release step like any other, and it is rehearsed like
-# one -- through hack/release.sh, with a throwaway key, verified by the code box
-# actually runs (hack/sign verify imports internal/selfupdate).
+# box verifies the signature over sha256sums.txt before it replaces itself and refuses a
+# release it cannot verify, so a box release without one reaches no host. The step is
+# rehearsed through hack/release.sh with a throwaway key, verified by the code box runs
+# (hack/sign verify imports internal/selfupdate).
 #
-# It signs in a clone, because sign refuses a seed whose public half is not the
-# key committed in internal/selfupdate/signing.pub, and the committed file is
-# empty on purpose. The clone gets this checkout's release.sh, hack/sign and
-# internal/selfupdate, the way the other clones above get release.sh, so a
-# maintainer rehearsing an edit does not rehearse the commit before it.
+# It signs in a clone, because sign refuses a seed whose public half is not the committed
+# key and that file is empty on purpose. The clone gets this checkout's release.sh, hack/sign
+# and internal/selfupdate, so an edit is what is rehearsed.
 echo "== e. the signed checksums"
 sclone="$tmp/clone-sign"
 git clone --no-local --quiet . "$sclone"
@@ -324,11 +302,9 @@ cp -p "$release" "$sclone/hack/release.sh"
 cp -p hack/sign/main.go "$sclone/hack/sign/main.go"
 cp -p internal/selfupdate/*.go "$sclone/internal/selfupdate/"
 
-# signcmd runs hack/sign where the release runs it: from the replica's root, so
-# the signing.pub it reads and the one a box built there would embed are the
-# same file. It is built once rather than run with `go run`: keygen's output is
-# what the rehearsal commits as the replica's key, and on a cold module cache
-# `go run` puts its own "go: downloading" lines into that output.
+# signcmd runs hack/sign where the release runs it: from the replica's root, so the
+# signing.pub it reads is the one a box built there would embed. Built once rather than run
+# with `go run`, whose "go: downloading" lines would land in keygen's output.
 signbin="$tmp/sign"
 ( cd "$sclone" && go build -o "$signbin" ./hack/sign ) || { echo "building hack/sign failed" >&2; exit 1; }
 signcmd() {
@@ -347,8 +323,8 @@ run signcmd keygen "$key"
 if [ "$rc" -ne 0 ]; then
   bad "keygen: exit ${rc}: ${out}"
 else
-  # What keygen prints is what the maintainer commits; here it is the release's
-  # own key for the length of this run.
+# What keygen prints is what the maintainer commits; here it is the release's key for the
+# length of this run.
   printf '%s\n' "$out" > "$tmp/signing.pub"
   cp "$tmp/signing.pub" "$published"
   ok "keygen: the throwaway public key is committed in the replica's signing.pub"
@@ -363,15 +339,14 @@ expect_fail "sign-sums refuses an empty key instead of publishing an unsigned re
   "BOX_SIGNING_KEY is empty" \
   env BOX_SIGNING_KEY= VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
 
-# F1: the signed message names the release. One release's signed checksums are
-# not another's, even when the bytes are identical, so an older release's
-# signature cannot ride under a newer tag.
+# F1: the signed message names the release, so an older release's signature cannot ride
+# under a newer tag even with identical bytes.
 expect_fail "a signature made for box-v${box_version} does not verify as box-v${box_version_next}" \
   "does not verify" \
   signcmd verify "$box_version_next" "$dist/sha256sums.txt" "$published"
 
-# F2: a seed whose public half is not the committed key produces boxes that can
-# never verify another release, so signing refuses and names both keys.
+# F2: a seed whose public half is not the committed key makes boxes that can never verify
+# another release, so signing refuses and names both keys.
 other_key="$tmp/other.key"
 run signcmd keygen "$other_key"
 if [ "$rc" -ne 0 ]; then
@@ -382,31 +357,27 @@ expect_fail "sign-sums refuses a seed that is not the committed key's" \
   "BOX_SIGNING_KEY signs as" \
   env BOX_SIGNING_KEY="$other_seed" VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
 
-# ... and an empty committed key is its own sentence: it is a step not taken, not
-# a wrong key.
+# An empty committed key is its own sentence: it is a step not taken, not a wrong key.
 : > "$published"
 expect_fail "sign-sums refuses to sign while signing.pub is empty" \
   "commit the public key first" \
   env BOX_SIGNING_KEY="$seed" VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
 cp "$tmp/signing.pub" "$published"
 
-# A checksum changed after signing is a different release, and that has to be
-# what the verifier says.
+# A checksum changed after signing is a different release, and the verifier says so.
 cp "$dist/sha256sums.txt" "$tmp/tampered.txt"
 cp "$dist/sha256sums.txt.sig" "$tmp/tampered.txt.sig"
 sed -i 's/^a/b/' "$tmp/tampered.txt"
 expect_fail "a checksum edited after signing does not verify" "does not verify" \
   signcmd verify "$box_version" "$tmp/tampered.txt" "$published"
 
-# The committed file is empty until the maintainer fills it in, and box's build
-# must not need it to be a key: that build is a box which refuses to update
-# itself and says so, not a compile error.
+# The committed file is empty until the maintainer fills it in, and box's build must not
+# need it to be a key: that box refuses to update itself and says so, not a compile error.
 expect_ok "box builds with the committed signing.pub still empty" "" \
   go build -o "$tmp/box" ./cmd/box
 
-# Signing is only half of it: the asset has to be uploaded, the secret wired up,
-# and the step given the version it signs for, or every box built from this
-# release is unable to update itself.
+# Signing is only half of it: the asset has to be uploaded, the secret wired up, and the
+# step given the version it signs for, or every box built from this release cannot update.
 has "release.yaml uploads the signature with the release's other assets" \
   .github/workflows/release.yaml "dist/sha256sums.txt.sig"
 has "release.yaml gives the signing step the release's secret" \

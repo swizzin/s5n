@@ -1,33 +1,24 @@
 #!/usr/bin/env bash
-# The s5n release's steps that are not pushes: everything release.yaml does
-# between the tag and `gh release create`. They live here, not in the workflow,
-# so test.yaml's release-rehearsal job runs the same code the release runs; a
-# copy of this logic in a test job passes while the release fails, which is how
-# two bugs reached the 0.3.0 tag.
+# The s5n release's steps that are not pushes, which release.yaml runs between the tag
+# and `gh release create`. They live here so test.yaml's rehearsal runs the same code: a
+# copy of this logic in a test job passes while the release fails, which is how two bugs
+# reached the 0.3.0 tag.
 #
 # Usage: hack/release.sh <step> [argument]
-#
-#   route <output>            (IN_VERSION, IN_REF, REF_NAME, REF) which family,
-#                             which version, which ref, and whether this is the
-#                             automatic release; writes them to <output> the way
-#                             the workflow writes $GITHUB_OUTPUT
-#   verify-version            (VERSION, AUTOMATED) the version is the chart's,
-#                             or one patch above the last s5n-v* tag
-#   stamp-digest <workdir>    (DIGEST) copy charts/s5n there and stamp
-#                             s5n.default.digest in the copy's variants.yaml
-#   package-chart <workdir>   (VERSION, DIGEST, AUTOMATED, IMAGE) the chart's
-#                             validation, the package, the lint and the render
-#   sign-sums <dist-dir>      (BOX_SIGNING_KEY, VERSION) sign the box release's
-#                             sha256sums.txt for this version, writing
-#                             sha256sums.txt.sig
+#   route <output>            (IN_VERSION, IN_REF, REF_NAME, REF) family, version, ref,
+#                             and whether this is the automatic release
+#   verify-version            (VERSION, AUTOMATED) the chart's version, or one patch
+#                             above the last s5n-v* tag
+#   stamp-digest <workdir>    (DIGEST) copy charts/s5n and stamp s5n.default.digest
+#   package-chart <workdir>   (VERSION, DIGEST, AUTOMATED, IMAGE) validate, package,
+#                             lint and render
+#   sign-sums <dist-dir>      (BOX_SIGNING_KEY, VERSION) sign sha256sums.txt
 #   notes <body>              (VERSION) write the release body and print it
 #
-# Inputs are the environment variable names release.yaml's steps already set.
-# A path argument must be absolute: each step writes only the path it is given
-# (the workflow passes ${RUNNER_TEMP}/..., a local run $TMPDIR/...). The pushes
-# -- helm registry login, helm push, docker push, gh release create, git tag --
-# stay in the workflow: a script that could publish is a script that can publish
-# by accident.
+# Inputs are the variables release.yaml's steps already set. Paths must be absolute. The
+# pushes -- helm registry login, helm push, docker push, gh release create, git tag --
+# stay in the workflow: a script that could publish is a script that can publish by
+# accident.
 set -euo pipefail
 
 usage() {
@@ -45,8 +36,7 @@ USAGE
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
-# need_path <what> <path>: every path a step writes is absolute, so the caller's
-# working directory is never part of the answer.
+# need_path <what> <path>: every path a step writes is absolute.
 need_path() {
   case "${2:-}" in
   /*) ;;
@@ -54,28 +44,24 @@ need_path() {
   esac
 }
 
-# step_route is release.yaml's first question: a tag push or a call from the
-# push to main, and then which family, which version, which ref. It reads the
-# version input, never github.event_name: a called workflow's `github` context
-# is the caller's, so in the called release event_name is `push` and ref_name
-# is `main`, and a test for workflow_call there is false forever -- route took
-# the tag-push branch on `main` and refused. inputs exist only under
-# workflow_call, so a set version input is the only signal that survives, and
-# it is also what makes the s5n steps automatic.
+# step_route is release.yaml's first question: a tag push or a call from the push to main,
+# then which family, version and ref. It reads the version input, never github.event_name:
+# a called workflow's `github` context is the caller's, so event_name there is `push` and
+# ref_name `main`, and a test for workflow_call is false forever -- route once took the
+# tag-push branch on main and refused. inputs exist only under workflow_call, so a set
+# version input is the only signal that survives, and it is what makes a step automatic.
 step_route() {
   local out=${1:-}
   need_path output "$out"
   local family version ref automated=false
   if [[ -n "${IN_VERSION:-}" ]]; then
-    # Only the chart family is ever called: the push to main that
-    # decided to release always cuts s5n-v*.
+    # Only the chart family is ever called.
     family=s5n
     version="$IN_VERSION"
     ref="$IN_REF"
     automated=true
   else
-    # A tag push: the family is the prefix and the version is what
-    # follows it. v0.2.0 is history and matches neither prefix.
+    # A tag push: the family is the prefix, the version what follows it.
     case "$REF_NAME" in
       s5n-v*) family=s5n; version="${REF_NAME#s5n-v}" ;;
       box-v*) family=box; version="${REF_NAME#box-v}" ;;
@@ -100,22 +86,17 @@ step_route() {
   } >> "$out"
 }
 
-# step_verify_version is release.yaml's s5n-verify question: a maintainer's tag
-# equals Chart.yaml's version and appVersion; an automatic release is the
-# chart's major.minor, one patch above the previous s5n-v* tag.
+# step_verify_version: a maintainer's tag equals Chart.yaml's version and appVersion; an
+# automatic release is the chart's major.minor, one patch above the previous tag.
 step_verify_version() {
   : "${VERSION:?VERSION is unset}"
   local automated=${AUTOMATED:-false}
-  # Only top-level keys: Chart.yaml's annotations and kubeVersion are not
-  # this question, and helm is not needed to read one line.
+  # Only top-level keys: annotations and kubeVersion are not this question.
   local chart_version app_version
   chart_version=$(awk '/^version:/ { print $2; exit }' charts/s5n/Chart.yaml)
   app_version=$(awk '/^appVersion:/ { print $2; exit }' charts/s5n/Chart.yaml | tr -d '"')
   if [[ "$automated" = true ]]; then
-    # The automatic release's version. The workflow never commits the
-    # bump, so Chart.yaml still carries the previous patch: the version
-    # has to be the chart's major.minor, one patch above the last
-    # s5n-v* tag.
+    # The workflow never commits the bump, so Chart.yaml carries the previous patch.
     local want_major_minor prev want
     want_major_minor="${chart_version%.*}"
     if [[ "${VERSION%.*}" != "$want_major_minor" ]]; then
@@ -123,8 +104,7 @@ step_verify_version() {
       exit 1
     fi
     git fetch --tags --force --quiet
-    # grep exits 1 when the new tag is the only one; under pipefail
-    # that would end the step before the check below could say so.
+    # grep exits 1 when the new tag is the only one; under pipefail that ends the step.
     prev=$(git tag --list 's5n-v*' | sed 's/^s5n-v//' | { grep -vx "$VERSION" || true; } | sort -V | tail -1)
     if [[ -z "$prev" ]]; then
       echo "no previous s5n-v* tag for ${VERSION} to be one patch above" >&2
@@ -148,9 +128,9 @@ step_verify_version() {
   echo "releasing s5n ${VERSION}"
 }
 
-# step_stamp_digest builds the packaged chart's working copy: the tree as it
-# ships, with the image digest this run built in s5n.default.digest. The
-# committed variants.yaml keeps its "" and a checkout stays reproducible.
+# step_stamp_digest: the tree as it ships, with this run's image digest in
+# s5n.default.digest. The committed variants.yaml keeps its "" and a checkout stays
+# reproducible.
 step_stamp_digest() {
   local work=${1:-}
   need_path workdir "$work"
@@ -160,8 +140,7 @@ step_stamp_digest() {
   cp -a charts/s5n "$work/charts/s5n"
   cp hack/validate-chart.sh "$work/hack/validate-chart.sh"
 
-  # values.schema.json owns what a digest may look like. Reading the
-  # pattern from the schema means a tightened pattern fails this step
+  # values.schema.json owns what a digest looks like: a tightened pattern fails this step
   # instead of quietly accepting something the chart would refuse.
   local pattern
   pattern=$(jq -r '.definitions.digest.pattern' charts/s5n/values.schema.json)
@@ -174,8 +153,7 @@ step_stamp_digest() {
     exit 1
   fi
 
-  # Only s5n.default.digest: every other variant keeps the digest it
-  # shipped with.
+  # Only s5n.default.digest; every other variant keeps the digest it shipped with.
   python3 - "$work/charts/s5n/variants.yaml" "$DIGEST" <<'PY'
 import sys
 path, digest = sys.argv[1], sys.argv[2]
@@ -199,19 +177,17 @@ open(path, "w").write("".join(out))
 PY
 }
 
-# step_package_chart validates the stamped copy, packages it, and renders the
-# archive: the tree is not what ships, this copy is. An automated release takes
-# its version from the tag/input (Chart.yaml still carries the previous patch,
-# because the workflow never commits to main); a maintainer's tag already
-# matches Chart.yaml, so helm reads it there.
+# step_package_chart validates the stamped copy, packages it and renders the archive:
+# the tree is not what ships, this copy is. An automated release takes its version from
+# the input, because the workflow never commits to main; a maintainer's tag already
+# matches Chart.yaml.
 step_package_chart() {
   local work=${1:-}
   need_path workdir "$work"
   : "${VERSION:?VERSION is unset}"
   : "${DIGEST:?DIGEST is unset}"
   local automated=${AUTOMATED:-false}
-  # release.yaml sets IMAGE at the workflow level. The default is the same
-  # value, so a local run and the rehearsal need no second copy of it.
+  # release.yaml sets IMAGE at the workflow level; the default is the same value.
   local image=${IMAGE:-ghcr.io/swizzin/s5n}
 
   "$work/hack/validate-chart.sh" 1.37.0
@@ -223,14 +199,10 @@ step_package_chart() {
   fi
   local tgz="$work/dist/s5n-${VERSION}.tgz"
   test -f "$tgz" || { echo "helm package did not produce $(basename "$tgz")" >&2; exit 1; }
-  # The package itself lints, reads back, and renders the image this run
-  # pushed, by tag and by digest: the archive is the chart that ships.
-  # The chart refuses to render without a login in front, so the render
-  # says there is one, as box does; an app served at its own host name
-  # also needs the domain box serves it at, so gateway.host is the same
-  # fixture the chart's own validation renders with (hack/validate-chart.sh).
-  # It ships no torrent port either: a helm install sets one, from the band
-  # Kubernetes does not assign by itself.
+  # The package lints, reads back and renders the image this run pushed, by tag and
+  # digest. The chart refuses to render without a login, so the render says there is one
+  # (as box does) and gives the host its apps are served at; it ships no torrent port,
+  # since a helm install sets one from the band Kubernetes does not assign itself.
   helm lint "$tgz" --set auth.edge=true --set gateway.host=box.example.com \
     --set apps.qbittorrent.torrent.port=30080
   helm show values "$tgz" >/dev/null
@@ -246,16 +218,14 @@ step_package_chart() {
   echo "packaged $(basename "$tgz") naming ${want}"
 }
 
-# step_sign_sums signs the checksums the box release is about to publish. box
-# refuses a release whose signature it cannot verify and never falls back to
-# trusting the checksums alone, so a box release without one reaches no host at
-# all: the step fails before the release exists rather than publishing one
-# nobody can install. It runs here, not in the workflow, so the rehearsal signs
-# with a throwaway key through the same code the release runs.
+# step_sign_sums signs the checksums the box release publishes. box refuses a release
+# whose signature it cannot verify and never trusts the checksums alone, so the step fails
+# here rather than publishing one nobody can install. It runs here, not in the workflow, so
+# the rehearsal signs with a throwaway key through the same code.
 #
-# The version is part of what is signed: a signature over the checksums alone is
-# one every release publishing the same binaries could reuse, and an older
-# release's validly signed sums served under this tag are a downgrade.
+# The version is part of what is signed: a signature over the checksums alone could be
+# reused by any release publishing the same binaries, and an older release's validly
+# signed sums under this tag would be a downgrade.
 step_sign_sums() {
   local dist=${1:-}
   need_path dist-dir "$dist"
@@ -272,10 +242,8 @@ step_sign_sums() {
   go run ./hack/sign sign "$VERSION" "$sums"
 }
 
-# step_notes is release.yaml's release body: the app images and the platform
-# pins that moved since the previous s5n-v* tag, or everything a first tag
-# ships. Both files, through the same parser the release decision uses, so
-# "moved" means the same thing to the body as to the job that cut the tag.
+# step_notes: the app images and platform pins that moved since the previous s5n-v* tag,
+# or everything a first tag ships -- through the same parser the release decision uses.
 step_notes() {
   local out=${1:-}
   need_path body "$out"
@@ -283,8 +251,8 @@ step_notes() {
   git fetch --tags --force --quiet
   local tag prev
   tag="s5n-v${VERSION}"
-  # The first s5n-v* tag leaves grep nothing to print, and its exit 1
-  # under pipefail would end the step before the --all branch.
+  # The first s5n-v* tag leaves grep nothing to print, and its exit 1 under pipefail would
+  # end the step before the --all branch.
   prev=$(git tag --list 's5n-v*' | { grep -vx "$tag" || true; } | sort -V | tail -1)
   mkdir -p "$(dirname "$out")"
   if [[ -n "$prev" ]]; then

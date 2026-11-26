@@ -1,37 +1,23 @@
 #!/usr/bin/env bash
 # One dev build of box, the chart and the s5n image, carried to a real machine.
 #
-# `box bootstrap` and `box migrate apply` are what a user runs, and the e2e runs
-# them on kind, which is not a host: no k0s, no disks, no operator. So before a
-# release is cut, a build is taken to a machine running a fresh OS and installed
-# there the way a user installs one -- without tagging or publishing anything.
+# `box bootstrap` and `box migrate apply` are what a user runs, and the e2e runs them on
+# kind: no k0s, no disks, no operator. So before a release, a build goes onto a machine
+# with a fresh OS and is installed there the way a user installs one, publishing nothing.
 #
 # Three artifacts share one version, `<next patch>-dev.<short sha>`:
-#
-#   box                  built at that version with -X main.version, so the
-#                        chart's box.s5n/min-box check is the real one
-#   s5n-<dev>.tgz        the chart at that version and appVersion, so the image
-#                        it names is ghcr.io/swizzin/s5n:<dev>
+#   box                  built with -X main.version, so the chart's min-box check is real
+#   s5n-<dev>.tgz        the chart at that version and appVersion, naming the dev image
 #   s5n-image-<dev>.tar  that image, for the test machine's node's containerd
 #
-# Why the *next patch*: the chart's box.s5n/min-box is the last release's
-# version (0.5.0), and semver puts 0.5.0-dev.x below 0.5.0, so a dev build of
-# the released version would be refused by the chart it just built.
-# `<next patch>-dev.<sha>` is above that floor, and still below the release that
-# follows it.
+# The *next patch*, because min-box is the last release's version (0.5.0) and semver puts
+# 0.5.0-dev.x below it: a dev build of the released version would be refused by the chart
+# it just built. `<next patch>-dev.<sha>` is above that floor and below the next release.
 #
-# box pulls charts over OCI only, and speaks plain HTTP only to a loopback
-# registry (internal/release's plainHTTPFor), so the chart is served from a
-# distribution container on this machine's 127.0.0.1 and the test machine
-# reaches it through `ssh -R`. That is why there is a `serve` here and not a
-# chart directory: there is no local-chart flag, on purpose.
-#
-# The image cannot be pulled either: ghcr.io/swizzin/s5n:<dev> is not published,
-# so it is imported into the test machine's node by an import loop NEXT.txt
-# starts before the install.
-#
-# Usage: hack/dev-box.sh build [--out <dir>] [--dirty]
-#        hack/dev-box.sh serve <dir> [--port N]
+# box pulls charts over OCI only and speaks plain HTTP only to a loopback registry
+# (internal/release's plainHTTPFor), so `serve` runs a distribution container on this
+# machine's 127.0.0.1 and the test machine reaches it through `ssh -R`. The unpublished
+# image is imported into the node by an import loop NEXT.txt starts before the install.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -58,14 +44,12 @@ need() { # need <tool>...
   done
 }
 
-# The directory a build writes when --out is not given, and the one container
-# serve owns. The version itself is read from the VERSION file the build writes,
-# so serve names the build it was pointed at rather than a second guess at it.
+# The default --out directory, and the one container serve owns. serve reads the version
+# from the VERSION a build writes, so it names the build it was pointed at.
 DEFAULT_OUT="dist/dev-box"
 CONTAINER="dev-box-registry"
 
-# chart_version is the chart in the tree: the version the dev build is one patch
-# above, and never what the artifacts are called.
+# chart_version: the tree's chart -- one patch below the dev build, never its name.
 chart_version() {
   awk '/^version:/ { print $2; exit }' charts/s5n/Chart.yaml | tr -d '"'
 }
@@ -86,8 +70,7 @@ cmd_build() {
 
   local base dev
   base=$(chart_version)
-  # The version is a release's, not a hand-written one: the next patch is
-  # ${base##*.} + 1, so there has to be a major.minor.patch to count from.
+  # The version is a release's: the next patch has to be counted from a real one.
   if ! printf '%s' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     echo "dev-box: charts/s5n/Chart.yaml version '${base}' is not <major>.<minor>.<patch>" >&2
     exit 1
@@ -108,13 +91,11 @@ cmd_build() {
   local box="$out/box" tgz="$out/s5n-${dev}.tgz" image="ghcr.io/swizzin/s5n:${dev}" tar="$out/s5n-image-${dev}.tar"
 
   echo "== box ${dev}"
-  # The release's own flags (release.yaml), so what is tested is the binary a
-  # release ships, not a fatter unstripped one.
+  # The release's own flags (release.yaml), so what is tested is the shipped binary.
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w -X main.version=${dev}" -o "$box" ./cmd/box
-  # The version is the whole point: a box built without it is "dev", and skips
-  # the chart's min-box check instead of meeting it. The build host can only
-  # run the binary it made when it is the architecture the binary is for.
+  # A box built without -X main.version says "dev" and skips the chart's min-box check.
+  # The binary only runs here when the host is the architecture it was built for.
   if [ "$(go env GOOS)/$(go env GOARCH)" = linux/amd64 ]; then
     local built
     built=$("$box" version)
@@ -124,17 +105,15 @@ cmd_build() {
   fi
 
   echo "== chart ${dev}"
-  # A copy, like the release's own packaging step: the tree's chart is never
-  # what ships, and nothing here may write inside charts/.
+  # A copy, as the release's own packaging step does: nothing may write in charts/.
   build_work=$(mktemp -d "${TMPDIR:-/tmp}/dev-box.XXXXXX")
   trap 'rm -rf "$build_work"' EXIT
   mkdir -p "$build_work/charts"
   cp -a charts/s5n "$build_work/charts/s5n"
   helm package "$build_work/charts/s5n" --destination "$out" --version "$dev" --app-version "$dev" >/dev/null
   [ -f "$tgz" ] || { echo "dev-box: helm package did not produce $(basename "$tgz")" >&2; exit 1; }
-  # The archive is what box pulls, so its version and appVersion are read back
-  # from it: they are what the min-box check compares and what the s5n image is
-  # tagged, and a chart that names the released image would test the wrong one.
+  # The archive's version and appVersion are read back: they are what the min-box check
+  # compares and what the image is tagged.
   local field want
   for field in version appVersion; do
     want=$dev
@@ -152,19 +131,16 @@ cmd_build() {
   fi
 
   echo "== image ${image}"
-  # VERSION is the Dockerfile's ARG for the s5n binary's own version, which a
-  # release passes too: it is how `s5n version` in the node says which build the
-  # imported image is.
+  # VERSION is the Dockerfile's ARG for the s5n binary's version, which a release passes
+  # too: `s5n version` in the node then says which build the imported image is.
   docker build -q --build-arg "VERSION=${dev}" -t "$image" . >/dev/null
   docker save "$image" -o "$tar"
-  # docker save writes 0600; the file is carried to another machine, where the
-  # operator's own account copies it and root imports it.
+  # docker save writes 0600, and the file is copied by an operator, then imported by root.
   chmod 0644 "$tar"
   local arch
   arch=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")
-  # box is built for linux/amd64; the image is the build host's architecture.
-  # They pair only when the host is amd64, and a mismatch is worth saying out
-  # loud before somebody carries both to a machine only one of them runs on.
+  # box is linux/amd64 and the image is the host's architecture: a mismatch is worth
+  # saying before both are carried to a machine only one of them runs on.
   [ "$arch" = linux/amd64 ] ||
     echo "   warning: the image is ${arch} and box is linux/amd64: build on the architecture of the test machine" >&2
 
@@ -174,10 +150,8 @@ cmd_build() {
   echo "   next: hack/dev-box.sh serve ${out}   (then follow ${out}/NEXT.txt)"
 }
 
-# write_next is the test machine's order of operations, with this build's
-# version filled in. The port stays a variable: the chart is served after the
-# build, and the tunnel, the serve command and every box command have to name
-# the same one.
+# write_next is the test machine's order of operations. The port stays a variable: the
+# tunnel, the serve command and every box command name the same one.
 write_next() {
   local out=$1 dev=$2 arch=$3
   cat >"$out/NEXT.txt" <<'NEXT'
@@ -264,8 +238,7 @@ otherwise) and it must not be 5000.
    and close the tunnel. On the test machine nothing is left behind but the box
    you installed.
 NEXT
-  # The port is serve's, and the commands carry it as a variable; the version,
-  # the directory and the image's architecture are this build's.
+  # The port is serve's; the version, directory and architecture are this build's.
   sed -i -e "s|@DEV@|${dev}|g" -e "s|@OUT@|${out}|g" -e "s|@ARCH@|${arch}|g" "$out/NEXT.txt"
 }
 
@@ -289,8 +262,7 @@ cmd_serve() {
     ''|*[!0-9]*) echo "dev-box: --port '${port}' is not a number" >&2; exit 2 ;;
   esac
   [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { echo "dev-box: --port ${port} is not a port" >&2; exit 2; }
-  # 5000 is the e2e's registry, and the e2e's run is the one thing this must not
-  # disturb: it publishes its own container on 127.0.0.1 and picks a free port.
+  # 5000 is the e2e's registry, which this must not disturb.
   [ "$port" -ne 5000 ] || { echo "dev-box: 5000 is the e2e's registry; pass --port with another one" >&2; exit 2; }
 
   local version tgz
@@ -300,15 +272,12 @@ cmd_serve() {
   tgz="$dir/s5n-${version}.tgz"
   [ -f "$tgz" ] || { echo "dev-box: ${tgz} is missing: run 'hack/dev-box.sh build' again" >&2; exit 1; }
 
-  # The registry image is the e2e's pin, read from where it lives: one test-only
-  # image in the repo, one place Renovate watches, and this script cannot drift
-  # onto a registry the e2e does not prove.
+  # The registry image is the e2e's pin, the one place Renovate watches.
   local image
   image=$(sed -n 's/^REGISTRY_IMAGE=\([^[:space:]]*\).*/\1/p' hack/e2e-box.sh)
   [ -n "$image" ] || { echo "dev-box: hack/e2e-box.sh no longer declares REGISTRY_IMAGE, so there is no pinned registry to serve from" >&2; exit 1; }
 
-  # Idempotent: a container of ours that is running on this port is reused, and
-  # anything else of ours is replaced. Two serves never stack.
+  # Idempotent: ours on this port is reused, anything else of ours is replaced.
   local running="" mapped=""
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     running=$(docker inspect --format '{{.State.Running}}' "$CONTAINER")
