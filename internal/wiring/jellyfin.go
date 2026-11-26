@@ -3,6 +3,7 @@ package wiring
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -233,9 +234,27 @@ func (r *Runner) jellyfinProxies(ctx context.Context, res *Result, c *JellyfinCo
 		r.stepLog("jellyfin/known-proxies", stepPending+" (empty)")
 		return nil
 	}
-	change, obs, err := j.EnsureKnownProxies(ctx, c.KnownProxies)
-	return r.detailStep(res, "jellyfin/known-proxies", change,
-		fmt.Sprintf("%s (%s)", change, strings.Join(obs.After, ", ")), err)
+	// The list is read, never written: the app builds its forwarded-header
+	// handling from it once, at startup, so the chart's init container puts it
+	// in network.xml before the app reads it and this step is what proves the
+	// running server has it. A server without it is not failed -- it works, and
+	// everything through the Gateway just looks local -- so the step says
+	// pending and what fixing it takes.
+	live, err := j.Proxies(ctx)
+	if err != nil {
+		return r.ensure(res, "jellyfin/known-proxies", apps.Unchanged, err)
+	}
+	want := append([]string(nil), c.KnownProxies...)
+	sort.Strings(want)
+	if strings.Join(live, ",") == strings.Join(want, ",") {
+		r.okStep(res, "jellyfin/known-proxies", strings.Join(live, ", "))
+		return nil
+	}
+	res.Steps = append(res.Steps, Step{Name: "jellyfin/known-proxies", Result: stepPending,
+		Detail: fmt.Sprintf("the running server trusts %q and this release serves %q: it reads the list at startup, so the next start of its pod takes it (the chart writes it before the app runs)",
+			strings.Join(live, ", "), strings.Join(want, ", "))})
+	r.stepLog("jellyfin/known-proxies", stepPending+" ("+strings.Join(live, ", ")+")")
+	return nil
 }
 
 // jellyfinLibraries gives each Arr instance's library directory a virtual

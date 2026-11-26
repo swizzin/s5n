@@ -205,7 +205,7 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") (eq $inst.app "bazarr") (eq $inst.app "sabnzbd") }}
+      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") (eq $inst.app "bazarr") (eq $inst.app "sabnzbd") (eq $inst.app "jellyfin") }}
       {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
         {{- if $root.Values.rehearsal }}
@@ -436,6 +436,36 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+        {{- else if eq $inst.app "jellyfin" }}
+        # Jellyfin reads the peers whose forwarded address it honours once, at
+        # startup: AddJellyfinApi builds ASP.NET's ForwardedHeadersOptions from
+        # NetworkConfiguration, and a value written through the API afterwards
+        # changes nothing until the process restarts (internal/jellyconf, which
+        # cites it). So the list is in network.xml before the app reads it, on
+        # every start, and the app's own saves carry it from there.
+        #
+        # The list is what makes a request through the Gateway look like the
+        # person's rather than the Gateway proxy's pod address, which Jellyfin
+        # counts as its own network -- and a local caller reaches the endpoints
+        # it answers without a credential. A box with no list gets no init
+        # container: the chart writes nothing it cannot stand behind.
+        {{- with $cfg.knownProxies }}
+        - name: network-config
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - jellyfin-config
+            - --conf=/config/config/network.xml
+            {{- range . }}
+            - --known-proxy={{ . }}
+            {{- end }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+        {{- end }}
         {{- else if eq $inst.app "pbh" }}
         # PeerBanHelper's config file, prepared before the app reads it. The
         # token comes from the environment (PBH_APITOKEN), so the one thing this

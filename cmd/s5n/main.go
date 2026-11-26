@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
 	"github.com/swizzin/s5n/internal/bazconf"
+	"github.com/swizzin/s5n/internal/jellyconf"
 	"github.com/swizzin/s5n/internal/qbtconf"
 	"github.com/swizzin/s5n/internal/sabconf"
 	"github.com/swizzin/s5n/internal/ttlconf"
@@ -36,6 +38,8 @@ func main() {
 		err = runBazarrConfig(os.Args[2:])
 	case "sabnzbd-config":
 		err = runSabnzbdConfig(os.Args[2:])
+	case "jellyfin-config":
+		err = runJellyfinConfig(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "version":
@@ -58,6 +62,7 @@ commands:
   tautulli-config  seed Tautulli's api_key into config.ini
   bazarr-config    seed Bazarr's api key and URL base into config/config.yaml
   sabnzbd-config   seed SABnzbd's URL base, download paths and API key into sabnzbd.ini
+  jellyfin-config  set the interfaces Jellyfin binds and the proxies it trusts in config/network.xml
   probe            dial one address and report whether it opened, for box's lock proof
   version          print the build version
 `)
@@ -186,6 +191,65 @@ func runTautulliConfig(args []string) error {
 		return err
 	}
 	fmt.Printf("tautulli-config: sealed %s (api_key, http_root %s, its own login off)\n", *conf, *httpRoot)
+	return nil
+}
+
+// runJellyfinConfig is Jellyfin's init container. Jellyfin reads the interfaces
+// it binds and the peers whose forwarded address it honours once, at startup
+// (internal/jellyconf says why and cites it), so both are in its own network.xml
+// before the app reads it; the wiring Job can only report what the running app
+// holds. The bind list is always written empty -- every interface -- because that
+// is what keeps the app reachable from outside its pod, and the container runs on
+// every start so a value another writer left cannot survive it.
+func runJellyfinConfig(args []string) error {
+	fs := flag.NewFlagSet("jellyfin-config", flag.ExitOnError)
+	conf := fs.String("conf", "/config/config/network.xml", "path to Jellyfin's config/network.xml")
+	var proxies stringList
+	fs.Var(&proxies, "known-proxy", "an address or subnet whose X-Forwarded-For Jellyfin honours (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(*conf)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", *conf, err)
+	}
+	out, changed, err := jellyconf.Ensure(existing, proxies)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *conf, err)
+	}
+	if !changed {
+		fmt.Printf("jellyfin-config: %s already binds every interface and trusts %s\n", *conf, trustList(proxies))
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(*conf), err)
+	}
+	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("jellyfin-config: %s binds every interface and trusts %s\n", *conf, trustList(proxies))
+	return nil
+}
+
+// trustList renders the proxy list the file now holds: the app reads an empty
+// element as "honour no X-Forwarded-For at all", which is worth saying out loud.
+func trustList(proxies stringList) string {
+	if len(proxies) == 0 {
+		return "no proxy (X-Forwarded-For ignored)"
+	}
+	return strings.Join(proxies, ", ")
+}
+
+// stringList is a flag that may be given more than once, in order.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("an empty value")
+	}
+	*s = append(*s, v)
 	return nil
 }
 

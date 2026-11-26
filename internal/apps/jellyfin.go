@@ -343,35 +343,24 @@ func (j *Jellyfin) Network(ctx context.Context) (NetworkConfiguration, error) {
 	return out, nil
 }
 
-// EnsureKnownProxies sets NetworkConfiguration.KnownProxies to exactly proxies.
+// Proxies is the list of peers whose X-Forwarded-For this server honours, as it
+// holds it now (sorted).
 //
-// Empty known proxies is not "no proxies": Jellyfin then ignores
-// X-Forwarded-For entirely (ConfigureForwardHeaders sets ForwardedHeaders.None
-// when the list is empty), so every request the Gateway proxies looks like it
-// came from the Gateway pod -- a local address. That is what makes an anonymous
-// "local" admin call possible from the internet and a per-user remote-access
-// decision meaningless. With the Gateway's peers listed, the person's real
-// address arrives and Jellyfin classifies it as remote (or as the LAN, if the
-// list says so).
-//
-// It writes only when the live list differs, and the whole document is written
-// back so the app's other network settings survive.
-func (j *Jellyfin) EnsureKnownProxies(ctx context.Context, proxies []string) (Change, Observation, error) {
-	live, err := j.Network(ctx)
+// The Job reads this rather than writing it: Jellyfin builds ASP.NET's
+// ForwardedHeadersOptions from this configuration at *startup*
+// (Jellyfin.Server/Extensions/ApiServiceCollectionExtensions.cs,
+// ConfigureForwardHeaders, called from AddJellyfinApi), so a value written
+// through the API afterwards takes effect only when the process restarts. The
+// chart therefore writes it into network.xml before the app reads it
+// (internal/jellyconf), and this call is what proves the running server has it:
+// with the list empty the app ignores the header entirely and every request
+// through the Gateway counts as its own network.
+func (j *Jellyfin) Proxies(ctx context.Context) ([]string, error) {
+	conf, err := j.Network(ctx)
 	if err != nil {
-		return Unchanged, Observation{}, err
+		return nil, err
 	}
-	current := stringList(live["KnownProxies"])
-	want := append([]string(nil), proxies...)
-	sort.Strings(want)
-	if equalStrings(current, want) {
-		return Unchanged, Observation{Before: current, After: current}, nil
-	}
-	live["KnownProxies"] = want
-	if err := j.client.Post(ctx, "/System/Configuration/network", live, nil); err != nil {
-		return Unchanged, Observation{}, err
-	}
-	return Updated, Observation{Before: current, After: want}, nil
+	return stringList(conf["KnownProxies"]), nil
 }
 
 // stringList reads a JSON array of strings, tolerating the absent and null
@@ -386,25 +375,6 @@ func stringList(v any) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// Observation is a before/after pair for a value the Job changed. It is the
-// receipt's own words for a drift: what the app said, what it now says.
-type Observation struct {
-	Before []string
-	After  []string
 }
 
 // SetToken points this client at a session token or an API key.

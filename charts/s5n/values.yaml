@@ -327,9 +327,11 @@ apps:
     # the endpoints marked LocalAccessOrRequiresElevation answer a local caller
     # without a credential, so an internet client behind the Gateway would get
     # an anonymous restart, and every per-user remote-access rule would see
-    # "local". box writes the cluster's own pod network here on every apply
-    # (it is read from the Nodes' podCIDRs); a plain `helm install` sets the
-    # pod subnet its CNI hands out.
+    # "local". box reads the cluster's own pod network from the Nodes' podCIDRs
+    # at init and records it in the grant, and the chart writes it into
+    # network.xml in an init container before the app starts -- the value is
+    # read once, at startup, so a later write would not take. A plain
+    # `helm install` sets the pod subnet its CNI hands out.
     knownProxies: []
     resources: {}
     env: {}

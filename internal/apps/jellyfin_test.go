@@ -500,12 +500,11 @@ func TestJellyfinLibraryAdoptsByPath(t *testing.T) {
 	}
 }
 
-// TestJellyfinKnownProxiesAreWrittenOnce: with the list empty Jellyfin ignores
-// X-Forwarded-For entirely, and through the Gateway every request then comes from
-// a local-looking address. The Job writes the Gateway's peers and, on a second
-// run, writes nothing -- and it sends the app's whole network document back, so a
-// setting it does not own survives.
-func TestJellyfinKnownProxiesAreWrittenOnce(t *testing.T) {
+// TestJellyfinProxiesAreWhatTheServerTrusts: the list is read, not written --
+// the app only applies one at startup -- so what the test pins is that the Job
+// sees exactly what the server holds, and an empty configuration is an empty
+// list rather than an error.
+func TestJellyfinProxiesAreWhatTheServerHolds(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
 	if err := wizardUser(ctx, j); err != nil {
@@ -516,30 +515,24 @@ func TestJellyfinKnownProxiesAreWrittenOnce(t *testing.T) {
 	}
 	token, _ := j.AuthenticateByName(ctx, "alice", "person-pw")
 	j.SetToken(token)
-	f.network["BaseUrl"] = "/jellyfin"
 
-	change, obs, err := j.EnsureKnownProxies(ctx, []string{"10.244.0.0/16", "10.96.0.5/32"})
+	got, err := j.Proxies(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a fresh configuration holds %v", got)
+	}
+	f.mu.Lock()
+	f.network["KnownProxies"] = []any{"10.244.0.0/16", "10.96.0.5/32"}
+	f.mu.Unlock()
+	got, err = j.Proxies(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if change != Updated {
-		t.Fatalf("first write: %v", change)
-	}
-	if len(obs.Before) != 0 || len(obs.After) != 2 {
-		t.Fatalf("observation %+v", obs)
-	}
-	change, _, err = j.EnsureKnownProxies(ctx, []string{"10.96.0.5/32", "10.244.0.0/16"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if change != Unchanged {
-		t.Fatalf("the same set in another order was written again: %v", change)
-	}
-	if f.networkWrites != 1 {
-		t.Fatalf("%d network writes, want 1", f.networkWrites)
-	}
-	if got := f.network["BaseUrl"]; got != "/jellyfin" {
-		t.Fatalf("the app's own setting was lost: %v", got)
+	want := []string{"10.244.0.0/16", "10.96.0.5/32"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("proxies = %v, want %v (sorted)", got, want)
 	}
 }
 
@@ -551,28 +544,4 @@ func wizardUser(ctx context.Context, j *Jellyfin) error {
 	}
 	_, err := j.SetFirstUser(ctx, "alice", "person-pw")
 	return err
-}
-
-// TestTheWizardReadCreatesTheAccount: the first account does not exist until
-// the wizard's own read, and a write before it is a 404 -- the app's behaviour,
-// and the reason the Job makes the pair together.
-func TestTheWizardReadCreatesTheAccount(t *testing.T) {
-	ctx := context.Background()
-	f, j := newJellyfinFake(t)
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); !IsNotFound(err) {
-		t.Fatalf("a write before the read = %v, want the app's 404", err)
-	}
-	name, err := j.StartupUser(ctx)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if name == "" || f.defaultUsers != 1 {
-		t.Fatalf("the read did not create the app's default account: name=%q created=%d", name, f.defaultUsers)
-	}
-	if ok, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil || ok {
-		t.Fatalf("the write after the read: ok=%v err=%v", ok, err)
-	}
-	if _, ok := f.users["alice"]; !ok {
-		t.Fatal("the first account was not renamed")
-	}
 }

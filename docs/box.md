@@ -302,8 +302,10 @@ host has to be told whose forwarded address to trust (`KnownProxies`): with the 
 empty Jellyfin ignores `X-Forwarded-For` and every request through the Gateway counts
 as local, and a local caller reaches the endpoints Jellyfin answers without a
 credential. `init` reads the cluster's pod network from its Nodes' `podCIDR`s and
-records it in the grant, so the range is a fact about the cluster rather than a guess
-in a file.
+records it in the grant, and the chart writes it into `network.xml` before the app
+starts -- the app builds its forwarded-header handling once, at startup, so a value
+written through the API afterwards would not take -- so the range is a fact about the
+cluster rather than a guess in a file.
 
 Seerr stays on Plex: nothing in this release wires a Jellyfin server to it, so a box
 that runs both has one media server per requester rather than a shared library.

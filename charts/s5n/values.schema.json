@@ -473,7 +473,7 @@
                 "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
               },
               "default": [],
-              "description": "The peers whose X-Forwarded-For Jellyfin honours (network.xml KnownProxies), as addresses or subnets. Empty makes the app ignore the header, so every request through the Gateway counts as local; box writes the cluster pod network here on every apply, and a plain helm install sets its CNI pod subnet."
+              "description": "The peers whose X-Forwarded-For Jellyfin honours (network.xml KnownProxies), as addresses or subnets. Empty makes the app ignore the header, so every request through the Gateway counts as local; box writes the cluster pod network here from the Nodes' podCIDRs at init, and the chart puts it in network.xml before the app starts because the app reads it once."
             },
             "resources": {
               "$ref": "#/definitions/resources"
