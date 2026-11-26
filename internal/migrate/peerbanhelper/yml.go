@@ -7,16 +7,11 @@ import (
 	"strings"
 )
 
-// ymlFile is PBH's config.yml with the position of every scalar value in it, so
-// a rewrite can replace one value and write every other byte back as it was.
-// The file is the app's template with a bilingual comment above most settings,
-// and the operator has edited it by hand; reformatting it would show in a diff
-// as though migrate had changed settings it never looked at.
-//
-// This is not a YAML parser. It reads the block-mapping subset PBH's own writer
-// produces -- nested `key: value` lines, with sequence items and flow values
-// passed over -- which is all this package has to find: `server:`'s three keys
-// and each `client.<id>.endpoint`.
+// ymlFile is PBH's config.yml with the position of every scalar value, so a
+// rewrite replaces one value and writes every other byte back: the file is the
+// app's commented template, hand-edited, and reformatting it would look like
+// changes migrate never made. It is not a YAML parser: it reads the block-mapping
+// subset PBH's writer produces, enough for `server:`'s keys and each endpoint.
 type ymlFile struct {
 	data   []byte
 	values []ymlValue
@@ -36,8 +31,8 @@ type ymlValue struct {
 type ymlBlock struct {
 	path   []string
 	indent string // the key line's own indentation
-	// childIndent is the indentation its first child used, which is the shape
-	// the app writes; a block with no child yet gets two spaces.
+	// childIndent is the indentation its first child used; an empty block gets two
+	// spaces.
 	childIndent string
 	// insertAt is where another child goes: after the last line of the block.
 	insertAt int
@@ -50,17 +45,14 @@ type ymlFrame struct {
 	block  *ymlBlock
 }
 
-// parseYAML records every mapping entry. A line it cannot read as one is left
-// where it is: the settings this package owns are all plain mappings, and
-// skipping a sequence item or a comment must never shift what the lines after it
-// mean.
+// parseYAML records every mapping entry; a line it cannot read as one is left,
+// since the settings this package owns are plain mappings.
 func parseYAML(data []byte) (*ymlFile, error) {
 	f := &ymlFile{data: data}
 	var stack []ymlFrame
 
-	// inside marks every open block the current line belongs to and moves their
-	// insertion point past it, so a key added later lands after the block's last
-	// child. Blocks the line has left are popped first.
+	// inside moves every open block's insertion point past the line, so a key
+	// added later lands after the block's last child; left blocks are popped.
 	inside := func(indent string, afterLine int) {
 		for len(stack) > 0 && len(indent) <= len(stack[len(stack)-1].indent) {
 			stack = stack[:len(stack)-1]
@@ -84,8 +76,7 @@ func parseYAML(data []byte) (*ymlFile, error) {
 		indent, trimmed := splitIndent(text)
 		switch {
 		case trimmed == "" || strings.HasPrefix(trimmed, "#"):
-			// Nothing this package reads, and a blank line inside a block does
-			// not end it.
+			// Nothing this package reads; a blank line does not end a block.
 		case strings.HasPrefix(trimmed, "- ") || trimmed == "-":
 			inside(indent, end+1)
 		default:
@@ -126,8 +117,7 @@ func parentPath(stack []ymlFrame) []string {
 	return append([]string(nil), stack[len(stack)-1].path...)
 }
 
-// parseValue reads the token after one `key:`. from is the byte after the
-// colon.
+// parseValue reads the token after one `key:`, from the byte after the colon.
 func (f *ymlFile) parseValue(lineStart, from int, text string, path []string) (ymlValue, error) {
 	for from < len(text) && (text[from] == ' ' || text[from] == '\t') {
 		from++
@@ -174,8 +164,7 @@ func (f *ymlFile) parseValue(lineStart, from int, text string, path []string) (y
 	return v, nil
 }
 
-// get is a value by its path. The last one wins, which is how YAML resolves a
-// duplicate key.
+// get is a value by path; the last wins, as YAML resolves a duplicate key.
 func (f *ymlFile) get(path ...string) (ymlValue, bool) {
 	for i := len(f.values) - 1; i >= 0; i-- {
 		if samePath(f.values[i].path, path) {
@@ -207,10 +196,9 @@ type ymlEdit struct {
 	text       string
 }
 
-// set is the edit that makes one path hold value, keeping the quoting the app
-// gave the line. A key the file does not have is added as the last child of its
-// block, in the block's own indentation; ok is false when that block is absent
-// too, which is not a file this package can rewrite.
+// set is the edit that makes one path hold value, keeping the line's quoting. A
+// missing key is added as its block's last child; ok is false when the block is
+// missing too.
 func (f *ymlFile) set(value string, path ...string) (ymlEdit, bool) {
 	if v, ok := f.get(path...); ok {
 		return ymlEdit{start: v.start, end: v.end, text: renderScalar(value, v.quote)}, true
@@ -233,8 +221,7 @@ func (f *ymlFile) set(value string, path ...string) (ymlEdit, bool) {
 	return ymlEdit{start: b.insertAt, end: b.insertAt, text: line}, true
 }
 
-// apply writes the edits in, so every byte between them is copied as it was
-// read.
+// apply writes the edits in, copying every byte between them as read.
 func (f *ymlFile) apply(edits []ymlEdit) []byte {
 	sorted := append([]ymlEdit(nil), edits...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].start < sorted[j].start })
@@ -242,8 +229,7 @@ func (f *ymlFile) apply(edits []ymlEdit) []byte {
 	last := 0
 	for _, e := range sorted {
 		if e.start < last {
-			// Two edits never overlap: each is a value's own span, or an
-			// insertion between two.
+			// Two edits never overlap: each is a value's span or an insertion.
 			continue
 		}
 		out.Write(f.data[last:e.start])
@@ -263,10 +249,8 @@ func splitIndent(line string) (string, string) {
 	return line[:i], line[i:]
 }
 
-// keyColon is the colon that makes a line a mapping entry: the first one
-// followed by a space, a tab or the end of the line. That is YAML's own rule for
-// a block key, and it keeps the colon inside a URL or a quoted key from being
-// read as one.
+// keyColon is the colon that makes a line a mapping entry: the first followed by
+// a space, a tab or the end, YAML's own rule, so a URL's colon is not one.
 func keyColon(s string) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] != ':' {
@@ -279,8 +263,8 @@ func keyColon(s string) int {
 	return -1
 }
 
-// stripComment is the line's content without a trailing comment, for telling a
-// block header from a scalar. A '#' inside quotes is part of the value.
+// stripComment drops a trailing comment, for telling a block header from a
+// scalar; a '#' inside quotes is part of the value.
 func stripComment(s string) string {
 	var quote byte
 	for i := 0; i < len(s); i++ {
@@ -298,9 +282,8 @@ func stripComment(s string) string {
 	return s
 }
 
-// unquoteScalar is a YAML scalar's value. Both quote styles are read the way
-// PBH's own writer produces them: a double quote with backslash escapes, a
-// single quote with a doubled one standing for itself.
+// unquoteScalar is a scalar's value, both quote styles as PBH writes them: double
+// with backslash escapes, single with a doubled quote.
 func unquoteScalar(s string) string {
 	if len(s) < 2 {
 		return s
@@ -339,8 +322,8 @@ func unquoteScalar(s string) string {
 	return s
 }
 
-// renderScalar writes a value, keeping the quote the line used. An unquoted
-// value that would not read back as the same string gets double quotes.
+// renderScalar writes a value with the line's quote; one that would not read back
+// the same bare gets double quotes.
 func renderScalar(value string, quote byte) string {
 	if quote == '\'' && !strings.Contains(value, "'") {
 		return "'" + value + "'"
@@ -351,8 +334,8 @@ func renderScalar(value string, quote byte) string {
 	return value
 }
 
-// needsQuote reports whether a bare scalar would be read as something else:
-// an empty value, a number, a boolean, a mapping, a sequence, or a comment.
+// needsQuote reports whether a bare scalar reads as something else: empty, a
+// number, a boolean, a mapping, a sequence or a comment.
 func needsQuote(value string) bool {
 	if value == "" || strings.TrimSpace(value) != value {
 		return true
@@ -371,8 +354,8 @@ func needsQuote(value string) bool {
 	return false
 }
 
-// escapeDouble is a YAML double-quoted scalar's escaping, over what a URL, a
-// host or a key can hold.
+// escapeDouble is a double-quoted scalar's escaping for what a URL, host or key
+// holds.
 func escapeDouble(s string) string {
 	var b strings.Builder
 	for _, r := range s {

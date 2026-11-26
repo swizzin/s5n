@@ -1,32 +1,14 @@
 // Package peerbanhelper rewrites PeerBanHelper's own listen settings and the
-// downloaders it holds.
-//
-// Its whole state lives under the directory `-Dpbh.datadir` names, and the chart
-// points that at /config (charts/s5n/templates/workloads.yaml, PBH's
-// JAVA_TOOL_OPTIONS; PBH-BTN/PeerBanHelper@v9.5.4:src/main/java/com/ghostchu/peerbanhelper/Main.java:367-378).
-// The file this package edits is `<datadir>/config/config.yml` (Main.java:373
-// and :414, and the image writes the template there on a first start, :543-548).
-//
-// That file holds no filesystem path: the values that look like paths are the
-// IP-database *names* and the `database:` block, which holds an address, not a
-// path (src/main/resources/config.yml at v9.5.4). What it does hold is the two
-// things a box changes:
-//
-//   - its own listener, under `server:`: `http`, `address` and `prefix` (the
-//     template's own comments: the port, the bind address, and the URL PBH
-//     hands a downloader so it can fetch PBH's blocklist);
-//   - one downloader per id under `client:`, each with a `type` and an
-//     `endpoint` (DownloaderManagerImpl.java:65-91, which reads `client`'s keys
-//     and hands each section to QBittorrent.loadFromConfig;
-//     QBittorrentConfigImpl.java:31-48 reads the keys this package cares about).
-//
-// The chart hands PBH its API token and its "no login at the edge" switch
-// through the environment (PBH_APITOKEN, PBH_WEB_REQUIRELOGIN, workload.yaml),
-// so `server.token` in this file is not migrate's and is left exactly as the
-// source wrote it. Wiring manages the qBittorrent downloader it owns through
-// PBH's WebAPI on every run (internal/apps/pbh.go, EnsureDownloader), so a
-// downloader this pass rewrites is one wiring then adopts by id: the endpoint
-// it writes is the same one this pass wrote, and nothing here fights it.
+// downloaders it holds. Its state is <datadir>/config/config.yml, where the chart
+// points -Dpbh.datadir at /config (charts/s5n/templates/workloads.yaml, PBH's
+// JAVA_TOOL_OPTIONS; Main.java:367-378 at v9.5.4). The file holds no filesystem
+// path: it holds `server:`'s http, address and prefix (the port, bind address and
+// URL PBH hands a downloader for its blocklist) and one downloader per id under
+// `client:` with a type and endpoint (DownloaderManagerImpl.java:65-91).
+// `server.token` is the chart's, through PBH_APITOKEN, so it is left as the
+// source wrote it; wiring adopts the qBittorrent downloader it owns by id
+// (internal/apps/pbh.go, EnsureDownloader) and this pass writes the same
+// endpoint, so the two agree.
 package peerbanhelper
 
 import (
@@ -48,8 +30,8 @@ import (
 func init() { rewrite.Register("pbh", rewriter{}) }
 
 const (
-	// configRel is config.yml inside the directory the app is given as
-	// /config: PBH's own home is `<datadir>/config`.
+	// configRel is config.yml under the directory given as /config: PBH's home is
+	// `<datadir>/config`.
 	configRel = "config/config.yml"
 
 	sectionServer = "server"
@@ -62,16 +44,15 @@ const (
 	keyName       = "name"
 	keyEndpoint   = "endpoint"
 
-	// bindAddr is what a pod needs: every container interface. A single-host
-	// install commonly binds 127.0.0.1, which inside a pod is nobody but itself.
+	// bindAddr is every container interface: a source's 127.0.0.1 is nobody but
+	// the pod itself.
 	bindAddr = "0.0.0.0"
 
 	// downloaderKind is what an adopted downloader is filed as in wiring's
 	// ownership record (internal/wiring/owned.go).
 	downloaderKind = "pbh-downloader"
 
-	// appQBittorrent is the one download client box runs, and so the one app a
-	// downloader of that type can point at on the box.
+	// appQBittorrent is the one app a qBittorrent downloader can point at.
 	appQBittorrent = "qbittorrent"
 )
 
@@ -87,8 +68,7 @@ func (rewriter) Write(_ context.Context, in rewrite.Input) (rewrite.Report, erro
 	return run(in, true)
 }
 
-// decision is both passes' work, so Write cannot make a change its Check did not
-// report.
+// decision is both passes' work, so Write cannot exceed its Check's report.
 type decision struct {
 	file  *ymlFile
 	edits []ymlEdit
@@ -137,8 +117,8 @@ func run(in rewrite.Input, write bool) (rewrite.Report, error) {
 	return rep, nil
 }
 
-// listen makes PBH's own listener the chart's: its port, every interface, and a
-// blocklist URL a downloader inside the release can reach.
+// listen makes PBH's listener the chart's: port, every interface, and a blocklist
+// URL a downloader in the release can reach.
 func (d *decision) listen(in rewrite.Input) error {
 	end, ok := in.Targets[in.App]
 	if !ok {
@@ -151,9 +131,8 @@ func (d *decision) listen(in rewrite.Input) error {
 	}{
 		{keyHTTP, strconv.Itoa(end.Port), "port"},
 		{keyAddress, bindAddr, "bind"},
-		// PBH gives this URL to the downloader it asks to fetch its blocklist,
-		// so it has to be the app's in-cluster address, not the source's
-		// 127.0.0.1 default, which inside another pod is that pod itself.
+		// PBH gives this to the downloader fetching its blocklist: it must be the
+		// app's in-cluster address, since 127.0.0.1 in another pod is that pod.
 		{keyPrefix, "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)), "url"},
 	}
 	for _, k := range keys {
@@ -171,8 +150,7 @@ func (d *decision) listen(in rewrite.Input) error {
 	return nil
 }
 
-// downloaders points every downloader the plan settles at the box, and reports
-// the ones it does not settle.
+// downloaders points every settled downloader at the box and reports the rest.
 func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 	for _, v := range d.file.values {
 		if len(v.path) != 3 || v.path[0] != sectionClient || v.path[2] != keyEndpoint {
@@ -186,9 +164,8 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q is not an http URL; left as it is", configRel, where, stored))
 			continue
 		}
-		// A URL's port is the one it names, or the one its scheme implies: an
-		// https endpoint with no port is 443, which is the port a rule has to
-		// name (and the one a refusal prints).
+		// An https endpoint with no port is 443: the port a rule must name and a
+		// refusal prints.
 		port := rewrite.URLPort(u)
 		if p := u.Port(); p != "" {
 			if _, convErr := strconv.Atoi(p); convErr != nil {
@@ -206,10 +183,9 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 				App: in.App, File: configRel, Where: where, Host: u.Hostname(), Port: port,
 			})
-			// The downloader's own type says which app its address can only
-			// mean: box runs one qBittorrent, and a qBittorrent downloader the
-			// plan cannot place can be nothing else. That is a proposal for
-			// Settle to write as a default, never a rewrite here.
+			// The type says what the address can only mean: a qBittorrent
+			// downloader unplaced by the plan is proposed for Settle, not
+			// rewritten here.
 			if name, ok := d.proposes(in, typ); ok {
 				rep.Defaults = append(rep.Defaults, rewrite.Default{
 					Host: u.Hostname(), Port: port, App: name,
@@ -223,10 +199,9 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			return fmt.Errorf("peerbanhelper: %s %s: the plan points %s at %q, which has no endpoint on the box",
 				configRel, where, address(u.Hostname(), port), res.App)
 		}
-		// A downloader's endpoint is the plain address: PBH appends /api/v2
-		// itself, and the loader strips one trailing slash
-		// (QBittorrentConfigImpl.java:33-35). The box serves qBittorrent at no
-		// URL base, and a path the source stored is the source's own shape.
+		// A downloader's endpoint is the plain address: PBH appends /api/v2 and
+		// strips one trailing slash (QBittorrentConfigImpl.java:33-35), and box
+		// serves qBittorrent at no URL base.
 		endpoint := end.URL()
 		if endpoint != stored {
 			edit, ok := d.file.set(endpoint, v.path...)
@@ -236,19 +211,13 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			d.edits = append(d.edits, edit)
 			d.tally.add(configRel, where, "host")
 		}
-		// Only the qBittorrent types are what wiring manages, and only a
-		// downloader the source already had can be adopted: it is filed under
-		// the id PBH stores it under, which is the string key `client:` uses
-		// (docs/box.md, "Migrated connections are adopted by ID").
-		//
-		// That id is stale for every config older than PBH's own config
-		// migration 32, which re-keys each downloader to a generated UUID and
-		// keeps the old key as its `name:`
-		// (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4). It is
-		// still the only id this side knows: adopting a source already past 32
-		// records the UUID it will keep, and for an older one wiring adopts the
-		// downloader back by the endpoint this pass wrote (then by its name) and
-		// records the id the app really has. Nothing here can predict the UUID.
+		// Wiring manages only the qBittorrent types, and only a downloader the
+		// source already had, filed under the string id `client:` uses
+		// (docs/box.md, "Migrated connections are adopted by ID"). That id is
+		// stale for configs older than PBH's migration 32, which re-keys each
+		// downloader to a UUID and keeps the old key as `name:`
+		// (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4); nothing
+		// here can predict it, so wiring adopts by the endpoint this pass wrote.
 		switch typ {
 		case "qbittorrent", "qbittorrentee":
 			name := d.file.str(sectionClient, id, keyName)
@@ -263,10 +232,8 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 	return nil
 }
 
-// proposes is the one qBittorrent a downloader of this type can only be, and
-// whether the box runs exactly one: two instances and an address nothing
-// settles cannot mean one of them, so nothing is proposed and the address is
-// left and called out.
+// proposes is the one qBittorrent a downloader of this type can only be, when the
+// box runs exactly one: with two, the address is left and called out.
 func (d *decision) proposes(in rewrite.Input, typ string) (string, bool) {
 	switch typ {
 	case "qbittorrent", "qbittorrentee":

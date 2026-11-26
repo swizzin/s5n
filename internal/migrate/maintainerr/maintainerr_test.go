@@ -14,9 +14,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// fixture is a database shaped after the tables and columns Maintainerr's own
-// migrations create (apps/server/src/database/migrations at v3.32.0), with a
-// single settings row and one server per Arr.
+// fixture is shaped after Maintainerr's own migrations (at v3.32.0), with one
+// settings row and one server per Arr.
 const fixture = `
 CREATE TABLE settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,8 +115,7 @@ func targets() map[string]rewrite.Endpoint {
 	}
 }
 
-// runs is every instance the fixture plan has of each catalog app: one of
-// each, which is what a proposal needs.
+// runs is one instance of each catalog app, which is what a proposal needs.
 func runs() map[string][]string {
 	return map[string][]string{
 		"plex": {"plex"}, "seerr": {"seerr"}, "tautulli": {"tautulli"},
@@ -207,8 +205,7 @@ func TestRewritesEveryConnection(t *testing.T) {
 		}
 	}
 
-	// A second pass over the written copy has nothing left to do, and no
-	// address is unclassified.
+	// A second pass has nothing to do, and no address is unclassified.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -262,9 +259,8 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 }
 
-// TestDownloadClientProposesQBittorrent: the download client column names the
-// app it dials, so an address nothing settles can only be the box's qBittorrent
-// -- when the box runs exactly one.
+// TestDownloadClientProposesQBittorrent: the column names the app it dials, so an
+// unsettled address is the box's qBittorrent when there is exactly one.
 func TestDownloadClientProposesQBittorrent(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -287,8 +283,8 @@ func TestDownloadClientProposesQBittorrent(t *testing.T) {
 		t.Fatalf("Defaults = %+v, want %+v", got, want)
 	}
 
-	// Two qBittorrents are two answers: nothing is proposed, and the address is
-	// still called out as left.
+	// Two qBittorrents are two answers: nothing is proposed, the address is
+	// called out.
 	in = setup(t)
 	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
 	exec(t, in.Dir, `UPDATE settings SET download_client_url = 'http://192.0.2.9:8080' WHERE id = 1`)
@@ -312,9 +308,8 @@ func TestDownloadClientProposesQBittorrent(t *testing.T) {
 	}
 }
 
-// TestURLColumnsResolveByPath: one host serves several apps, so a stored URL's
-// path says which one it meant, and the box's own address replaces the URL --
-// its path included.
+// TestURLColumnsResolveByPath: a stored URL's path says which app it meant, and
+// the box's address replaces the URL, path included.
 func TestURLColumnsResolveByPath(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -342,11 +337,9 @@ func TestURLColumnsResolveByPath(t *testing.T) {
 	}
 }
 
-// TestUnsettledPlexConnectionProposesPlex: plex_hostname/plex_port are
-// Maintainerr's Plex connection by name, so an address nothing settles there can
-// only be the box's Plex. That is a proposal for Settle to write as a default
-// (the address is still reported, and Check still writes nothing); a URL column
-// that names no app in particular proposes nothing.
+// TestUnsettledPlexConnectionProposesPlex: these columns are the Plex connection
+// by name, so an unsettled address is proposed for Settle; a column naming no app
+// proposes nothing.
 func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -380,8 +373,7 @@ func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
 		t.Errorf("Defaults = %+v, want none without a Plex in the plan", rep.Defaults)
 	}
 
-	// Two Plexes are two answers, and an address nothing settles cannot mean
-	// one of them: nothing is proposed, and the address is called out as left.
+	// Two Plexes are two answers: nothing is proposed, the address is called out.
 	in = setup(t)
 	in.Runs["plex"] = []string{"plex", "plex-4k"}
 	exec(t, in.Dir, `UPDATE settings SET plex_hostname = '192.0.2.56' WHERE id = 1`)
@@ -478,8 +470,7 @@ func readURL(t *testing.T, dir, table string) string {
 	return out
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()

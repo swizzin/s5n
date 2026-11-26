@@ -14,11 +14,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// configFixture is config.yml shaped the way PBH's own template is at v9.5.4:
-// a bilingual comment over most settings, `server:` near the top, and a block
-// of the same shape for every downloader under `client:`. The downloaders are
-// what the app writes when one is added through its WebUI, and the ids, hosts
-// and credentials are invented.
+// configFixture is PBH's own template shape at v9.5.4, with bilingual comments;
+// ids, hosts and credentials are invented.
 const configFixture = `config-version: 48
 # 设置程序语言
 # Set the program language
@@ -98,27 +95,23 @@ func setup(t *testing.T) rewrite.Input {
 	return rewrite.Input{App: "pbh", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
 }
 
-// runs is every instance the fixture plan has of each catalog app: one of each,
-// which is what a proposal needs.
+// runs is one instance of each catalog app, which is what a proposal needs.
 func runs() map[string][]string {
 	return map[string][]string{
 		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "radarr": {"radarr"},
 	}
 }
 
-// TestRegistered keeps apply from meeting an app with no rewriter: every app
-// migrate copies is registered, and pbh's answer is the listen settings and the
-// downloaders above rather than "nothing to do".
+// TestRegistered keeps apply from meeting an app with no rewriter.
 func TestRegistered(t *testing.T) {
 	if _, ok := rewrite.For("pbh"); !ok {
 		t.Fatal("pbh has no rewriter registered")
 	}
 }
 
-// TestRewritesListenSettingsAndDownloaders is the whole answer: the app's own
-// listener becomes the chart's, the qBittorrent downloader points at the box and
-// is filed for adoption by its string id, and the LAN downloader is reported
-// rather than guessed at.
+// TestRewritesListenSettingsAndDownloaders: the listener becomes the chart's, the
+// qBittorrent downloader points at the box and is filed for adoption, and the LAN
+// downloader is reported rather than guessed at.
 func TestRewritesListenSettingsAndDownloaders(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -213,8 +206,7 @@ func TestRewritesListenSettingsAndDownloaders(t *testing.T) {
 		}
 	}
 
-	// A second pass over the copy the first one wrote has nothing left to do,
-	// and no address is unclassified: the downloader names the box, and
+	// A second pass has nothing to do: the downloader names the box, and
 	// in.Resolve knows its own endpoints.
 	rep2, err := rewriter{}.Check(ctx, in)
 	if err != nil {
@@ -231,10 +223,9 @@ func TestRewritesListenSettingsAndDownloaders(t *testing.T) {
 	}
 }
 
-// TestAddsListenKeysTheFileLacks: PBH's own config updater fills a missing
-// template key from its defaults on start, which would leave the app on its own
-// port. The key is added to the block the app keeps it in, in that block's
-// indentation.
+// TestAddsListenKeysTheFileLacks: PBH's updater fills a missing template key from
+// its defaults on start, leaving the app on its own port, so the key is added in
+// its block's indentation.
 func TestAddsListenKeysTheFileLacks(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -269,8 +260,8 @@ func TestAddsListenKeysTheFileLacks(t *testing.T) {
 	}
 }
 
-// TestMissingConfigIsNoted: a source that never started PBH has no config.yml,
-// and there is nothing to rewrite in one.
+// TestMissingConfigIsNoted: a source that never started PBH has nothing to
+// rewrite.
 func TestMissingConfigIsNoted(t *testing.T) {
 	in := rewrite.Input{App: "pbh", Dir: t.TempDir()}
 	rep, err := rewriter{}.Check(context.Background(), in)
@@ -285,9 +276,8 @@ func TestMissingConfigIsNoted(t *testing.T) {
 	}
 }
 
-// TestStoredURLResolvesByItsPath: one host serves several apps, so a downloader
-// endpoint on such a host is the app whose path covers it. The box's own
-// address replaces the whole URL, the source's path included.
+// TestStoredURLResolvesByItsPath: a downloader endpoint on a host of paths is the
+// app whose path covers it, and the box's address replaces the whole URL.
 func TestStoredURLResolvesByItsPath(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -303,8 +293,7 @@ apps:`, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The same downloader, on the name that serves both apps, with a path of
-	// its own under the app's: the path says which app, and the trailing
+	// On the name serving both apps, the path says which app; the trailing
 	// directory is the source's shape, not the box's.
 	raw = []byte(strings.Replace(string(raw), "endpoint: http://localhost:8080",
 		"endpoint: https://panel.example.com/qbittorrent/admin", 1))
@@ -349,11 +338,9 @@ func mustPlan(t *testing.T, doc string) *plan.Plan {
 	return p
 }
 
-// TestUnsettledQbittorrentDownloaderProposesTheBoxsClient: the downloader's own
-// type says which app its address can only mean. Box runs one qBittorrent, so a
-// qBittorrent downloader nothing settles is proposed as that app, for Settle to
-// write as a default; the rewriter still reports the address and writes nothing.
-// A downloader of another type is not proposed.
+// TestUnsettledQbittorrentDownloaderProposesTheBoxsClient: a qBittorrent
+// downloader nothing settles is proposed for Settle, still reported, and nothing
+// is written; another type is not proposed.
 func TestUnsettledQbittorrentDownloaderProposesTheBoxsClient(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -387,8 +374,8 @@ func TestUnsettledQbittorrentDownloaderProposesTheBoxsClient(t *testing.T) {
 		t.Errorf("Defaults = %+v, want none for a downloader box does not run", rep.Defaults)
 	}
 
-	// Two qBittorrents are two answers, and an address nothing settles cannot
-	// mean one of them: nothing is proposed, and the address stays called out.
+	// Two qBittorrents are two answers: nothing is proposed, the address stays
+	// called out.
 	in = setup(t)
 	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
 	rep, err = rewriter{}.Check(ctx, in)
@@ -403,8 +390,7 @@ func TestUnsettledQbittorrentDownloaderProposesTheBoxsClient(t *testing.T) {
 	}
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()

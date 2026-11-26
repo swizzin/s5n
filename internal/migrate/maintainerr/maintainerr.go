@@ -1,22 +1,11 @@
-// Package maintainerr rewrites the connections Maintainerr stored for the
-// other apps on the box.
-//
-// Maintainerr keeps no filesystem path of its own. Everything it knows is in
-// one SQLite database at the root of the directory DATA_DIR moves to /config
+// Package maintainerr rewrites the connections Maintainerr stored for the other
+// apps. Its state is one SQLite database at the root of /config
 // (apps/server/src/app/config/dataDir.ts and typeOrmConfig.ts at v3.32.0), and
-// the columns that name a place are connections: Plex's host name and port, the
-// Seerr, Tautulli and download-client URLs, and one URL per Sonarr and Radarr
-// (apps/server/src/modules/settings/entities/settings.entities.ts and
-// radarr_settings.entities.ts / sonarr_settings.entities.ts at v3.32.0). A rule
-// that cannot reach the app it calls silently never runs, so every one of them
-// is rewritten through the plan's host rules.
-//
-// The columns keep TypeORM's default names, which are the property names
-// unchanged (`plex_hostname`, `plex_port`, `seerr_url`, `url`) even where the
-// rest of the table is snake_case, and the tables are the class names
-// snake_cased (`settings`, `radarr_settings`, `sonarr_settings`). Which columns
-// exist depends on the version the source ran, so each read asks the file's own
-// schema rather than assuming one.
+// the columns naming a place are connections: Plex's host and port, the Seerr,
+// Tautulli and download-client URLs, one URL per Arr. A rule whose address is
+// wrong silently never runs. The columns keep TypeORM's property names
+// (`plex_hostname`, `url`) and which exist depends on the source version, so
+// each read asks the file's own schema.
 package maintainerr
 
 import (
@@ -37,42 +26,35 @@ import (
 
 func init() { rewrite.Register("maintainerr", rewriter{}) }
 
-// dbName is Maintainerr's database, at the root of DATA_DIR
-// (apps/server/src/app/config/dataDir.ts at v3.32.0).
+// dbName is Maintainerr's database, at the root of DATA_DIR (dataDir.ts at
+// v3.32.0).
 const dbName = "maintainerr.sqlite"
 
-// settingsURLs are the settings columns holding a URL another app answers on.
-// `applicationUrl` is deliberately absent: it is the address people open
-// Maintainerr at, not one it dials, so it follows the box's edge and not the
-// plan's app table.
+// settingsURLs are the columns holding a URL another app answers on.
+// `applicationUrl` is absent: people open Maintainerr there, it is not dialled.
 var settingsURLs = []string{"seerr_url", "tautulli_url", colDownloadClient}
 
-// colDownloadClient is the qBittorrent connection: the column names the app, so
-// an address nothing settles can only be the box's qBittorrent.
+// colDownloadClient names its app, so an unsettled address can only be the box's
+// qBittorrent.
 const colDownloadClient = "download_client_url"
 
-// settingsPlex is the Plex connection, stored apart because it is a host name
-// and a port rather than a URL.
+// settingsPlex is a host and a port rather than a URL, so it is stored apart.
 const (
 	colPlexHost = "plex_hostname"
 	colPlexPort = "plex_port"
 	colPlexSSL  = "plex_ssl"
-	// appPlex is the app those two columns name: Maintainerr's only media
-	// server connection box runs.
+	// appPlex is the app those two columns name.
 	appPlex = "plex"
 
-	// appQBittorrent is the download client's app: the one column that can
-	// only be it.
+	// appQBittorrent is the download client's app.
 	appQBittorrent = "qbittorrent"
 )
 
-// settingsExternal are the media servers box does not migrate, listed in a note
-// when they are set: they point outside the release, and leaving them alone is
-// the operator's call, not a rewrite gone wrong.
+// settingsExternal are media servers box does not migrate: leaving them is the
+// operator's call, not a rewrite gone wrong, so they are only noted.
 var settingsExternal = []string{"jellyfin_url", "emby_url", "ombi_url", "streamystats_url", "tracearr_url"}
 
-// arrTables are the Arr connections: one table per Arr, each row a server with
-// a URL.
+// arrTables are the Arr connections: one table per Arr, each row a server.
 var arrTables = []string{"radarr_settings", "sonarr_settings"}
 
 type rewriter struct{}
@@ -87,9 +69,8 @@ func (rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, er
 	return run(ctx, in, true)
 }
 
-// run is both passes: gather the edits, then (for Write only) apply them. One
-// code path is what keeps the two reports identical when nothing changed
-// between them.
+// run is both passes: gather the edits, then (Write only) apply them, so the two
+// reports stay identical.
 func run(ctx context.Context, in rewrite.Input, write bool) (rewrite.Report, error) {
 	rep := rewrite.Report{App: in.App}
 	path := filepath.Join(in.Dir, dbName)
@@ -100,8 +81,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rewrite.Report, err
 		}
 		return rep, fmt.Errorf("maintainerr: %w", err)
 	}
-	// Check reads a copy: OpenReadOnly cannot write, so a read that would
-	// recover a journal fails instead of changing what was checked.
+	// Check reads a copy: OpenReadOnly cannot write, so a read that would recover
+	// a journal fails instead of changing what was checked.
 	db, err := open(ctx, path, write)
 	if err != nil {
 		return rep, err
@@ -159,8 +140,8 @@ func (e edit) apply(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// settingsEdits is the one settings row: Plex's host and port, the URLs of the
-// apps it calls, and the note for the media servers box does not migrate.
+// settingsEdits is the one settings row: Plex, the URLs it calls, and the note
+// for the media servers box does not migrate.
 func settingsEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Report, t tally) ([]edit, error) {
 	row, err := readSettings(ctx, db, t)
 	if err != nil || row == nil {
@@ -180,8 +161,7 @@ func settingsEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewri
 	return row.edits, nil
 }
 
-// settingsRow is the app's single settings row, the columns of it this package
-// knows about, and the edits decided so far.
+// settingsRow is the app's single settings row and the edits decided so far.
 type settingsRow struct {
 	id       int64
 	by       map[string]sql.NullString
@@ -190,8 +170,7 @@ type settingsRow struct {
 	tally    tally
 }
 
-// readSettings is the row, with the columns the file actually has: which ones
-// exist depends on the version the source ran, and a rewriter that assumed the
+// readSettings is the row with the columns the file actually has: assuming the
 // newest schema would refuse an older install.
 func readSettings(ctx context.Context, db *sql.DB, t tally) (*settingsRow, error) {
 	columns, err := columnsOf(ctx, db, "settings")
@@ -243,9 +222,8 @@ func readSettings(ctx context.Context, db *sql.DB, t tally) (*settingsRow, error
 	return row, nil
 }
 
-// set is one column's new value. The edit and its count are added only when the
-// column does not already hold it: a second pass over a copy the first one wrote
-// has nothing to report, which is what makes Write's report equal Check's.
+// set is one column's new value, added only when it differs: a second pass over a
+// written copy has nothing to report.
 func (r *settingsRow) set(column, value, what string, t tally) {
 	if cur, ok := r.by[column]; ok && cur.Valid && cur.String == value {
 		return
@@ -255,17 +233,16 @@ func (r *settingsRow) set(column, value, what string, t tally) {
 	t.add("settings."+column, what)
 }
 
-// plex is the Plex connection: a host and a port in two columns, which move
-// together or not at all, and the TLS flag that stops applying on the box.
+// plex is the Plex connection: host and port move together or not at all, and
+// TLS stops applying on the box.
 func (r *settingsRow) plex(in rewrite.Input, rep *rewrite.Report) error {
 	host, ok := r.by[colPlexHost]
 	if !ok || strings.TrimSpace(host.String) == "" {
 		return nil
 	}
 	port, _ := strconv.Atoi(strings.TrimSpace(r.by[colPlexPort].String))
-	// These two columns are Maintainerr's Plex connection by name, so an
-	// address nothing settles can only be the box's Plex. That is a proposal
-	// for Settle to write as a default, never a rewrite here.
+	// These columns are Maintainerr's Plex connection by name, so an unsettled
+	// address is proposed for Settle, never rewritten here.
 	end, rewriteIt, err := askHost(in, dbName, "settings."+colPlexHost, rep, host.String, port, appPlex)
 	if err != nil || !rewriteIt {
 		return err
@@ -281,9 +258,9 @@ func (r *settingsRow) plex(in rewrite.Input, rep *rewrite.Report) error {
 	return nil
 }
 
-// urls is the Seerr, Tautulli and download-client addresses. A stored URL's
-// path is part of what says which app it meant on a host that serves several,
-// and the box's own address replaces both.
+// urls is the Seerr, Tautulli and download-client addresses; a stored URL's path
+// says which app it meant on a host of paths, and the box's address replaces
+// both.
 func (r *settingsRow) urls(in rewrite.Input, rep *rewrite.Report) error {
 	for _, column := range settingsURLs {
 		v, ok := r.by[column]
@@ -296,8 +273,8 @@ func (r *settingsRow) urls(in rewrite.Input, rep *rewrite.Report) error {
 		}
 		propose := ""
 		if column == colDownloadClient {
-			// The download client is the box's qBittorrent by name: an address
-			// nothing settles can only be it, when there is one.
+			// The download client is the box's qBittorrent by name, when there is
+			// one.
 			propose = appQBittorrent
 		}
 		end, rewriteIt, err := ask(in, dbName, "settings."+column, rep, u, propose)
@@ -360,29 +337,21 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 	return edits, nil
 }
 
-// ask is the one place this app consults the plan about a stored address. It
-// returns the endpoint to point at when the plan rewrites it, and records the
-// address as unclassified when the plan does not settle it. u is the stored
-// value when the column holds a URL, and nil for two columns that hold a host
-// and a port; a URL's path is part of what says which app it meant.
-//
-// propose names the app the column itself fixes, for a column that can only be
-// one app's address (the Plex connection, the download client). An address
-// nothing settles there is proposed as a default for Settle to write, so a
-// migration does not leave a connection pointed at an address that will not
-// exist; the proposal is never a rewrite, because Check writes nothing and the
-// plan is the operator's.
+// ask consults the plan about a stored address, returning the endpoint when it
+// rewrites and recording it as unclassified otherwise. propose names the app the
+// column itself fixes (the Plex connection, the download client): an address
+// nothing settles there is proposed for Settle, never rewritten here, because
+// Check writes nothing and the plan is the operator's.
 func ask(in rewrite.Input, file, where string, rep *rewrite.Report, u *url.URL, propose string) (rewrite.Endpoint, bool, error) {
 	return askAddress(in, file, where, rep, in.ResolveURL(u), u.Hostname(), portOf(u), propose)
 }
 
-// askHost is ask for the two columns that store a host and a port instead of a
-// URL: the Plex connection.
+// askHost is ask for the Plex connection's host and port.
 func askHost(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
 	return askAddress(in, file, where, rep, in.Resolve(host, port), host, port, propose)
 }
 
-// askAddress is ask's body for a call that has already resolved its address.
+// askAddress is ask's body for a resolved address.
 func askAddress(in rewrite.Input, file, where string, rep *rewrite.Report, res plan.Resolution, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
 	switch res.Verdict {
 	case plan.Rewrite:
@@ -400,9 +369,7 @@ func askAddress(in rewrite.Input, file, where string, rep *rewrite.Report, res p
 		App: in.App, File: file, Where: where, Host: host, Port: port,
 	})
 	if propose != "" {
-		// The app the column names, and only when the box runs exactly one of
-		// it: two instances and an address nothing settles cannot mean one of
-		// them.
+		// Only when the box runs exactly one: two instances cannot both be meant.
 		if name, ok := in.Sole(propose); ok {
 			rep.Defaults = append(rep.Defaults, rewrite.Default{
 				Host: host, Port: port, App: name,
@@ -428,9 +395,7 @@ func address(host string, port int) string {
 	return fmt.Sprintf("%s:%d", host, port)
 }
 
-// parseURL is a stored URL as the app split it. A value with no scheme is
-// refused rather than guessed at: every one of these columns is written from a
-// URL field in the UI.
+// parseURL is a stored URL; one with no scheme is refused, not guessed at.
 func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -442,16 +407,14 @@ func parseURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// portOf is the port a URL names: its explicit one, or the one its scheme
-// implies when it names none (443 for https, 80 for http). A plan rule with no
-// port matches any port either way.
+// portOf is the port a URL names or its scheme implies; a rule with no port
+// matches any.
 func portOf(u *url.URL) int {
 	return rewrite.URLPort(u)
 }
 
-// columnsOf is a table's columns, or nothing when the table does not exist. A
-// migrated install can predate a column, and a rewriter that assumed the newest
-// schema would refuse to migrate an older one.
+// columnsOf is a table's columns, or nothing when it does not exist: a migrated
+// install can predate a column.
 func columnsOf(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
