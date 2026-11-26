@@ -16,12 +16,10 @@ func labelsOf(doc map[string]any) map[string]any {
 	return labels
 }
 
-// The ownership strings are constants in internal/kube, but an embedded
-// manifest cannot reference a Go constant: the cluster needs the literal in the
-// file, and the e2e's `kubectl apply` of the same file needs it too. These
-// tests are the link instead. A rename that moves the constant and not the
-// manifest -- or the manifest and not the constant -- fails here, rather than on
-// a cluster where box stops recognising a GatewayClass it created.
+// An embedded manifest cannot reference a Go constant: the cluster and the e2e's
+// kubectl need the literal. These tests are the link, so a rename that moves one and
+// not the other fails here rather than on a cluster where box stops recognising its own
+// GatewayClass.
 func TestEmbeddedManifestsCarryTheOwnershipStrings(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -41,9 +39,7 @@ func TestEmbeddedManifestsCarryTheOwnershipStrings(t *testing.T) {
 				if got := labels[kube.PartOfLabel]; got != kube.PartOf {
 					t.Errorf("%s %s: %s = %v, want %q", kind, name, kube.PartOfLabel, got, kube.PartOf)
 				}
-				// The namespace is box's plumbing rather than one of its owned
-				// objects: it carries part-of only, and nothing reads a
-				// managed-by label off it.
+				// The namespace is plumbing, not an owned object: part-of only.
 				if kind == "Namespace" {
 					continue
 				}
@@ -55,9 +51,7 @@ func TestEmbeddedManifestsCarryTheOwnershipStrings(t *testing.T) {
 	}
 }
 
-// TestAdmissionPolicyCarriesTheOwnershipStrings is the third embedded manifest:
-// the policy itself has no labels box reads, but the namespace it lives in does,
-// and the e2e asserts that namespace's labels.
+// The policy has no labels box reads, but the namespace it lives in does.
 func TestAdmissionPolicyCarriesTheOwnershipStrings(t *testing.T) {
 	docs, err := ParseManifests(admissionassets.Policy)
 	if err != nil {
@@ -79,9 +73,8 @@ func TestAdmissionPolicyCarriesTheOwnershipStrings(t *testing.T) {
 	}
 }
 
-// TestPerHostManifestsCarryTheOwnershipStrings covers the two documents box
-// builds in code rather than embedding: the fmt string is the manifest, so the
-// constants have to be the values it prints.
+// The two documents box builds in code rather than embedding: the constants must be
+// the values the format string prints.
 func TestPerHostManifestsCarryTheOwnershipStrings(t *testing.T) {
 	for _, tc := range []struct {
 		name string

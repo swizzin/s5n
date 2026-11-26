@@ -12,25 +12,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// NamespaceNameLabel is the label Kubernetes puts on every Namespace. A
-// NetworkPolicy namespaceSelector on it names one namespace without requiring
-// the operator to have labelled anything.
+// NamespaceNameLabel is the label Kubernetes puts on every Namespace, so a
+// namespaceSelector can name one without the operator labelling anything.
 const NamespaceNameLabel = "kubernetes.io/metadata.name"
 
 // GatewayFrom derives the NetworkPolicy peers the seedbox's apps must admit.
 //
-// The chart's default (a selector on envoy-gateway-system) is only right when
-// the Gateway is served by box's Envoy Gateway. Any other implementation runs
-// its proxy somewhere else -- NGINX Gateway Fabric v2, for example, runs a
-// data-plane pod per Gateway inside the Gateway's own namespace -- so the peer
-// has to be read from the cluster, not assumed.
+// The chart's default (a selector on envoy-gateway-system) is right only for box's
+// Envoy Gateway: another implementation runs its proxy elsewhere (NGINX Gateway
+// Fabric v2 runs a data-plane pod per Gateway in the Gateway's namespace), so the peer
+// is read from the cluster.
 //
-// The Gateway's address is the join: the Service whose status.loadBalancer
-// holds that address is the one forwarding to the proxy, and its namespace is
-// where the proxy pods run. An address that no Service holds but that is a
-// node address is a host-networked proxy, which is reached by node IP. Anything
-// else is refused: guessing a peer would either block the Gateway or admit a
-// namespace that has nothing to do with it.
+// The Gateway's address is the join: the Service whose status.loadBalancer holds it is
+// forwarding to the proxy, and its namespace is where the proxy runs. An address no
+// Service holds but a node does is a host-networked proxy, reached by node IP. Anything
+// else is refused: guessing would block the Gateway or admit an unrelated namespace.
 func GatewayFrom(ctx context.Context, kubeconfig string) ([]any, error) {
 	k, err := NewCluster(kubeconfig)
 	if err != nil {
@@ -55,9 +51,8 @@ func GatewayFrom(ctx context.Context, kubeconfig string) ([]any, error) {
 	return peersForAddress(address, services.Items, nodes.Items)
 }
 
-// peersForAddress is the decision over already-read objects, so the cases that
-// matter -- one Service, several, a node address, nothing -- are testable
-// without a cluster.
+// peersForAddress is the decision over read objects, so its cases are testable without
+// a cluster.
 func peersForAddress(address string, services []corev1.Service, nodes []corev1.Node) ([]any, error) {
 	namespaces := map[string]bool{}
 	for _, svc := range services {
@@ -79,8 +74,7 @@ func peersForAddress(address string, services []corev1.Service, nodes []corev1.N
 		for _, node := range nodes {
 			for _, a := range node.Status.Addresses {
 				if a.Address == address {
-					// A host-networked proxy answers from the node's own IP;
-					// the values' extraHttpFrom documents the same peer.
+					// A host-networked proxy answers from the node's own IP.
 					return []any{map[string]any{
 						"ipBlock": map[string]any{"cidr": address + "/32"},
 					}}, nil
@@ -108,16 +102,13 @@ func namespacePeer(namespace string) map[string]any {
 	}
 }
 
-// GatewayProxyIP is the ClusterIP of the Service in front of the Gateway's
-// proxy pods: the address an app's pod inside the cluster uses to reach the
-// box's own name, because that name resolves nowhere and the certificate is the
-// box's. docs/box.md, "Apps that call the login themselves".
+// GatewayProxyIP is the ClusterIP of the Service in front of the Gateway's proxy pods:
+// the address an app's pod uses to reach the box's own name, which resolves nowhere
+// (docs/box.md, "Apps that call the login themselves").
 //
-// It is found by the labels Envoy Gateway puts on its proxy Service -- the
-// owning Gateway's name and namespace -- rather than through the Gateway's
-// status address. The status address is a LoadBalancer's and is empty until
-// MetalLB has picked one; the ClusterIP exists from the moment the Service does,
-// which is what an install order needs.
+// It is found by Envoy's labels on the proxy Service, not the Gateway's status
+// address: the status address is a LoadBalancer's and empty until MetalLB picks one,
+// while the ClusterIP exists as soon as the Service does.
 func GatewayProxyIP(ctx context.Context, kubeconfig string) (string, error) {
 	k, err := NewCluster(kubeconfig)
 	if err != nil {
@@ -143,9 +134,8 @@ func (k *Kubernetes) gatewayProxyIP(ctx context.Context) (string, error) {
 		}
 		return ip, nil
 	case 0:
-		// Not a refusal: an app that speaks OIDC renders without the address
-		// and the next root run fills it in. The chart's OIDC support is the
-		// reason the value exists, not a reason to stop an install.
+		// Not a refusal: an OIDC app renders without the address and the next root run
+		// fills it in.
 		return "", nil
 	default:
 		return "", fmt.Errorf("%d Services in %s carry the labels of Gateway %s/%s's proxy: box cannot tell which one answers for it",
@@ -153,8 +143,7 @@ func (k *Kubernetes) gatewayProxyIP(ctx context.Context) (string, error) {
 	}
 }
 
-// gatewayAddress reads the Gateway box applied; it is the address every later
-// read (and the operator's browser) uses.
+// gatewayAddress reads the Gateway box applied: the address every later read uses.
 func (k *Kubernetes) gatewayAddress(ctx context.Context, namespace, name string) (string, error) {
 	gvr, err := k.mapping(schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "Gateway"})
 	if err != nil {

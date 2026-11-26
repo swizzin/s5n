@@ -14,23 +14,18 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 )
 
-// Access is one permission the platform needs before it writes: may this
-// identity do a verb on a resource? The type and the review live in
-// internal/kube, with the verbs server-side apply needs, so `box bootstrap`,
-// root's per-host TLS write and `box apply` ask the same question.
+// Access is one permission the platform needs before it writes; the type and the
+// review live in internal/kube, so bootstrap, the per-host TLS write and apply ask
+// one question.
 type Access = kube.Access
 
-// gatewayManifest is the GatewayClass and Gateway the chart's HTTPRoutes
-// attach to. The bytes are install/platform/gateway/gateway.yaml, the same
-// file the kind e2e applies with kubectl, embedded rather than copied: box and
-// the e2e cannot disagree about what the platform's Gateway is.
+// gatewayManifest is the GatewayClass and Gateway the chart's HTTPRoutes attach to:
+// install/platform/gateway/gateway.yaml, embedded, so box and the e2e cannot disagree.
 var gatewayManifest = gatewayassets.Manifest
 
-// gatewayObjects is the Gateway box applies on every run: the namespace, the
-// Gateway pointed at the chosen class, and -- only when box installs Envoy
-// Gateway -- the GatewayClass box owns. Keeping one embedded definition and
-// editing it here is what stops the e2e's copy and box's copy from drifting;
-// the class is the only field that varies.
+// gatewayObjects is what box applies on every run: the namespace, the Gateway on the
+// chosen class, and -- only when box installs Envoy Gateway -- the class box owns. The
+// class is the only field that varies.
 func gatewayObjects(class string, withClass bool) ([]map[string]any, error) {
 	docs, err := ParseManifests(gatewayManifest)
 	if err != nil {
@@ -54,26 +49,22 @@ func gatewayObjects(class string, withClass bool) ([]map[string]any, error) {
 	return out, nil
 }
 
-// admissionPolicy is install/platform/admission/policy.yaml, embedded from the
-// file beside it. The Go tests in internal/admission read that file by path,
-// and box compiles the same bytes in, so there is one definition of the rule.
+// admissionPolicy is install/platform/admission/policy.yaml, embedded: internal/admission's
+// tests read the file by path, so one definition serves both.
 var admissionPolicy = admissionassets.Policy
 
-// issuerManifest is install/platform/cert-manager/issuers.yaml: the two
-// ClusterIssuers root owns. The file names Let's Encrypt's production
-// directory; issuerObjects points it elsewhere only for a development run.
+// issuerManifest is the two ClusterIssuers root owns. It names Let's Encrypt's
+// production directory; issuerObjects points it elsewhere only for a development run.
 var issuerManifest = certmanagerassets.Issuers
 
-// issuerNames is how the plan and the tests name the issuers, the root and the
-// anchor. Every Certificate box writes names SelfSignedIssuer, so the name
-// outlives the change of what it is.
+// issuerNames is how the plan and the tests name the issuers, the root and the anchor.
 const (
 	LetsEncryptIssuer = "s5n-letsencrypt"
 	SelfSignedIssuer  = "s5n-selfsigned"
 	// BootstrapIssuer signs the root Certificate and nothing else.
 	BootstrapIssuer = "s5n-bootstrap"
-	// RootCertificateName is the box's root, a Certificate in cert-manager
-	// whose Secret is what the CA issuer signs with.
+	// RootCertificateName is box's root Certificate, whose Secret the CA issuer signs
+	// with.
 	RootCertificateName = "s5n-root-ca"
 	// RootSecretName is that Certificate's Secret: cert-manager's default,
 	// spec.secretName, written in the manifest as the same name.

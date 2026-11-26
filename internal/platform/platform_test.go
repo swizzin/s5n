@@ -14,16 +14,12 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// pins is the platform pins of the chart in this checkout: the versions box
-// installs, read from charts/s5n/platform.yaml through the parser box uses. A
-// test asserts against these rather than naming a version, so a Renovate bump
-// of the chart's pins cannot fail the suite.
+// pins is this checkout's platform pins, read through the parser box uses, so a
+// Renovate bump cannot fail the suite.
 var pins = releasetest.MustPins()
 
-// trace records the writes in the order they happened. Every assertion about
-// ordering (the Gateway before the question, the question before MetalLB, a
-// skipped install, the reachability check last) reads it, so a passing test is
-// about side effects rather than the text box printed.
+// trace records the writes in order, so the ordering assertions are about side effects
+// rather than the text box printed.
 type trace struct{ steps []string }
 
 func (t *trace) add(step string) {
@@ -36,7 +32,7 @@ func (t *trace) String() string { return strings.Join(t.steps, ",") }
 
 type fakeReleases struct {
 	versions map[string]string
-	// unowned names releases that exist but carry no box ownership label.
+	// unowned names releases that exist without box's label.
 	unowned   map[string]bool
 	installed []Release
 	err       error
@@ -72,12 +68,9 @@ type fakeCluster struct {
 	allowed       []Access
 	applyErrs     []error
 	tr            *trace
-	// certNotReady is how many Certificate reads still answer "not ready"
-	// before the object is Ready: bootstrap's root is issued a moment after the
-	// webhook that accepts the issuer which signs it.
+	// certNotReady is how many Certificate reads still answer "not ready".
 	certNotReady int
-	// certReason is what a not-ready Certificate says, and certReads counts the
-	// polls so a test can prove the wait happened rather than fell through.
+	// certReason is what a not-ready Certificate says; certReads counts the polls.
 	certReason string
 	certReads  int
 }
@@ -139,9 +132,7 @@ func (f *fakeConfirm) Ask(string, bool) (bool, error) {
 	return f.answer, nil
 }
 
-// fakeProbe is the Gateway's answer: successive Address calls return
-// successive answers (the last repeats), so "no address, then an address after
-// MetalLB" is one sequence.
+// fakeProbe answers Address calls in sequence, the last repeating.
 type fakeProbe struct {
 	answers      []GatewayAnswer
 	addressErr   error
@@ -169,9 +160,7 @@ func (f *fakeProbe) Address(_ context.Context, timeout time.Duration) (GatewayAn
 	if len(f.answers) > 1 {
 		f.answers = f.answers[1:]
 	}
-	// The probe only stops early on an address the Gateway also calls
-	// Programmed, so an answer with an address means both unless a test says
-	// otherwise.
+	// An answer with an address means Programmed too, unless a test says otherwise.
 	if answer.Address != "" && answer.Status == "" {
 		answer.Status = "True"
 	}
@@ -198,8 +187,7 @@ type fixture struct {
 	probe   *fakeProbe
 	log     *bytes.Buffer
 	tr      *trace
-	// opened is how many times the cluster client was built, probes how many
-	// times the Gateway probe was built.
+	// opened and probes count how often each client was built.
 	opened int
 	probes int
 }
@@ -230,8 +218,7 @@ func newFixture() *fixture {
 			return f.probe, nil
 		},
 		Confirm: f.confirm,
-		// One buffer for the screen and the log: a test reads the transcript the
-		// way a person reads a log, with the detail lines in their place.
+		// One buffer for screen and log, with the detail lines in their place.
 		Say: &say.Plain{W: f.log, Log: f.log},
 	}
 	return f
@@ -258,9 +245,8 @@ var allInstall = []bootstrap.ComponentResult{
 	{Component: bootstrap.ComponentCertManager, Action: "install", Mode: bootstrap.ModeAuto},
 }
 
-// notProbed is what bootstrap's read-only probes produce on a cluster with
-// nothing on it: Envoy Gateway and its Gateway are planned installs, and the
-// LoadBalancer is the question the plan defers to the Gateway's own status.
+// notProbed is what read-only probes produce on an empty cluster: Envoy and its Gateway
+// are installs, the LoadBalancer the deferred question.
 func notProbed(mode bootstrap.PlatformMode) []bootstrap.ComponentResult {
 	action := "probe"
 	if mode == bootstrap.ModeExternal {
@@ -274,10 +260,8 @@ func notProbed(mode bootstrap.PlatformMode) []bootstrap.ComponentResult {
 	}
 }
 
-// The chart versions in the plan are the release's pins, not constants of this
-// package: a platform patch is a chart release, so a release that pins other
-// versions has to move the plan with it. The fixture's versions are not HEAD's,
-// so a value read from anywhere else shows up here.
+// The plan's versions are the release's pins, not this package's constants; the
+// fixture's are not HEAD's, so a value read elsewhere shows up.
 func TestBuildPlanInstallsTheChartVersionsFromTheRelease(t *testing.T) {
 	fixture := release.Versions{
 		Authelia:     "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("d", 64),
@@ -316,7 +300,7 @@ func TestBuildPlanInstallsTheChartVersionsFromTheRelease(t *testing.T) {
 		}
 	}
 
-	// And the chart's own pins build the plan the e2e asserts.
+	// The chart's own pins build the plan the e2e asserts.
 	shipped, err := BuildPlan(pins, allInstall, "eg", "")
 	if err != nil {
 		t.Fatal(err)
@@ -335,9 +319,8 @@ func TestBuildPlanInstallsTheChartVersionsFromTheRelease(t *testing.T) {
 	}
 }
 
-// Only an install action becomes a release. A component box uses is never
-// installed or rewritten -- but box's own Gateway is on every path, because
-// the chart's routes name it -- and the tenancy policy always closes the plan.
+// Only an install becomes a release; a used component is never installed or rewritten,
+// but box's Gateway is on every path and the policy closes the plan.
 func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	plan, err := BuildPlan(pins, components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGatewayAPI:   "use",
@@ -357,8 +340,8 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	if !strings.Contains(plan.Steps[0].What, "GatewayClass nginx") {
 		t.Fatalf("the Gateway was not planned on the chosen class: %q", plan.Steps[0].What)
 	}
-	// A class someone else's controller serves is never rewritten: no
-	// GatewayClass document when box does not install the implementation.
+	// A foreign class is never rewritten: no GatewayClass document when box does not
+	// install the implementation.
 	for _, doc := range plan.Steps[0].Documents {
 		if kind, _, _ := objectMeta(doc); kind == "GatewayClass" {
 			t.Fatal("box planned to write a GatewayClass it does not own")
@@ -414,9 +397,8 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	}
 }
 
-// The Gateway is applied first in auto mode, then the question, then (only if
-// the answer is "no address") MetalLB and its pool, then the reachability
-// check. That order is the whole design: the Gateway's own status decides.
+// auto applies the Gateway, asks, installs MetalLB only on "no address", then checks
+// reachability: the Gateway's own status decides.
 func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
 	plan, err := BuildPlan(pins, notProbed(bootstrap.ModeAuto), "eg", "")
 	if err != nil {
@@ -451,16 +433,14 @@ func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
 	if plan.Steps[3].Mode != bootstrap.ModeAuto {
 		t.Fatalf("the address question does not run in auto mode: %+v", plan.Steps[3])
 	}
-	// The policy is never conditional: tenancy is not a LoadBalancer question.
+	// The policy is never conditional: tenancy is not an address question.
 	if plan.Steps[len(plan.Steps)-1].Unless != "" {
 		t.Fatal("the admission policy was made conditional")
 	}
 }
 
-// A re-run writes the Gateway again (it is box's object on every path) but it
-// still asks the Gateway that is already there: that is what keeps a second
-// bootstrap on a cluster whose MetalLB someone else installed from installing
-// one of box's own.
+// A re-run writes the Gateway again but still asks the Gateway already there, which
+// keeps a second bootstrap from installing MetalLB beside another operator's.
 func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	comps := []bootstrap.ComponentResult{
 		{Component: bootstrap.ComponentGatewayAPI, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
@@ -493,8 +473,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	}
 }
 
-// managed is box's own address layer: installed before the Gateway (whose
-// Service is what needs it) without asking anything.
+// managed installs box's own address layer before the Gateway, asking nothing.
 func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 	comps := notProbed(bootstrap.ModeManaged)
 	comps[1].Action = "install"
@@ -523,8 +502,7 @@ func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 	}
 }
 
-// external mode writes nothing for the address layer: the Gateway's address
-// verifies the operator's own, and the plan says so with a question.
+// external writes nothing for the address layer: the question verifies the operator's.
 func TestBuildPlanExternalVerifiesWithTheGatewayAddress(t *testing.T) {
 	plan, err := BuildPlan(pins, notProbed(bootstrap.ModeExternal), "eg", "")
 	if err != nil {
@@ -567,8 +545,7 @@ func TestBuildPlanRefusesConflict(t *testing.T) {
 	}
 }
 
-// A no writes nothing at all: not a Helm release, not a manifest, not the pool
-// -- and the Gateway is never asked about its address.
+// A no writes nothing -- no release, no manifest, no pool -- and asks nothing.
 func TestApplyRefusalWritesNothing(t *testing.T) {
 	f := newFixture()
 	f.confirm.answer = false
@@ -624,8 +601,7 @@ func TestApplyRefusesWithoutAccess(t *testing.T) {
 	}
 }
 
-// The whole install, in order, with readiness after each component. This is
-// the managed shape: MetalLB before the Gateway.
+// The whole install in order, readiness after each component: the managed shape.
 func TestApplyInstallsInOrder(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
@@ -661,8 +637,8 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if kind, _, name := objectMeta(f.cl.writes[2][0]); kind != "ClusterIssuer" || name != LetsEncryptIssuer {
 		t.Fatalf("third apply starts with %s %s, want the cert-manager issuers", kind, name)
 	}
-	// The root's Certificate rides the same wave as the issuers that make it
-	// possible, and the CA issuer that signs with it is the wave after.
+	// The root rides the wave with the issuers that make it possible; the CA issuer
+	// that signs with it is the wave after.
 	if kind, ns, name := objectMeta(f.cl.writes[2][2]); kind != "Certificate" || ns != CertManagerNamespace || name != RootCertificateName {
 		t.Fatalf("the root Certificate is %s %s/%s in the first issuer wave", kind, ns, name)
 	}
@@ -688,8 +664,8 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if strings.Join(waits, ",") != strings.Join(want, ",") {
 		t.Fatalf("waits = %v, want %v", waits, want)
 	}
-	// No question: managed mode owns the address layer. The reachability check
-	// still runs, because an address nobody can reach is not an install.
+	// No question in managed mode, but reachability still runs: an address nobody can
+	// reach is not an install.
 	if f.probe.addressCalls != 1 || f.probe.reachCalls != 1 {
 		t.Fatalf("address calls = %d, reach calls = %d, want the reachability check only", f.probe.addressCalls, f.probe.reachCalls)
 	}
@@ -698,8 +674,7 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	}
 }
 
-// The point of the design: when the Gateway gets an address on its own, MetalLB
-// and its pool are neither installed nor applied.
+// When the Gateway gets an address on its own, MetalLB and its pool are skipped.
 func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{Address: "10.0.0.50"}}
@@ -762,8 +737,7 @@ func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
 	}
 }
 
-// AddressNotAssigned: MetalLB is installed and the pool applied, then the
-// Gateway is waited on again -- and only then is the address checked.
+// AddressNotAssigned installs MetalLB and the pool, waits again, then checks.
 func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{
@@ -780,8 +754,8 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	if len(f.cl.writes) != 5 {
 		t.Fatalf("applies = %d, want pool, gateway, the root's wave, the CA issuer, policy", len(f.cl.writes))
 	}
-	// The Gateway and its issuers are applied before the question, so the
-	// pool is the fourth write, not the first.
+	// The Gateway and its issuers come before the question, so the pool is the fourth
+	// write.
 	if kind, _, name := objectMeta(f.cl.writes[3][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
 		t.Fatalf("the pool was not applied after the Gateway: %s %s", kind, name)
 	}
@@ -814,10 +788,8 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	}
 }
 
-// An address and a Programmed reason that is not AddressNotAssigned is a
-// failure to stop on: Envoy Gateway reports NoResources while its data plane
-// is still coming up, and box must not install MetalLB over a Gateway that has
-// an address it cannot call ready by the deadline.
+// An address with a Programmed reason other than AddressNotAssigned stops: box must
+// not install MetalLB over a Gateway with an address it cannot call ready.
 func TestApplyStopsOnAnAddressThatIsNotProgrammed(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{
@@ -846,9 +818,8 @@ func TestApplyStopsOnAnAddressThatIsNotProgrammed(t *testing.T) {
 	}
 }
 
-// The short deadline only decides "no address": a Gateway that already has an
-// address from an existing LoadBalancer, with Envoy's proxy still rolling out
-// (NoResources), gets the rest of the whole wait and is then used as it is.
+// The short deadline only decides "no address": a Gateway with an address still
+// rolling out gets the rest of the wait and is used as it is.
 func TestApplyWaitsOutASettlingGatewayPastTheShortDeadline(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{
@@ -872,9 +843,8 @@ func TestApplyWaitsOutASettlingGatewayPastTheShortDeadline(t *testing.T) {
 	}
 }
 
-// In external mode the operator's LoadBalancer gets the whole wait at once:
-// there is no MetalLB to fall back to, so a short deadline would only refuse a
-// slow address layer.
+// In external mode the operator's LoadBalancer gets the whole wait: a short deadline
+// would only refuse a slow one.
 func TestApplyExternalGetsTheWholeWait(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{Address: "203.0.113.9"}}
@@ -887,8 +857,7 @@ func TestApplyExternalGetsTheWholeWait(t *testing.T) {
 	}
 }
 
-// A Gateway with no address that is failing for a reason MetalLB cannot answer
-// stops too: installing an address layer would hide it.
+// A Gateway failing for a reason MetalLB cannot answer stops too.
 func TestApplyStopsOnAnotherReasonWithNoAddress(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{Status: "False", Reason: "AddressNotUsable", Message: "One or more Gateway addresses cannot be used"}}

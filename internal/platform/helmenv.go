@@ -8,45 +8,27 @@ import (
 	"helm.sh/helm/v4/pkg/cli"
 )
 
-// helmEnv is a private Helm home for one chart fetch. Every on-disk path Helm
-// would otherwise take from the invoking user's environment -- the repository
-// file, the repository and content caches, the registry credentials, the
-// plugins directory -- points inside a temporary directory box creates
-// (mode 0700) and removes when the fetch ends, on success and on failure.
+// helmEnv is a private Helm home for one chart fetch: every path Helm would take from
+// the invoking user's environment -- repository file, repo and content caches, registry
+// credentials, plugins -- points inside a temporary directory box creates (0700) and
+// removes when the fetch ends.
 //
-// Why: box runs as root, and root's Helm state is the operator's, not box's.
-// helm.sh/helm/v4/pkg/cli.New() is what the helm command builds its
-// environment from, and it reads HELM_* and root's ~/.config/helm and
-// ~/.cache/helm. Any of that can change or break an install box makes:
+// box runs as root, and root's Helm state is the operator's: a stale repository entry
+// makes every chart URL fail with "no cached repo found", a cached chart is preferred
+// over the pinned one, and credentials or getter plugins there would decide what box
+// downloads and run code in its process. box pulls public artifacts only, so an empty
+// private home is the whole state (docs/box.md).
 //
-//   - a repository entry that was added but never updated leaves no cached
-//     index, and Helm's scanReposForURL then fails *every* chart URL download
-//     with "no cached repo found. (try 'helm repo update')" -- a stale entry in
-//     root's repositories.yaml stops a bootstrap that never used that
-//     repository;
-//   - a chart already in root's content cache is preferred over the one the
-//     pinned version names;
-//   - registry credentials and getter plugins under root's home would decide
-//     what box downloads and run code in box's process.
-//
-// box pulls public artifacts only, so its Helm needs no repository of its own
-// and no credentials at all: an empty private home is the whole state. A
-// private registry is out of scope (docs/box.md); box says so when a registry
-// asks for credentials.
-//
-// The settings are built as a literal rather than by cli.New() because cli.New
-// reads the environment as it constructs. Only the path fields below are
-// consulted by a chart fetch (getter.All reads PluginsDirectory; the
-// ChartDownloader takes the three repository paths); box passes its own
-// kubeconfig to Helm's action configuration separately, so the empty
-// KubeConfig/context fields here are never used.
+// The settings are a literal rather than cli.New(), which reads the environment as it
+// constructs. Only the path fields are consulted by a fetch; box passes its kubeconfig
+// to Helm's action configuration separately.
 type helmEnv struct {
 	dir      string
 	settings *cli.EnvSettings
 }
 
-// newHelmEnv creates the private home. The caller removes it with Close; a
-// chart fetch is one operation, so it is defers, not a field on Helm.
+// newHelmEnv creates the private home; the caller removes it with Close, one fetch
+// being one operation.
 func newHelmEnv() (*helmEnv, error) {
 	dir, err := os.MkdirTemp("", "box-helm-")
 	if err != nil {
@@ -64,7 +46,6 @@ func newHelmEnv() (*helmEnv, error) {
 	}, nil
 }
 
-// Close removes the home. A failed removal is not a failed install: the
-// directory holds nothing box needs after the fetch, and reporting a leaked
-// temp directory instead of the chart box installed would be the wrong answer.
+// Close removes the home. A failed removal is not a failed install: reporting a leaked
+// temp directory instead of the chart installed would be the wrong answer.
 func (e *helmEnv) Close() error { return os.RemoveAll(e.dir) }

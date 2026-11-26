@@ -22,8 +22,7 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// testCA makes a self-signed CA, the shape of both the box root's Secret and a
-// --ca-file, and returns its certificate and key as PEM.
+// testCA is a self-signed CA, the shape of the root's Secret or a --ca-file.
 func testCA(t *testing.T, cn string) (certPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -51,8 +50,7 @@ func testCA(t *testing.T, cn string) (certPEM, keyPEM []byte) {
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
 
-// fakeHostCACluster is the host-CA step's cluster: the objects it reads by
-// name and the writes and removals it made.
+// fakeHostCACluster is the step's cluster: objects read by name, writes and removals.
 type fakeHostCACluster struct {
 	objects map[string]map[string]any
 	applied [][]map[string]any
@@ -74,8 +72,8 @@ func (f *fakeHostCACluster) rootCertificate(value []byte) {
 	})
 }
 
-// certificate puts the box's host Certificate in with the issuer it names, the
-// way cert-manager holds it: what the anchor follows when this run writes none.
+// certificate adds the host Certificate with the issuer it names: what the anchor
+// follows when this run writes none.
 func (f *fakeHostCACluster) certificate(issuer string) {
 	f.put("Certificate", GatewayNamespace, CertificateName("box.example.test"), map[string]any{
 		"metadata": map[string]any{"name": CertificateName("box.example.test"), "namespace": GatewayNamespace},
@@ -115,7 +113,7 @@ func (f *fakeHostCACluster) Delete(_ context.Context, _, _, kind, namespace, nam
 	return nil
 }
 
-// anchorDoc is the one ConfigMap of a write, or nil.
+// anchorDoc is the write's ConfigMap, or nil.
 func (f *fakeHostCACluster) anchorDoc(t *testing.T) map[string]any {
 	t.Helper()
 	if len(f.applied) == 0 {
@@ -124,7 +122,7 @@ func (f *fakeHostCACluster) anchorDoc(t *testing.T) map[string]any {
 	return f.applied[len(f.applied)-1][0]
 }
 
-// configMap puts an object in as the anchor ConfigMap already holds cert.
+// configMap is an object the anchor already holds cert in.
 func (f *fakeHostCACluster) configMap(cert []byte) {
 	f.put("ConfigMap", "seedbox", HostCAName, map[string]any{
 		"metadata": map[string]any{"name": HostCAName, "namespace": "seedbox"},
@@ -144,13 +142,9 @@ func newHostCA(t *testing.T, cl *fakeHostCACluster, issuer, caFile string) *Host
 	}
 }
 
-// TestAnchorFor is the whole decision as a table: the issuer this run writes
-// the box's host certificate with, the issuer the Certificate in the cluster
-// names, and whether a development run supplied a file.
-//
-// The rows without a written issuer are the ones that matter for the window a
-// box moves in: a run that writes no certificate follows the one that is
-// there, whatever DNS says about the name that day.
+// The whole decision as a table. The rows without a written issuer matter for the
+// window a box moves in: a run writing no certificate follows the one there, whatever
+// DNS says that day.
 func TestAnchorFor(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -165,17 +159,16 @@ func TestAnchorFor(t *testing.T) {
 		{"this run writes an ACME certificate with a file", "letsencrypt", "", false, "/tmp/ca.pem", anchorFromFile},
 		{"the ClusterIssuer name is accepted", SelfSignedIssuer, "", false, "", anchorFromRoot},
 		{"the ACME ClusterIssuer name is accepted", LetsEncryptIssuer, "", false, "", anchorNothing},
-		// A first init: no Certificate exists yet, and the run's own decision is
-		// the only input there is.
+		// A first init: no Certificate, so the run's own decision is the input.
 		{"first init, absent Certificate, this run decides self-signed", "selfsigned", "", false, "", anchorFromRoot},
 		{"first init, absent Certificate, this run decides Let's Encrypt", "letsencrypt", "", false, "", anchorNothing},
-		// A run that writes no certificate follows the one in the cluster.
+		// A run writing no certificate follows the one in the cluster.
 		{"the Certificate says self-signed", "", SelfSignedIssuer, true, "", anchorFromRoot},
 		{"the Certificate says Let's Encrypt", "", LetsEncryptIssuer, true, "", anchorNothing},
 		{"the Certificate says Let's Encrypt and a file is given", "", LetsEncryptIssuer, true, "/tmp/ca.pem", anchorFromFile},
 		{"the Certificate names an issuer that is not box's", "", "someone-elses-issuer", true, "", anchorNothing},
-		// This run's own write outranks a Certificate that says otherwise: the
-		// per-host step moves it, and the anchor has to land where it will be.
+		// This run's write outranks the Certificate: the anchor lands where the host
+		// will be.
 		{"this run writes self-signed over an ACME Certificate", "selfsigned", LetsEncryptIssuer, true, "", anchorFromRoot},
 		{"this run writes Let's Encrypt over a self-signed Certificate", "letsencrypt", SelfSignedIssuer, true, "", anchorNothing},
 		// Nothing says which issuer the host has: nothing follows.
@@ -197,13 +190,12 @@ func TestAnchorFor(t *testing.T) {
 	}
 }
 
-// TestHostCAWritesTheRoot: the anchor is the root's tls.crt, one key, no key
-// material -- even if the Secret held some.
+// The anchor is the root's tls.crt, one key, no key material even if the Secret had
+// some.
 func TestHostCAWritesTheRoot(t *testing.T) {
 	root, rootKey := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
-	// A Secret that carries the key beside the certificate, the way a sloppy
-	// export would: box copies certificates only.
+	// A Secret with the key beside the certificate: box copies certificates only.
 	cl.rootCertificate(append(append([]byte{}, root...), rootKey...))
 
 	res, err := newHostCA(t, cl, "selfsigned", "").Apply(context.Background())
@@ -236,8 +228,8 @@ func TestHostCAWritesTheRoot(t *testing.T) {
 	}
 }
 
-// TestHostCAReadsAFileForAnACMEHost: a Pebble-issued certificate has no ca.crt
-// anywhere, so a development run hands box the root it would otherwise copy.
+// A Pebble-issued certificate has no ca.crt, so a development run hands over the
+// root.
 func TestHostCAReadsAFileForAnACMEHost(t *testing.T) {
 	ca, key := testCA(t, "pebble root")
 	path := filepath.Join(t.TempDir(), "pebble-root.pem")
@@ -261,8 +253,8 @@ func TestHostCAReadsAFileForAnACMEHost(t *testing.T) {
 	}
 }
 
-// TestHostCARemovesTheAnchorForLetsEncrypt: a box that moved to a public
-// certificate must not leave a pod trusting a root nothing chains to.
+// A box on a public certificate must not leave a pod trusting a root nothing chains
+// to.
 func TestHostCARemovesTheAnchorForLetsEncrypt(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
@@ -281,7 +273,7 @@ func TestHostCARemovesTheAnchorForLetsEncrypt(t *testing.T) {
 	if len(cl.applied) != 0 {
 		t.Fatalf("a removal applied %d objects", len(cl.applied))
 	}
-	// Removing what is not there is the state it wants, and it is not a write.
+	// Removing what is not there is not a write.
 	cl2 := newFakeHostCA()
 	res, err = newHostCA(t, cl2, "letsencrypt", "").Apply(context.Background())
 	if err != nil {
@@ -292,8 +284,7 @@ func TestHostCARemovesTheAnchorForLetsEncrypt(t *testing.T) {
 	}
 }
 
-// TestHostCAIsIdempotent: a re-run writes nothing, which is what keeps the
-// ConfigMap's resource version -- the thing a pod's file is pinned to -- still.
+// A re-run writes nothing, keeping the ConfigMap's resource version still.
 func TestHostCAIsIdempotent(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
@@ -309,8 +300,7 @@ func TestHostCAIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestHostCAReplacesAStaleAnchor: an anchor from an older root is the one case
-// a write must happen silently, because the certificate under it changed and
+// An anchor from an older root is replaced: the certificate under it changed and
 // nothing else would notice.
 func TestHostCAReplacesAStaleAnchor(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
@@ -332,9 +322,7 @@ func TestHostCAReplacesAStaleAnchor(t *testing.T) {
 	}
 }
 
-// TestHostCAFollowsTheCertificateInTheCluster: a run that writes no certificate
-// reads the one the host is served with. The anchor moves when the Certificate
-// does, and not before.
+// A run writing no certificate reads the one served; the anchor moves with it.
 func TestHostCAFollowsTheCertificateInTheCluster(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
@@ -369,14 +357,9 @@ func TestHostCAFollowsTheCertificateInTheCluster(t *testing.T) {
 	}
 }
 
-// TestAPublicNameKeepsASelfSignedHostsAnchor is the window this decision exists
-// for: the operator adds the record and runs apply before init. The host still
-// serves its self-signed certificate -- only init's per-host step moves it to
-// Let's Encrypt -- so the anchor has to stay, and an app that restarts in
-// between still trusts the login.
-//
-// The name's DNS answer is not an input here and cannot be: the Certificate is.
-// That is what makes the assertion hold on the day the record appears.
+// The window this decision exists for: the record is added and apply runs before
+// init, so the host still serves its self-signed certificate and the anchor stays.
+// The Certificate is the input, never the name's DNS answer.
 func TestAPublicNameKeepsASelfSignedHostsAnchor(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
@@ -384,8 +367,7 @@ func TestAPublicNameKeepsASelfSignedHostsAnchor(t *testing.T) {
 	cl.certificate(SelfSignedIssuer)
 	cl.configMap(root)
 
-	// A run that writes no certificate, over a Certificate that still says
-	// s5n-selfsigned: nothing to plan, nothing to write, nothing to remove.
+	// No certificate written, the Certificate still s5n-selfsigned: nothing to do.
 	plan, err := newHostCA(t, cl, "", "").Plan(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -402,9 +384,7 @@ func TestAPublicNameKeepsASelfSignedHostsAnchor(t *testing.T) {
 	}
 }
 
-// TestHostCAWithNoCertificateAndNoWrite: a box whose host Certificate this run
-// did not write and cannot find has nothing to follow, so it leaves the anchor
-// alone rather than guessing an issuer.
+// No written and no found Certificate means nothing to follow: the anchor is left.
 func TestHostCAWithNoCertificateAndNoWrite(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	cl := newFakeHostCA()
@@ -426,22 +406,19 @@ func TestHostCAWithNoCertificateAndNoWrite(t *testing.T) {
 	}
 }
 
-// TestHostCAPlan: the plan names what a run will write, replace or remove
-// before the confirm. It compares the certificate the run would carry with the
-// one in the ConfigMap, not just whether a ConfigMap is there: a root that
-// moved under the box is a replace, and a presence-only read would skip it.
+// The plan names what a run writes, replaces or removes, comparing the certificate
+// and not merely its presence.
 func TestHostCAPlan(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	other, _ := testCA(t, "an older root")
 	cases := []struct {
 		name string
-		// issuer and caFile are the run's inputs; caFile, when set, is
-		// written to a temp file and handed over.
+		// issuer and caFile are the run's inputs; caFile is written to a temp file.
 		issuer string
 		caFile []byte
-		// cert is the issuer the box's Certificate names, when there is one.
+		// cert is the issuer the host Certificate names, when there is one.
 		cert string
-		// anchor is what the ConfigMap already holds: nil for absent.
+		// anchor is what the ConfigMap holds: nil for absent.
 		anchor []byte
 		want   string
 	}{
@@ -484,8 +461,7 @@ func TestHostCAPlan(t *testing.T) {
 	}
 }
 
-// TestHostCAWithoutARoot: an old platform has no root, and a run must say which
-// command makes one rather than writing an anchor from nothing.
+// An old platform has no root: the run says which command makes one.
 func TestHostCAWithoutARoot(t *testing.T) {
 	cl := newFakeHostCA()
 	_, err := newHostCA(t, cl, "selfsigned", "").Apply(context.Background())
@@ -497,8 +473,7 @@ func TestHostCAWithoutARoot(t *testing.T) {
 	}
 }
 
-// TestSignedByRoot is the upgrade decision over the two certificates: is the
-// one in a host's Secret issued by the root that is in the seedbox's namespace?
+// The upgrade decision: is the Secret's certificate issued by the root?
 func TestSignedByRoot(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
 	other, _ := testCA(t, "a bare self-signed leaf")
@@ -528,9 +503,8 @@ func TestSignedByRoot(t *testing.T) {
 	}
 }
 
-// TestCertificatePEMDropsEverythingElse: the one reader both sources pass
-// through keeps CERTIFICATE blocks and nothing else, so a key cannot reach the
-// anchor by any route.
+// The one reader keeps CERTIFICATE blocks and nothing else, so no key reaches the
+// anchor.
 func TestCertificatePEMDropsEverythingElse(t *testing.T) {
 	ca, key := testCA(t, "a ca")
 	got, err := certificatePEM(append(append(append([]byte{}, key...), ca...), key...))
