@@ -11,9 +11,7 @@ import (
 	"time"
 )
 
-// TestSentences pins the one line a person reads, and checks that both fields a
-// receiver might read carry it: Slack and Mattermost read text, Discord reads
-// content.
+// Both fields a receiver might read carry the same sentence.
 func TestSentences(t *testing.T) {
 	o := Options{Box: "box.example.com", Seedbox: "seedbox"}
 	for _, c := range []struct {
@@ -76,9 +74,6 @@ func TestSentences(t *testing.T) {
 	}
 }
 
-// TestPostSendsTheBodyAndBothSentences: the receiver a person configured gets
-// JSON with the structured fields and the sentence twice, and nothing else in
-// the request that a webhook does not want.
 func TestPostSendsTheBodyAndBothSentences(t *testing.T) {
 	var got Notice
 	var contentType string
@@ -116,8 +111,6 @@ func TestPostSendsTheBodyAndBothSentences(t *testing.T) {
 	}
 }
 
-// TestPostReportsAStatusWithoutThePath: a receiver that answers 500 is a line
-// naming the host and the status -- never the address, which is the token.
 func TestPostReportsAStatusWithoutThePath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no", http.StatusInternalServerError)
@@ -135,12 +128,9 @@ func TestPostReportsAStatusWithoutThePath(t *testing.T) {
 	}
 }
 
-// TestPostNeverPrintsTheAddressWhenTheTransportFails is the one that matters: a
-// refused connection is net/http's *url.Error, whose message is the whole URL.
+// A refused connection is net/http's *url.Error, whose message is the whole URL.
 func TestPostNeverPrintsTheAddressWhenTheTransportFails(t *testing.T) {
 	secret := "/services/T00/B00/s3cret?token=abc123"
-	// A port nothing listens on: the error is a dial failure, wrapped in the
-	// URL.
 	client := &http.Client{Timeout: 2 * time.Second}
 	err := (Poster{URL: "http://127.0.0.1:1" + secret, Client: client}).Post(context.Background(), Health(Options{}, "radarr", false, "", ""))
 	if err == nil {
@@ -152,17 +142,12 @@ func TestPostNeverPrintsTheAddressWhenTheTransportFails(t *testing.T) {
 	}
 }
 
-// TestPostWithNoAddressPostsNothing: a box without notices is not an error and
-// opens no connection.
 func TestPostWithNoAddressPostsNothing(t *testing.T) {
 	if err := (Poster{Client: &http.Client{Timeout: time.Millisecond}}).Post(context.Background(), Health(Options{}, "radarr", true, "", "")); err != nil {
 		t.Fatalf("Post with no address: %v", err)
 	}
 }
 
-// TestFlips is the rule a health notice follows: a readiness that changed, either
-// way, and nothing else. A first reading, a changed reason and an app that was
-// not there before are all silent.
 func TestFlips(t *testing.T) {
 	stored := map[string]Reading{
 		"sonarr": {Ready: true},
@@ -225,8 +210,8 @@ func TestFlips(t *testing.T) {
 	}
 }
 
-// assertNoSecret fails when a message carries the part of the address that is
-// the secret: the path or the query.
+// assertNoSecret fails when a message carries the address's secret: its path or
+// query.
 func assertNoSecret(t *testing.T, msg, secret string) {
 	t.Helper()
 	path, query, _ := strings.Cut(secret, "?")
