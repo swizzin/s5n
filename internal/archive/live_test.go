@@ -8,11 +8,9 @@ import (
 	"testing"
 )
 
-// A rehearsal reads a source that is still running, and a running app rewrites
-// its small files -- a cookie jar, a settings file -- whenever it likes. The size
-// a walk saw is then not the size the read finds. A small file is read whole
-// and entered as what was read, so the archive and its manifest agree and the
-// snapshot is not refused over a cookie.
+// A rehearsal reads a running source, and a running app rewrites its cookie jar
+// whenever it likes: the size a walk saw is not the size the read finds. A small
+// file is entered as what was read, so the snapshot is not refused over a cookie.
 func TestASmallFileThatChangedSinceItsStatIsEnteredAsRead(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "HTTPCookies")
@@ -50,8 +48,8 @@ func TestASmallFileThatChangedSinceItsStatIsEnteredAsRead(t *testing.T) {
 	}
 }
 
-// A large file is streamed, and a large file that changed under the copy is
-// still a refusal: it is a database, and a torn one is worse than none.
+// A large file that changed under the copy is still a refusal: it is a database,
+// and a torn one is worse than none.
 func TestALargeFileThatChangedSinceItsStatIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "library.db")

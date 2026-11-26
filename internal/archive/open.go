@@ -1,8 +1,8 @@
 package archive
 
-// open.go is the read half: the manifest is found first, so every entry is
-// checked against a list before a byte of it is trusted, and the extracted tree
-// appears whole or not at all.
+// open.go is the read half: the manifest is found first, so every entry is checked
+// against a list before a byte of it is trusted, and the extracted tree appears
+// whole or not at all.
 
 import (
 	"archive/tar"
@@ -22,45 +22,37 @@ import (
 	"github.com/swizzin/s5n/internal/linktree"
 )
 
-// maxManifest is the largest manifest this box reads. A manifest is one entry
-// per file the archive holds, about 250 bytes each, and a real config tree is
-// thousands of files (a torrent client keeps two per torrent), so a migration
-// snapshot's manifest runs to megabytes. 64 MiB is a quarter of a million
-// files; the limit is what keeps a crafted archive from asking for memory it
-// could not otherwise get, and the writer refuses to write past it (Close), so
-// no archive exists that a box cannot read back. A variable only so a test can
-// reach the refusal without writing that many files.
+// maxManifest is the largest manifest this box reads. A real config tree is
+// thousands of files (a torrent client keeps two per torrent), so a snapshot's
+// manifest runs to megabytes: 64 MiB is a quarter of a million files, and Close
+// refuses to write past it, so no archive exists that a box cannot read back.
 var maxManifest int64 = 64 << 20
 
 // Read is what an archive says about itself, without extracting it: the kind, the
 // mode, when and by which box it was written, and the entry per path. A caller
-// that has to choose an archive -- the newest final snapshot in the default
-// location -- reads this and nothing else.
+// choosing an archive reads this and nothing else.
 func Read(path string) (*Manifest, error) {
 	return readManifest(path)
 }
 
-// Filter selects the entries of an archive: a name it answers false for is left
-// in the file for a later pass.
+// Filter selects the entries of an archive: a name it answers false for is left in
+// the file for a later pass.
 type Filter func(name string) bool
 
-// Owner is who an extraction's entries belong to. Nil is the user who ran box: a
-// snapshot's own extract is box's, and a staged copy belongs to the seedbox's
-// user, which the run that stages it has just read out of the values.
+// Owner is who an extraction's entries belong to. Nil is the user who ran box.
 type Owner struct{ UID, GID int }
 
 // Open verifies an archive and extracts it to dir, which must not exist yet.
 //
 // It refuses a missing or truncated archive, an entry the manifest does not name
 // and a manifest entry the archive does not hold, a size or sha256 that does not
-// match, a path that is absolute or steps out with `..`, and a link, device, fifo
-// or hardlink that is not something box writes. A failure leaves nothing at dir.
+// match, an absolute or `..` path, and a link, device, fifo or hardlink box never
+// writes. A failure leaves nothing at dir.
 //
-// The extraction is box's: dir itself, and every directory the archive did not
-// name, is 0700, and it belongs to whoever ran box -- ownership is not carried,
-// because only apply knows the uid that will own the staged copy. Inside it,
-// every entry has the mode and time the manifest says the source gave it: a
-// config tree is copied on from here, and a script in it has to stay one.
+// The extraction is 0700 and belongs to whoever ran box (ownership is not carried,
+// because only apply knows the uid that will own the staged copy), and inside it
+// every entry has the mode and time the source gave it: a config tree is copied on
+// from here, and a script in it has to stay one.
 func Open(archive, dir string) (*Manifest, error) {
 	m, err := readManifest(archive)
 	if err != nil {
@@ -75,13 +67,9 @@ func Open(archive, dir string) (*Manifest, error) {
 // Extract writes the entries keep accepts into dir, which must not exist yet, and
 // refuses a half-extracted tree: a failure leaves nothing at dir.
 //
-// keep is what part of an archive this pass writes -- nil is all of it -- and
-// every entry it leaves for a later pass has to have been checked already:
-// internal/archive's Verify is the pass that reads the whole archive without
-// writing any of it. What this pass does not write is still checked as it is
-// skipped, so an entry the manifest does not name is refused here too.
-//
-// own is who the written tree belongs to; nil is the user who ran box.
+// keep is what part of an archive this pass writes (nil is all of it), and every
+// entry it skips has to have been checked already by Verify. What it does not write
+// is still checked as it is skipped.
 func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 	if _, err := os.Lstat(dir); err == nil {
 		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
@@ -106,15 +94,10 @@ func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 	return nil
 }
 
-// ExtractTree writes the subtree of an archive under prefix into dir, with the
-// prefix taken off its paths: a snapshot's config/<instance>/ becomes the
-// instance's config directory itself, which is what a run stages at the config
-// root.
-//
-// It is Extract's other caller: the tree a full carry holds is written once, here,
-// straight out of the snapshot, and its bytes are checked against the manifest
-// again as they are written. own is who the tree belongs to; nil is the user who
-// ran box.
+// ExtractTree writes the subtree under prefix into dir, with the prefix taken off its
+// paths: config/<instance>/ becomes the instance's config directory, which is what a
+// run stages at the config root. Its bytes are checked against the manifest again as
+// they are written.
 func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
 	if _, err := os.Lstat(dir); err == nil {
 		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
@@ -127,10 +110,9 @@ func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
-	// The tree's own directory belongs to whoever is going to run the app: the
-	// pod reads it as its subPath, and a directory of box's that only box can
-	// enter is a config the app cannot open at all -- "unable to open database
-	// file" from a database that is right there.
+	// The tree's own directory belongs to whoever runs the app: the pod reads it as its
+	// subPath, and a directory only box can enter is a config the app cannot open at
+	// all -- "unable to open database file" from a database right there.
 	if err := hand(own, dir, false); err != nil {
 		os.RemoveAll(dir)
 		return err
@@ -183,10 +165,9 @@ func readManifest(archive string) (*Manifest, error) {
 			return nil, fmt.Errorf("read %s: %w", archive, err)
 		}
 	}
-	// tar answers io.EOF at its end-of-archive marker without reading the rest
-	// of the file, so the gzip stream is drained here: its trailer is the only
-	// thing that says the copy reached the end rather than stopping a byte
-	// short.
+	// tar answers io.EOF at its end-of-archive marker without reading the rest of
+	// the file, so the gzip stream is drained here: its trailer is the only thing
+	// that says the copy reached the end rather than stopping a byte short.
 	if _, err := io.Copy(io.Discard, gz); err != nil {
 		return nil, fmt.Errorf("read %s: %w", archive, err)
 	}
@@ -196,8 +177,7 @@ func readManifest(archive string) (*Manifest, error) {
 	var m Manifest
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	// A key this box does not know is a newer manifest than it can honour, and
-	// ignoring it would read one field's meaning out of a shape built for
-	// another.
+	// ignoring it would read one field's meaning out of a shape built for another.
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("%s: %s does not read: %w", archive, ManifestName, err)
@@ -211,10 +191,9 @@ func readManifest(archive string) (*Manifest, error) {
 	return &m, nil
 }
 
-// extract is the second pass: every tar entry keep accepts is checked against
-// the manifest and written, and every manifest entry keep accepts has to appear.
-// base, when it is not empty, is the one subtree of the archive that is written,
-// with its own name taken off the paths.
+// extract is the second pass: every tar entry keep accepts is checked against the
+// manifest and written, and every manifest entry keep accepts has to appear. base,
+// when not empty, is the one subtree written, with its name taken off the paths.
 func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
 	f, gz, err := openArchive(archive)
 	if err != nil {
@@ -243,8 +222,7 @@ func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) er
 	}
 	for _, name := range m.names() {
 		if keep != nil && !keep(name) {
-			// A later pass writes it, and Verify checked it: this pass owes the
-			// entries it was told to write, and no others.
+			// A later pass writes it, and Verify checked it.
 			continue
 		}
 		if base != "" && name != base && !strings.HasPrefix(name, base+"/") {
@@ -254,9 +232,9 @@ func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) er
 			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
 		}
 	}
-	// The directories last: each is written 0700 so the extraction can put its
-	// children in it whatever the source's mode was, and its own time is the
-	// last child written, so neither is the source's until nothing more is.
+	// The directories last: each is written 0700 so its children can go in whatever the
+	// source's mode was, and its own time is the last child written, so neither is the
+	// source's until nothing more is.
 	for _, d := range dirs {
 		if err := d.apply(); err != nil {
 			return fmt.Errorf("%s: %w", archive, err)
@@ -290,11 +268,9 @@ func (r restore) apply() error {
 	return nil
 }
 
-// extractEntry checks one tar entry against the manifest and writes it, unless
-// keep leaves it for a later pass.
-//
-// A directory's mode and time are added to dirs, for extract to set once every
-// entry is written; a file's are set here, as soon as its bytes are checked.
+// extractEntry checks one tar entry against the manifest and writes it, unless keep
+// leaves it for a later pass. A directory's mode and time go to dirs, for extract to
+// set once every entry is written; a file's are set here as its bytes are checked.
 func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool, dirs *[]restore) error {
 	name := path.Clean(hdr.Name)
 	// The manifest was verified in the first pass, and readManifest refuses an
@@ -360,8 +336,8 @@ func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *t
 }
 
 // extractBase takes the subtree's own directory entry: the extraction directory
-// itself is what it becomes, and it is already there. It is the instance's
-// config directory, so its mode is the source's too.
+// itself is what it becomes, and it is already there. It is the instance's config
+// directory, so its mode is the source's too.
 func extractBase(archive, dir, name string, m *Manifest, tr *tar.Reader, hdr *tar.Header, dirs *[]restore) error {
 	if hdr.Typeflag != tar.TypeDir {
 		return fmt.Errorf("%s holds %s as a %s, and it is the tree being extracted: it has to be a directory", archive, name, typeName(hdr.Typeflag))
@@ -391,9 +367,8 @@ func extractFile(archive, target, name string, m *Manifest, tr *tar.Reader, hdr 
 }
 
 // hand gives one extracted path to the owner the extraction was told, and does
-// nothing when it was told none: a snapshot's own extract belongs to whoever ran
-// box, and a staged copy to the seedbox's user. link is a symlink, owned with
-// Lchown so the extraction never follows it.
+// nothing when it was told none. link is a symlink, owned with Lchown so the
+// extraction never follows it.
 func hand(own *Owner, path string, link bool) error {
 	if own == nil {
 		return nil
@@ -410,8 +385,8 @@ func hand(own *Owner, path string, link bool) error {
 	return nil
 }
 
-// extractDir makes one directory entry, 0700 until extract gives it the
-// source's mode, and refuses a path that is already something else.
+// extractDir makes one directory entry, 0700 until extract gives it the source's
+// mode, and refuses a path that is already something else.
 func extractDir(target, name string) error {
 	if info, err := os.Lstat(target); err == nil && !info.IsDir() {
 		return fmt.Errorf("extract %s: it is already there and is not a directory", name)
@@ -444,8 +419,8 @@ func extractLink(dir, rel, target, name, linkname string) error {
 }
 
 // makeParents creates the directories a path needs, 0700, and refuses a parent
-// that is already something else: an archive cannot be allowed to write through
-// a link it brought with it.
+// that is already something else: an archive cannot be allowed to write through a
+// link it brought with it.
 func makeParents(dir, name string) error {
 	parts := []string{}
 	if parent := path.Dir(name); parent != "." && parent != "/" {
@@ -470,10 +445,8 @@ func makeParents(dir, name string) error {
 	return nil
 }
 
-// splitPath splits a cleaned relative path into its parts.
 func splitPath(p string) []string { return strings.Split(p, "/") }
 
-// openArchive opens the file and its gzip stream.
 func openArchive(archive string) (*os.File, *gzip.Reader, error) {
 	f, err := os.Open(archive)
 	if err != nil {
@@ -487,7 +460,6 @@ func openArchive(archive string) (*os.File, *gzip.Reader, error) {
 	return f, gz, nil
 }
 
-// typeName names a tar entry type the way a refusal reads it.
 func typeName(typeflag byte) string {
 	switch typeflag {
 	case tar.TypeChar:

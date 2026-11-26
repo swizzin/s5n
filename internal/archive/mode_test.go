@@ -1,10 +1,8 @@
 package archive
 
-// mode_test.go proves that a config tree comes out of an archive with the modes
-// and times it went in with. A config directory is the app's, and some of what
-// it keeps is meant to run: a torrent client's on-complete script, a helper an
-// Arr's custom script calls. Writing every file 0600 took the execute bit off
-// each of them.
+// mode_test.go proves a config tree comes out of an archive with the modes and
+// times it went in with. Some of what a config directory keeps is meant to run (a
+// torrent client's on-complete script), so a blanket 0600 is not an extraction.
 
 import (
 	"os"
@@ -14,7 +12,7 @@ import (
 )
 
 // modeTree is a config directory with a script, a group-readable file and a
-// group-readable directory in it, every one with a time of its own.
+// group-readable directory, each with a time of its own.
 func modeTree(t *testing.T) (string, time.Time) {
 	t.Helper()
 	dir := t.TempDir()
@@ -85,10 +83,9 @@ func checkModes(t *testing.T, root string, want map[string]os.FileMode, at time.
 	}
 }
 
-// TestOpenWritesAConfigTreeWithItsSourceModes: the extraction a run reads and
-// copies from holds the config tree as the source had it. What keeps it private
-// is the extraction's own directory, which stays box's and 0700, and the files
-// box wrote for itself, which stay 0600.
+// The extraction holds the config tree as the source had it; what keeps it
+// private is the extraction's own directory, 0700, and the files box wrote for
+// itself, 0600.
 func TestOpenWritesAConfigTreeWithItsSourceModes(t *testing.T) {
 	path, at := modeArchive(t)
 	dir := filepath.Join(t.TempDir(), "extract")
@@ -112,9 +109,8 @@ func TestOpenWritesAConfigTreeWithItsSourceModes(t *testing.T) {
 	}
 }
 
-// TestExtractTreeWritesTheSourceModes: the staged copy a full carry writes is
-// the instance's config directory itself, so its modes are the source's, the
-// directory's own included.
+// The staged copy is the instance's config directory itself, so its modes are
+// the source's, the directory's own included.
 func TestExtractTreeWritesTheSourceModes(t *testing.T) {
 	path, at := modeArchive(t)
 	m, err := Read(path)

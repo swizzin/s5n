@@ -1,9 +1,9 @@
 package archive
 
-// verify_test.go proves the pass that reads an archive whole and writes nothing:
-// what it checks, what it refuses, and that an extraction can write part of an
-// archive and leave the rest for a later pass without losing the promise that a
-// damaged copy stops the run.
+// verify_test.go proves what the pass that reads an archive whole checks and
+// refuses, and that an extraction may write part of an archive and leave the
+// rest for a later pass without losing the promise that a damaged copy stops the
+// run.
 
 import (
 	"archive/tar"
@@ -15,9 +15,8 @@ import (
 	"testing"
 )
 
-// TestVerifyCountsWhatItSaw: the pass reports every entry as it checks it, which
-// is how a caller counts a part of a snapshot it will write later without walking
-// a tree that is not on the host.
+// The pass reports every entry as it checks it: how a caller counts a part of a
+// snapshot to write later without walking a tree that is not on the host.
 func TestVerifyCountsWhatItSaw(t *testing.T) {
 	path, _ := migrationArchive(t)
 	var seen []Seen
@@ -56,8 +55,8 @@ func TestVerifyCountsWhatItSaw(t *testing.T) {
 	}
 }
 
-// TestVerifyRefusesATamperedMember: a byte of one file is not the manifest's, and
-// the pass refuses it by name -- before anything is extracted.
+// A byte of one file is not the manifest's, and the pass refuses it by name,
+// before anything is extracted.
 func TestVerifyRefusesATamperedMember(t *testing.T) {
 	dir := craftEntry{name: "config/plex", typeflag: tar.TypeDir, mode: 0o755}
 	file := craftEntry{name: "config/plex/Preferences.xml", typeflag: tar.TypeReg, mode: 0o600, data: []byte(`<Preferences MachineIdentifier="synthetic"/>`)}
@@ -84,8 +83,8 @@ func TestVerifyRefusesATamperedMember(t *testing.T) {
 	}
 }
 
-// TestVerifyRefusesAMissingMember: the manifest names a file the copy does not
-// hold, which is what a copy that stopped halfway looks like.
+// The manifest names a file the copy does not hold: what a copy that stopped
+// halfway looks like.
 func TestVerifyRefusesAMissingMember(t *testing.T) {
 	dir := craftEntry{name: "config/app", typeflag: tar.TypeDir, mode: 0o755}
 	file := craftEntry{name: "config/app/settings.yml", typeflag: tar.TypeReg, mode: 0o600, data: []byte("a: b\n")}
@@ -96,8 +95,8 @@ func TestVerifyRefusesAMissingMember(t *testing.T) {
 	}
 }
 
-// TestExtractWritesOnlyTheEntriesItIsTold: one part of an archive now, the rest
-// later. What the filter leaves out is not on disk, and the tree it kept is --
+// One part of an archive now, the rest later: what the filter leaves out is not
+// on disk, and the tree it kept is.
 // with its modes, and owned by the user the caller named.
 func TestExtractWritesOnlyTheEntriesItIsTold(t *testing.T) {
 	tree := writeTree(t)

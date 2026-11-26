@@ -1,8 +1,7 @@
 package archive
 
-// writer.go is the write half: the caller adds the files it has in memory and
-// the trees it wants carried, and Close writes the manifest last and makes the
-// file appear. Nothing is left at the path until then.
+// writer.go is the write half: the caller adds files and trees, Close writes the
+// manifest last, and nothing is at the path until then.
 
 import (
 	"archive/tar"
@@ -36,9 +35,9 @@ type Skipped struct {
 	Why string
 }
 
-// Writer writes one archive. A caller that abandons it leaves nothing at the
-// path it named: the bytes go to a temporary file beside it, as in
-// internal/atomicfile, and only Close renames it into place.
+// Writer writes one archive. A caller that abandons it leaves nothing at the path
+// it named: the bytes go to a temporary file beside it, as in internal/atomicfile,
+// and only Close renames it into place.
 type Writer struct {
 	path string
 	file *atomicfile.File
@@ -55,11 +54,10 @@ type Writer struct {
 }
 
 // Create starts an archive at path, which must not exist. The manifest's Format
-// defaults to Format and its Created to now; its Entries are the writer's, added
-// as the caller adds content.
+// defaults to Format and its Created to now; its Entries are added as content is.
 //
-// The file is 0600 from the first byte: it holds the source's API keys, the Plex
-// token and qBittorrent's password hash.
+// The file is 0600 from the first byte: it holds the source's API keys, the Plex token
+// and qBittorrent's password hash.
 func Create(path string, m Manifest) (*Writer, error) {
 	if len(m.Entries) != 0 {
 		return nil, fmt.Errorf("create %s: the manifest's entries are added as content is", path)
@@ -90,7 +88,6 @@ func Create(path string, m Manifest) (*Writer, error) {
 	}, nil
 }
 
-// joinProblems is a manifest's problems as one sentence.
 func joinProblems(problems []string) string {
 	out := problems[0]
 	for _, p := range problems[1:] {
@@ -111,29 +108,23 @@ func (w *Writer) AddFile(name string, data []byte, mode fs.FileMode) error {
 // AddTree adds dir's contents under prefix ("config/<instance>", "source").
 //
 // The tree is copied under internal/linktree's rule, the one apply's staging copy
-// uses: a link that stays inside the tree is carried, one that names the kernel's
-// own filesystems (an app's log at the pod's stdout) is left out and returned in
-// skipped, and one that leaves the tree stops the archive, because it would name
-// a path no receiving host has.
+// uses: an inside link is carried, one naming the kernel's own filesystems (an app's
+// log at the pod's stdout) is left out and returned in skipped, and one that leaves
+// the tree stops the archive, because it would name a path no receiving host has.
 //
-// Nothing of the tree's ownership is recorded: the extracted tree is box's, and
-// apply re-owns what it stages.
+// Ownership is not recorded: the extracted tree is box's, and apply re-owns what it
+// stages.
 func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
 	return w.AddTreeExcept(prefix, dir, "", nil)
 }
 
-// AddTreeExcept adds dir's contents under prefix, with two limits a full carry of
-// an app's config directory needs (internal/migrate/plex):
+// AddTreeExcept adds dir's contents under prefix, with the two limits a full carry of
+// an app's config directory needs (internal/migrate/plex): sub names one directory
+// inside dir whose contents travel, everything beside it left out, and skip names
+// directories to leave out with everything beneath them (the caches Plex rebuilds).
 //
-//   - sub names one directory inside dir whose contents travel, in slash form;
-//     the directories above it are added so the extracted tree has the path,
-//     and everything beside it is left out. Empty means all of dir.
-//   - skip names directories inside dir (relative to it in slash form) to leave
-//     out with everything beneath them: the caches Plex rebuilds.
-//
-// A skip entry that is not a directory inside dir is a refusal, not a silent
-// no-op: a path spelled wrong would put a library back into a snapshot somebody
-// decided to leave it out of.
+// A skip entry that is not a directory inside dir is a refusal, not a silent no-op: a
+// path spelled wrong would put a library back into a snapshot somebody left it out of.
 func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skipped, error) {
 	if err := w.ready(prefix); err != nil {
 		return nil, err
@@ -144,10 +135,9 @@ func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skippe
 	if sub != "" && !safeName(sub) {
 		return nil, fmt.Errorf("add %s: %q is not a directory inside it", dir, sub)
 	}
-	// A left-out directory is named relative to the subtree a snapshot carries,
-	// which is where the app's data is: Plex's caches are under its home. The
-	// set's keys are the walk's own, so a left-out path is matched where the
-	// walk meets it.
+	// A left-out directory is named relative to the subtree a snapshot carries, which is
+	// where the app's data is; the set's keys are the walk's own, so a left-out path is
+	// matched where the walk meets it.
 	skipped, err := skipSet(joinSub(dir, sub), sub, skip)
 	if err != nil {
 		return nil, err
@@ -185,8 +175,8 @@ type treeWalk struct {
 }
 
 // entry is one entry the walk met. A directory beside the subtree a snapshot
-// carries is not entered, and neither is a left-out one: everything under them
-// is another program's or something Plex rebuilds.
+// carries is not entered, and neither is a left-out one: everything under them is
+// another program's or something Plex rebuilds.
 func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
 	if err != nil {
 		return err
@@ -225,11 +215,9 @@ func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
 		}
 		return nil
 	case info.Mode()&(fs.ModeSocket|fs.ModeNamedPipe) != 0:
-		// A running app keeps its own IPC in its config directory --
-		// qBittorrent's qBittorrent/ipc-socket is one -- and a socket is not
-		// something an archive can carry or a receiving host restore. The app
-		// makes it again when it starts, so it is left out with the reason, as
-		// a link at the pod's stdout is.
+		// A running app keeps its own IPC in its config directory (qBittorrent's
+		// qBittorrent/ipc-socket), which no archive can carry and no receiving
+		// host restore; the app makes it again when it starts.
 		*t.left = append(*t.left, Skipped{
 			Path:   name,
 			Target: "",
@@ -241,8 +229,6 @@ func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
 		p, modeName(info.Mode()))
 }
 
-// leave is how a walk skips an entry: a directory with everything under it, or a
-// file that is not part of what travels.
 func leave(d fs.DirEntry) error {
 	if d.IsDir() {
 		return filepath.SkipDir
@@ -250,7 +236,6 @@ func leave(d fs.DirEntry) error {
 	return nil
 }
 
-// joinSub is the subtree a snapshot carries, as the path it is on disk.
 func joinSub(dir, sub string) string {
 	if sub == "" {
 		return dir
@@ -264,10 +249,9 @@ func within(rel, sub string) bool {
 	return rel == sub || strings.HasPrefix(rel, sub+"/") || strings.HasPrefix(sub, rel+"/")
 }
 
-// skipSet is the directories a tree is walked without: each one a path inside
-// dir (which is base inside the walked root), checked once before the walk so a
-// spelling that names nothing is a refusal. The keys are paths from the walked
-// root, which is what the walk compares.
+// skipSet is the directories a tree is walked without: each one a path inside dir,
+// checked once before the walk so a spelling that names nothing is a refusal. The
+// keys are paths from the walked root, which is what the walk compares.
 func skipSet(dir, base string, skip []string) (map[string]bool, error) {
 	if len(skip) == 0 {
 		return nil, nil
@@ -295,8 +279,8 @@ func skipSet(dir, base string, skip []string) (map[string]bool, error) {
 	return out, nil
 }
 
-// Carried is what AddFiles added: which of the named files went in, which were
-// not there, and which links it left out.
+// Carried is what AddFiles added: which of the named files went in, which were not
+// there, and which links it left out.
 type Carried struct {
 	// Added are the files it added, by the path they were named by, relative to
 	// the tree.
@@ -307,22 +291,16 @@ type Carried struct {
 	Skipped []Skipped
 }
 
-// AddFiles adds only the files named, and the directories above them under
-// prefix. It is AddTree's other half, for a tree an archive carries a part of:
-// Plex's Preferences.xml and its databases are the state a migration needs, and
-// its Metadata tree is tens of gigabytes of covers Plex rebuilds from the data
-// it is given.
+// AddFiles adds only the files named, and the directories above them under prefix. It
+// is AddTree's other half, for a tree an archive carries a part of: Plex's
+// Preferences.xml and databases are the state a migration needs, and its Metadata
+// tree is tens of gigabytes of covers Plex rebuilds.
 //
-// sub names the directory the files are in, relative to dir in slash form (empty
-// for dir itself); it and the directories above it are added, so the extracted
-// tree has the app's path. The rules are AddTree's: the same link rule, the same
-// modes, and the same sha256 per entry, so a carried subset is as verifiable as a
-// whole tree. The files are named relative to sub, in slash form.
+// sub names the directory the files are in, relative to dir in slash form. The rules
+// are AddTree's, so a carried subset is as verifiable as a whole tree.
 //
 // A named file that is not there is returned in Missing and is not an error: a
-// SQLite database's -wal and -shm exist only while a writer has the database
-// open. Which of the set an app cannot do without is the caller's rule, and this
-// is one pass with one answer.
+// SQLite database's -wal and -shm exist only while a writer has it open.
 func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, error) {
 	var res Carried
 	if err := w.ready(prefix); err != nil {
@@ -344,8 +322,7 @@ func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, err
 	if err := w.addDir(prefix, info); err != nil {
 		return res, err
 	}
-	// The app's own directory, and the ones that lead to it: a file list is
-	// inside a tree, and the tree has to be in the archive for the extract to
+	// The app's own directory, and the ones that lead to it: the extract has to
 	// put the files where the app looks for them.
 	base, at := dir, prefix
 	if sub != "" {
@@ -451,7 +428,7 @@ func (w *Writer) addCarryDirs(prefix, dir, rel string, made map[string]bool) err
 }
 
 // Close writes the manifest as the archive's last entry and makes the file
-// appear. It is the only thing that commits, so a run that stops before it leaves
+// appear: it is the only thing that commits, so a run that stops before it leaves
 // no archive to mistake for one.
 func (w *Writer) Close() error {
 	switch {
@@ -488,8 +465,8 @@ func (w *Writer) Close() error {
 		w.fail(err)
 		return fmt.Errorf("write %s: %w", ManifestName, err)
 	}
-	// The tar's own end marker, then gzip's trailer, then the rename: each
-	// layer has to finish before the one under it.
+	// The tar's own end marker, then gzip's trailer, then the rename: each layer
+	// has to finish before the one under it.
 	if err := w.tw.Close(); err != nil {
 		w.fail(err)
 		return fmt.Errorf("write %s: %w", w.path, err)
@@ -511,8 +488,8 @@ func (w *Writer) Discard() {
 	w.fail(errors.New("discarded"))
 }
 
-// ready refuses an add after Close, after a failure, or a name that is not a
-// path inside the archive.
+// ready refuses an add after Close, after a failure, or a name that is not a path
+// inside the archive.
 func (w *Writer) ready(name string) error {
 	switch {
 	case w.err != nil:
@@ -543,8 +520,8 @@ func (w *Writer) fail(err error) {
 	}
 }
 
-// claim records one entry and refuses a name that collides with what is already
-// in the archive: the same path twice, a file where a directory has to be, or a
+// claim records one entry and refuses a name that collides with what is already in
+// the archive: the same path twice, a file where a directory has to be, or a
 // directory where a file already is.
 func (w *Writer) claim(name string, dir bool) error {
 	if w.seen[name] {
@@ -568,7 +545,6 @@ func (w *Writer) claim(name string, dir bool) error {
 	return nil
 }
 
-// addDir records one directory.
 func (w *Writer) addDir(name string, info fs.FileInfo) error {
 	if err := w.claim(name, true); err != nil {
 		return err
@@ -592,15 +568,12 @@ const smallFile = 8 << 20
 
 // addFileFrom records one regular file.
 //
-// A small one is read whole and entered as what was read. A rehearsal reads a
-// source that is still running, and a running app rewrites its small files (a
-// cookie jar, a settings file) whenever it likes, so the size the walk saw is
-// not always the size the read finds; the entry is the bytes that were read, and
-// the archive and its manifest agree.
+// A small one is read whole and entered as what was read: a rehearsal reads a
+// running source, and a running app rewrites its cookie jar whenever it likes, while
+// the entry has to agree with the manifest.
 //
-// A large one is streamed -- an app's config tree can hold a database of
-// gigabytes -- and one that changed under the copy is a refusal rather than a
-// torn entry.
+// A large one is streamed (a database of gigabytes) and one that changed under the
+// copy is a refusal rather than a torn entry.
 func (w *Writer) addFileFrom(name, file string, info fs.FileInfo) error {
 	if info.Size() <= smallFile {
 		raw, err := readSmall(file)
@@ -657,8 +630,8 @@ func (w *Writer) addLink(name, file, root, rel string) (*Skipped, error) {
 	return nil, nil
 }
 
-// write streams one regular entry, hashing as it goes so the manifest's sum is
-// the bytes that went into the archive.
+// write streams one regular entry, hashing as it goes so the manifest's sum is the
+// bytes that went into the archive.
 func (w *Writer) write(name string, r io.Reader, size int64, mode fs.FileMode, mtime time.Time) error {
 	if err := w.claim(name, false); err != nil {
 		return err
@@ -686,8 +659,8 @@ func (w *Writer) write(name string, r io.Reader, size int64, mode fs.FileMode, m
 	return nil
 }
 
-// readSmall reads a file that was small when it was stat'ed, and returns nil
-// when it is no longer small: the caller streams that one instead.
+// readSmall reads a file that was small when it was stat'ed, and returns nil when
+// it is no longer small: the caller streams that one instead.
 func readSmall(file string) ([]byte, error) {
 	f, err := os.Open(file)
 	if err != nil {
@@ -704,13 +677,11 @@ func readSmall(file string) ([]byte, error) {
 	return raw, nil
 }
 
-// digest is the manifest's sum of a handful of bytes.
 func digest(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
-// modeName names a file's type the way a refusal reads it.
 func modeName(m fs.FileMode) string {
 	switch {
 	case m&fs.ModeDevice != 0 && m&fs.ModeCharDevice != 0:
