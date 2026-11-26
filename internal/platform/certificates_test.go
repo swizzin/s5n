@@ -18,9 +18,8 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// fakeCertCluster is the per-host flow's cluster: one Certificate's status,
-// whether the CRD is served, the objects box reads by name, and a record of
-// every write and its manager in order.
+// fakeCertCluster is the per-host flow's cluster: status, the served check, the
+// objects read by name, and every write with its manager in order.
 type fakeCertCluster struct {
 	ready    bool
 	reason   string
@@ -32,8 +31,8 @@ type fakeCertCluster struct {
 	reads    int
 	// objects are what Get answers, by "kind namespace/name".
 	objects map[string]map[string]any
-	// statusWrites records every status update, and onStatus lets a test
-	// answer one the way cert-manager would: with a new Secret.
+	// statusWrites records every status update; onStatus answers one as cert-manager
+	// would.
 	statusWrites []map[string]any
 	onStatus     func(*fakeCertCluster)
 }
@@ -111,8 +110,7 @@ func (f *fakeCertCluster) UpdateStatus(_ context.Context, _, _, kind, namespace 
 }
 
 func TestCertificateNames(t *testing.T) {
-	// Hosts whose flattening loses nothing keep the readable label, so the
-	// names hack/e2e-box.sh asserts on stay put.
+	// A host whose flattening loses nothing keeps the readable label the e2e asserts.
 	cases := map[string]string{
 		"box.example.test":  "box-example-test",
 		"Box.Example.Test":  "box-example-test",
@@ -146,9 +144,8 @@ func TestCertificateNames(t *testing.T) {
 // hashedLabel recognises the disambiguating suffix a lossy host carries.
 var hashedLabel = regexp.MustCompile(`-[0-9a-f]{8}$`)
 
-// Two hosts that flatten to one label must not share a name: sharing one
-// would let either host's Certificate, listener, SecurityPolicy or field
-// manager overwrite the other's.
+// Two hosts flattening to one label must not share a name, or either's objects and
+// field managers could overwrite the other's.
 func TestDNSLabelDisambiguatesCollidingHosts(t *testing.T) {
 	longPrefix := strings.Repeat("a", 100)
 	pairs := [][2]string{
@@ -167,8 +164,7 @@ func TestDNSLabelDisambiguatesCollidingHosts(t *testing.T) {
 			if len(label) > maxDNSLabel {
 				t.Errorf("dnsLabel(%q) = %q is %d characters", host, label, len(label))
 			}
-			// The readable flattening is kept wherever it fits; the hash is
-			// the only thing the suffix adds.
+			// The readable flattening is kept wherever it fits; only the suffix adds.
 			flat := flattenHost(strings.ToLower(host))
 			if room := maxDNSLabel - hostHashLen - 1; len(flat) <= room {
 				if want := flat + label[len(flat):]; label != want {
@@ -203,16 +199,15 @@ func TestDNSLabelHashedSuffix(t *testing.T) {
 			t.Errorf("dnsLabel(%q) is not deterministic: %q then %q", host, got, want)
 		}
 	}
-	// A host longer than the limit keeps the roomiest prefix the suffix
-	// leaves, so the name is exactly the limit rather than shorter.
+	// A long host keeps the roomiest prefix the suffix leaves, so the name hits the
+	// limit.
 	if got := dnsLabel(strings.Repeat("a", 100) + "one"); len(got) != maxDNSLabel {
 		t.Errorf("long host label is %d characters, want %d", len(got), maxDNSLabel)
 	}
 }
 
-// Every name one host gets must differ from the name the same object type
-// gets for a host that flattens to the same readable label, or the two
-// hosts' objects and field managers collide.
+// Every name must differ from the one another host with the same label gets, or their
+// objects and managers collide.
 func TestCollidingHostsGetDistinctObjectNames(t *testing.T) {
 	first, second := "a-b.example.com", "a.b.example.com"
 	names := []struct {
@@ -233,9 +228,8 @@ func TestCollidingHostsGetDistinctObjectNames(t *testing.T) {
 	}
 }
 
-// The listener is a complete item on its own: a partial server-side apply
-// merges it into the Gateway's keyed listener list without touching the http
-// listener, and it admits the seedbox's routes.
+// The listener is a complete item: a partial apply merges it into the keyed list
+// without touching the http listener, and it admits the seedbox's routes.
 func TestHTTPSListener(t *testing.T) {
 	l := httpsListener("box.example.test", "s5n-tls-box-example-test")
 	if l["name"] != "https-box-example-test" || l["hostname"] != "box.example.test" {
@@ -257,9 +251,8 @@ func TestHTTPSListener(t *testing.T) {
 	}
 }
 
-// The host's port-80 listener is a complete item: same port as the platform's
-// generic listener, matched by hostname so isolation keeps the two apart, and
-// narrowed to the Gateway's namespace so app routes cannot attach to it.
+// The port-80 listener is a complete item: the generic listener's port, matched by
+// hostname so isolation keeps them apart, narrowed to the Gateway's namespace.
 func TestHTTPHostListener(t *testing.T) {
 	l := httpHostListener("box.example.test")
 	if l["name"] != "http-box-example-test" || l["hostname"] != "box.example.test" {
@@ -297,11 +290,9 @@ func TestGatewayPartial(t *testing.T) {
 	}
 }
 
-// The flow's order is the design: the host's port-80 listener, then the Allow
-// that keeps the login off it, then the Certificate, then -- only once it is
-// Ready -- both listeners (https included) and the redirect. The listener
-// writes use the host's own manager and never carry the shared, generic http
-// listener.
+// The order is the design: port-80 listener, its Allow, the Certificate, then -- once
+// Ready -- the HTTPS listener and the redirect. The writes use the host's manager and
+// never carry the generic listener.
 func TestCertificateApply(t *testing.T) {
 	cl := &fakeCertCluster{ready: true, serves: true}
 	d := &CertificateDecision{
@@ -351,16 +342,15 @@ func TestCertificateApply(t *testing.T) {
 	if cl.managers[4] != kube.FieldManager {
 		t.Fatalf("redirect manager = %q", cl.managers[4])
 	}
-	// The Certificate carries the issuer init chose and the one DNS name.
+	// The Certificate carries init's issuer and the one DNS name.
 	certSpec, _ := cl.writes[2][0]["spec"].(map[string]any)
 	issuer, _ := certSpec["issuerRef"].(map[string]any)
 	names, _ := certSpec["dnsNames"].([]any)
 	if issuer["name"] != LetsEncryptIssuer || issuer["kind"] != "ClusterIssuer" || names[0] != "box.example.test" {
 		t.Fatalf("certificate spec = %v", certSpec)
 	}
-	// The fourth write is the HTTPS listener alone, under its own manager:
-	// the two listeners never share a manager, so neither apply can remove
-	// the other by omitting it.
+	// The fourth write is the HTTPS listener alone, under its own manager: the two
+	// never share one, so neither apply can remove the other.
 	got := listenersOf(t, cl.writes[3][0])
 	if len(got) != 1 {
 		t.Fatalf("HTTPS write carries %d listeners, want one: %v", len(got), got)
@@ -381,7 +371,7 @@ func TestCertificateApply(t *testing.T) {
 	if https["port"] != int64(443) || https["protocol"] != "HTTPS" || https["hostname"] != "box.example.test" {
 		t.Fatalf("https listener = %v", https)
 	}
-	// The redirect names the host's own port-80 listener, not the shared one.
+	// The redirect names the host's own port-80 listener.
 	routeSpec, _ := cl.writes[4][0]["spec"].(map[string]any)
 	parentRefs, _ := routeSpec["parentRefs"].([]any)
 	ref, _ := parentRefs[0].(map[string]any)
@@ -390,11 +380,9 @@ func TestCertificateApply(t *testing.T) {
 	}
 }
 
-// The port-80 Allow is one object with one job: this host's http-<host>
-// listener, an explicit Allow, and no extAuth at all. Anything more (a
-// Gateway-wide target, an extAuth left in place, a rule that denies
-// something) would either put the login back on the listener or narrow the
-// HTTPS side.
+// The port-80 Allow has one job: this host's http-<host> listener, an explicit Allow,
+// no extAuth. A Gateway-wide target or a leftover extAuth would put the login back or
+// narrow the HTTPS side.
 func TestListenerPolicyManifest(t *testing.T) {
 	docs, err := ParseManifests(listenerPolicyManifest("box.example.test"))
 	if err != nil {
@@ -436,10 +424,8 @@ func TestListenerPolicyManifest(t *testing.T) {
 	}
 }
 
-// The policy is written only after the listener it names exists -- a
-// sectionName that resolves to nothing is an error Envoy Gateway reports
-// instead of an Allow -- and only on that path: a Certificate that is not
-// Ready writes no policy at all.
+// The policy is written only after its listener exists -- a sectionName resolving to
+// nothing is an EG error, not an Allow -- and only on that path.
 func TestListenerPolicyFollowsItsListener(t *testing.T) {
 	cl := &fakeCertCluster{ready: true, serves: true}
 	d := &CertificateDecision{
@@ -479,10 +465,9 @@ func TestListenerPolicyFollowsItsListener(t *testing.T) {
 	}
 }
 
-// Every Gateway field is owned by exactly one box manager: the platform's box
-// manager owns the generic http listener, and each host's listeners have a
-// manager each -- one for port 80, one for 443. Sharing one manager between
-// them would mean every apply has to restate both, and the port-80 apply (made
+// Every Gateway field has exactly one box manager: the platform's owns the generic
+// listener and each host's two listeners have one each. Sharing one would mean every
+// apply has to restate both, and the port-80 apply (made
 // while the certificate is still issuing, with no HTTPS listener in existence)
 // would delete the HTTPS listener of an already-established box on every
 // re-run. A TLS apply that carried "http" would make two managers flip the

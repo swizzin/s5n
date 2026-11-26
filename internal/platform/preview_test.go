@@ -1,8 +1,7 @@
 package platform
 
-// preview_test.go is the platform plan a flow shows before it applies it: the
-// same BuildPlan, with the firewall line bootstrap found and without reading the
-// cluster (a preview's decision is the probe's own answer).
+// The plan a flow shows before it applies it: the same BuildPlan with the firewall
+// line, without reading the cluster.
 
 import (
 	"strings"
@@ -12,9 +11,8 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// TestPreviewIsBuildPlanWithTheFirewallLine: a host whose firewall has to trust
-// the cluster's networks gets that line first, exactly as Apply's plan does, and
-// every component the decision said to install is in it.
+// A host whose firewall trusts the cluster's networks gets that line first, as Apply's
+// plan does, with every component the decision said to install.
 func TestPreviewIsBuildPlanWithTheFirewallLine(t *testing.T) {
 	plan, err := Preview(pins, allInstall, "eg", "", bootstrap.FirewallState{
 		Active: true,
@@ -47,8 +45,7 @@ func TestPreviewIsBuildPlanWithTheFirewallLine(t *testing.T) {
 	}
 }
 
-// TestPreviewWithoutAFirewallSaysNothingAboutIt: a host with no firewalld has
-// no line, and the plan is BuildPlan's own.
+// No firewalld, no line: the plan is BuildPlan's own.
 func TestPreviewWithoutAFirewallSaysNothingAboutIt(t *testing.T) {
 	plan, err := Preview(pins, allInstall, "eg", "", bootstrap.FirewallState{})
 	if err != nil {
@@ -61,9 +58,8 @@ func TestPreviewWithoutAFirewallSaysNothingAboutIt(t *testing.T) {
 	}
 }
 
-// TestPreviewRefusesAComponentItCannotInstall: the preview is BuildPlan, so a
-// decision bootstrap would stop on (an external address layer with nothing
-// there) is a refusal, not a plan with that step quietly missing.
+// The preview is BuildPlan, so a decision bootstrap would stop on is a refusal, not a
+// plan with the step quietly missing.
 func TestPreviewRefusesAComponentItCannotInstall(t *testing.T) {
 	comps := components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGatewayAPI:   "install",

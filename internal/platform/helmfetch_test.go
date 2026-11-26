@@ -23,15 +23,14 @@ import (
 	"github.com/swizzin/s5n/internal/fetch"
 )
 
-// noWait is box's retry policy with the waiting removed: these tests assert
-// that the fetch was retried, not how long the backoff took.
+// noWait is the retry policy without the waiting: the tests assert a retry, not its
+// duration.
 func noWait() fetch.Policy {
 	return fetch.Policy{Sleep: func(context.Context, time.Duration) error { return nil }}
 }
 
-// chartRepo serves a one-chart repository: index.yaml and the chart's tarball.
-// Either path can be made to fail on its first request, which is the shape of
-// the upstream 5xx that aborted a real bootstrap.
+// chartRepo serves a one-chart repository; either path can fail on its first request,
+// the shape of the upstream 5xx that aborted a real bootstrap.
 type chartRepo struct {
 	name, version string
 	tarball       []byte
@@ -94,7 +93,8 @@ func newChartRepo(t *testing.T, indexFailures, chartFailures int) (*chartRepo, *
 	t.Cleanup(srv.Close)
 	repo.url = srv.URL
 
-	// box builds its own Helm home per fetch; see TestDownloadIgnoresTheOperatorsHelmHome.
+	// box builds its own Helm home per fetch; see
+	// TestDownloadIgnoresTheOperatorsHelmHome.
 	h := &Helm{Retry: noWait()}
 	return repo, h, Release{Chart: name, Version: version, Ref: srv.URL}
 }
@@ -155,11 +155,9 @@ func TestDownloadNamesTheURLEOnceWhenTheUpstreamKeepsFailing(t *testing.T) {
 	}
 }
 
-// TestGetterStatusReadsTheStatusHelmReturns runs Helm's own HTTP getter
-// against a 504. internal/platform reads the status back out of the error
-// Helm builds, because the getter API exposes no other way to tell a retryable
-// 503 from a final 404; if a Helm upgrade rewords that error, this fails
-// instead of the retries silently stopping.
+// Helm's own getter against a 504: the status is read back out of the error, since the
+// API offers no other way to tell a retryable 503 from a final 404. A Helm upgrade that
+// rewords it fails here instead of silently stopping retries.
 func TestGetterStatusReadsTheStatusHelmReturns(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "upstream took too long", http.StatusGatewayTimeout)
@@ -180,10 +178,8 @@ func TestGetterStatusReadsTheStatusHelmReturns(t *testing.T) {
 	}
 }
 
-// TestChartClientRetriesServerErrors proves the *http.Client box hands Helm's
-// OCI registry client (registry.ClientOptHTTPClient) really carries the
-// retrying transport: the registry client is not introspectable from outside,
-// so the client it is built from is exercised here.
+// The client handed to Helm's OCI registry client carries the retrying transport: the
+// registry client is not introspectable, so the client it is built from is exercised.
 func TestChartClientRetriesServerErrors(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -209,14 +205,10 @@ func TestChartClientRetriesServerErrors(t *testing.T) {
 // interface check: the wrapped getter is a getter.
 var _ getter.Getter = retryingGetter{}
 
-// poisonHelmHome writes the operator Helm state box must never read, and points
-// the process environment at it. repositories.yaml is the failure that stopped a
-// real bootstrap: an entry whose index was never cached (what `helm repo add`
-// without `helm repo update` leaves behind) makes Helm's scanReposForURL fail
-// every chart URL download with "no cached repo found ... try 'helm repo
-// update'". The registry config is not valid JSON, so a Helm registry client
-// built from it fails at construction; and a plugin getter sits in the plugins
-// directory, because a getter plugin is code Helm would run in box's process.
+// poisonHelmHome writes the operator state box must never read and points HELM_* at
+// it: a repository entry with no cached index (the real failure: "no cached repo
+// found"), a registry config that is not JSON, and a getter plugin -- code Helm would
+// run in box's process.
 func poisonHelmHome(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -263,10 +255,9 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// snapshot renders every entry under root: path, mode, size, mtime and the
-// content hash of a file. A directory's mtime changes when Helm creates and
-// deletes its scratch index inside it, so this catches a write that is cleaned
-// up again -- which is exactly what FindChartInRepoURL does to ~/.cache/helm.
+// snapshot renders every entry under root, mtime and hash included: a directory's
+// mtime changes when Helm creates and deletes its scratch index, catching a write that
+// was cleaned up again -- what FindChartInRepoURL does to ~/.cache/helm.
 func snapshot(t *testing.T, root string) string {
 	t.Helper()
 	var b strings.Builder
@@ -301,11 +292,8 @@ func snapshot(t *testing.T, root string) string {
 	return b.String()
 }
 
-// TestDownloadIgnoresTheOperatorsHelmHome is the regression: with root's Helm
-// environment poisoned -- a repository entry and no cached index, credentials
-// Helm cannot parse, a getter plugin -- the chart still downloads, and nothing
-// box did is visible in that tree. Before box built its own Helm home, the
-// stale entry failed this download with "no cached repo found".
+// The regression: with the operator's Helm environment poisoned, the chart still
+// downloads and nothing box did shows in that tree.
 func TestDownloadIgnoresTheOperatorsHelmHome(t *testing.T) {
 	poison := poisonHelmHome(t)
 	before := snapshot(t, poison)
@@ -324,10 +312,8 @@ func TestDownloadIgnoresTheOperatorsHelmHome(t *testing.T) {
 	}
 }
 
-// TestDownloadLeavesNoTemporaryHelmHome: the private home exists for the length
-// of one fetch and no longer. TMPDIR is a sandbox here, so a leftover directory
-// (Helm's or box's) is visible; both the success and the failure path are
-// checked, because a failed download is exactly when a defer is easy to miss.
+// The private home lasts one fetch: TMPDIR is a sandbox here, so a leftover shows, on
+// success and on failure.
 func TestDownloadLeavesNoTemporaryHelmHome(t *testing.T) {
 	_, h, spec := newChartRepo(t, 0, 0)
 	root := t.TempDir()
@@ -369,9 +355,7 @@ func readDir(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestHelmHomeIsPrivate pins the shape of the home itself: 0700, every path
-// Helm consults inside it, and no plugins directory to scan, so an operator's
-// getter plugin cannot be loaded.
+// The home's shape: 0700, every path Helm consults inside it, no plugins directory.
 func TestHelmHomeIsPrivate(t *testing.T) {
 	env, err := newHelmEnv()
 	if err != nil {

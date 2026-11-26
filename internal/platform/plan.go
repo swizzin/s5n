@@ -7,11 +7,9 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// planComponent is one piece of the platform layer as the plan introduces it:
-// what box calls it, and what it is for. The phrase is a short label for the
-// job it does for this box, in parentheses after the version -- enough for a
-// person to place it, while the sub-steps under it name the Kubernetes kinds. A component's step stays where BuildPlan put it: the grouping is
-// the printed plan's, never the application order's.
+// planComponent is one piece of the platform layer as the plan introduces it: its name
+// and a short phrase for what it does. A component's step stays where BuildPlan put it:
+// the grouping is the printed plan's, never the application order's.
 type planComponent struct {
 	key    string
 	name   string
@@ -24,25 +22,21 @@ const (
 	groupLoadBalancer = "loadbalancer"
 )
 
-// planComponents is the order the plan introduces them: what issues the
-// certificates, what every app is reached through, and what gives it an
-// address -- the order a person explains them in. A component with no step in
-// the plan is not printed at all.
+// planComponents is the order the plan introduces them: certificates, the front door,
+// its address -- the order a person explains them in. No step, not printed.
 var planComponents = []planComponent{
 	{groupCertManager, "cert-manager", "certificates"},
 	{groupGateway, "Envoy Gateway", "the front door"},
 	{groupLoadBalancer, "MetalLB", "the gateway's address"},
 }
 
-// planGroupOf is the component a step belongs under, or "" for a step that
-// stands on its own. The admission policy is box's own line: it is tagged with
-// the Gateway API capability because that is what it polices, not because it
-// configures Envoy Gateway.
+// planGroupOf is the component a step belongs under, or "" for its own line. The
+// admission policy is box's own line: tagged Gateway API because that is what it
+// polices, not what it configures.
 func planGroupOf(s Step) string {
 	switch s.Kind {
 	case StepGatewayAddress, StepReachable:
-		// Both are about the gateway: the question asks whether it will get an
-		// address without box's MetalLB, and the last step proves it answers.
+		// Both are about the gateway: the question and the proof it answers.
 		return groupGateway
 	}
 	switch s.Component {
@@ -53,8 +47,7 @@ func planGroupOf(s Step) string {
 	case bootstrap.ComponentLoadBalancer:
 		return groupLoadBalancer
 	case bootstrap.ComponentGatewayAPI:
-		// Envoy Gateway is both the Gateway API CRDs and the controller, so
-		// its one release is the gateway's own line.
+		// Envoy Gateway is the CRDs and the controller: its release is the gateway.
 		if s.Kind == StepRelease {
 			return groupGateway
 		}
@@ -62,9 +55,7 @@ func planGroupOf(s Step) string {
 	return ""
 }
 
-// planText is what the plan calls a step. A step whose What names objects -- for
-// the progress and done lines, which are where exact names belong -- says what
-// it does in Plan instead.
+// planText is what the plan calls a step: Plan when What names objects for progress.
 func planText(s Step) string {
 	if s.Plan != "" {
 		return s.Plan
@@ -72,16 +63,15 @@ func planText(s Step) string {
 	return s.What
 }
 
-// componentLine is a component's own line: what it is, its version, and what
-// this run does to it. The phrase that says what the component is for belongs to
-// the log: on the screen a column of names and versions is what a person scans,
-// and three phrases after three versions is the paragraph rule 13 is about.
+// componentLine is a component's own line: what it is, its version, what this run does
+// to it. The phrase for what it is belongs to the log -- a column of names and versions
+// is what a person scans (rule 13).
 func componentLine(c planComponent, s Step) say.Item {
 	base := c.name + " " + s.Release.Version
 	switch {
 	case s.Foreign:
-		// Only a conditional foreign release reaches the plan: the
-		// unconditional one is refused in resolve.
+		// Only a conditional foreign release reaches the plan; the unconditional one
+		// is refused in resolve.
 		text := base
 		if s.Unless != "" {
 			text += ", " + string(s.Unless)
@@ -90,9 +80,8 @@ func componentLine(c planComponent, s Step) say.Item {
 	case AtPin(s.InstalledVersion, s.Release.Version):
 		return say.Item{Mark: say.Verify, Text: base}
 	case s.Unless != "":
-		// A conditional release is never an upgrade: resolve() drops the
-		// condition as soon as the release is there, so `?` never has to
-		// carry an install-or-upgrade mark.
+		// A conditional release is never an upgrade: resolve() drops the condition as
+		// soon as the release is there.
 		return say.Item{Mark: say.Question, Text: base + ", " + string(s.Unless)}
 	}
 	if s.InstalledVersion == "" {
@@ -105,42 +94,36 @@ func componentLine(c planComponent, s Step) say.Item {
 	return say.Item{Mark: say.Change, Text: text}
 }
 
-// usedLine is a component box found and leaves alone. There is no release step
-// to print its version from, and saying so is the point: the operator's
-// implementation is what the sub-steps below go through.
+// usedLine is a component box found and leaves alone: the operator's implementation is
+// what the sub-steps go through.
 func usedLine(c planComponent) say.Item {
 	return say.Item{Mark: say.Verify, Text: c.name + " (already here, left alone)"}
 }
 
-// planGroup is the component being built and the sub-steps that belong to it.
-// parent is nil for a component box uses: nothing in the plan installs it.
+// planGroup is the component being built and its sub-steps; parent is nil for one box
+// uses.
 type planGroup struct {
 	component planComponent
 	parent    *say.Item
 	children  []say.Item
-	// unless is the condition the component's own line carries, so a sub-step
-	// under a conditional component does not repeat it.
+	// unless is the condition the component's own line carries, so a sub-step does not
+	// repeat it.
 	unless Condition
-	// gateway is the index of the child that writes the gateway, or -1, and
-	// reachable is the HTTP check that proves that same object: one line, so
-	// the plan promises the Gateway and its proof together.
+	// gateway is the index of the child writing the gateway, or -1, and reachable the
+	// HTTP check proving it: one line promises the Gateway and its proof.
 	gateway   int
 	reachable say.Item
 }
 
-// planBuilder groups a plan's steps the way the printed plan reads. It holds no
-// state beyond one plan.
+// planBuilder groups a plan's steps as the printed plan reads, over one plan.
 type planBuilder struct {
 	groups map[string]*planGroup
-	// loose is the plan's own lines -- the admission policy -- which belong
-	// under nothing.
+	// loose is the plan's own lines (the admission policy), under nothing.
 	loose []say.Item
 }
 
-// planItems is the plan as printing sees it: each component with the sub-steps
-// that configure it, the lines that stand on their own, and the warnings last.
-// It is pure, so what a plan looks like can be read in a test without a
-// cluster, a reporter or a terminal.
+// planItems is the plan as printing sees it, warnings last. Pure, so a plan's shape is
+// readable in a test without a cluster or a terminal.
 func planItems(plan Plan) []say.Item {
 	b := planBuilder{groups: make(map[string]*planGroup, len(planComponents))}
 	for _, s := range plan.Steps {
@@ -149,11 +132,9 @@ func planItems(plan Plan) []say.Item {
 	return b.items(plan.Warnings, plan.NotHandled)
 }
 
-// printPlan is the plan's own printer: what this run is about to do, one line
-// for the installs, one for each thing the plan cannot decide yet, and the
-// warnings last. The sub-steps that make up a component are the log's (rule 5),
-// so the screen says cert-manager 1.21.3 rather than the four Kubernetes kinds
-// that carry it.
+// printPlan is the plan's own printer: one line for the installs, one per open
+// question, warnings last. A component's sub-steps are the log's (rule 5), so the
+// screen says cert-manager 1.21.3 rather than the four kinds that carry it.
 func printPlan(r say.Reporter, plan Plan) {
 	items := summaryItems(plan)
 	if len(items) == 0 {
@@ -165,17 +146,13 @@ func printPlan(r say.Reporter, plan Plan) {
 	}
 }
 
-// PrintPlan is the plan's printer for a flow that shows it itself and asks its
-// one question later: a guided fresh install shows the platform and the seedbox
-// in one plan, so the plan is printed where the questions are rather than by
-// Decision.Apply. The detail lines go to the run log either way.
+// PrintPlan is the printer for a flow that shows the plan and asks its question later:
+// a guided fresh install shows platform and seedbox in one plan, printed where the
+// questions are. Detail lines go to the log either way.
 func PrintPlan(r say.Reporter, plan Plan) { printPlan(r, plan) }
 
-// summaryItems is the plan as the screen shows it: everything this run installs
-// on one line, everything it only verifies on another, each conditional install
-// on its own (it is a question, and the answer changes what happens), then what
-// box saw and will not change. It is pure, so the shape can be read in a test
-// without a cluster or a terminal.
+// summaryItems is the plan as the screen shows it: installs on one line, verifies on
+// another, each conditional install on its own (it is a question), then the warnings.
 func summaryItems(plan Plan) []say.Item {
 	var installs, changes, verifies, questions, warnings []string
 	for _, it := range planItems(plan) {
@@ -211,8 +188,8 @@ func summaryItems(plan Plan) []say.Item {
 	return items
 }
 
-// detailLines is the plan's plumbing, for the log: each component's own line and
-// the sub-steps under it, in the order they are applied.
+// detailLines is the log's plumbing: each component's line and its sub-steps, in
+// application order.
 func detailLines(plan Plan) []string {
 	var lines []string
 	for _, it := range planItems(plan) {
@@ -224,16 +201,11 @@ func detailLines(plan Plan) []string {
 	return lines
 }
 
-// Items is the plan as a reader sees it, for a flow that shows the platform
-// plan inside its own confirm instead of letting this package print it
-// (Decision.CallerShowsPlan). It is the detailed plan: one line per component
-// and the sub-steps under it.
+// Items is the detailed plan, for a flow that shows it inside its own confirm.
 func (p Plan) Items() []say.Item { return planItems(p) }
 
-// Summary is the plan as bootstrap prints it after its confirm: what this run
-// installs on one line, each conditional install on its own, and what box saw
-// and will not change. A migration's confirm shows the same summary, so the one
-// question a person answers reads like the run that follows it.
+// Summary is the plan as bootstrap prints it after its confirm, and as a migration's
+// confirm shows it, so the one question reads like the run that follows.
 func (p Plan) Summary() []say.Item { return summaryItems(p) }
 
 // group is the component's builder, made on first use.
@@ -252,8 +224,7 @@ func (b *planBuilder) group(key string) *planGroup {
 	return g
 }
 
-// add places one step: a component's own line, a sub-step of the component it
-// configures, or a line of the plan itself.
+// add places one step: a component's line, its sub-step, or a plan line.
 func (b *planBuilder) add(s Step) {
 	key := planGroupOf(s)
 	if key == "" {
@@ -267,8 +238,8 @@ func (b *planBuilder) add(s Step) {
 		g.parent = &it
 		g.unless = s.Unless
 	case StepGatewayAddress:
-		// A question the plan cannot answer yet: box finds out after the
-		// Gateway is applied, and the steps it decides follow it.
+		// A question the plan cannot answer yet: box finds out after the Gateway is
+		// applied, and the steps it decides follow it.
 		g.children = append(g.children, say.Item{Mark: say.Question, Text: planText(s)})
 	case StepReachable:
 		mark, text := conditionMark(s, g)
@@ -282,9 +253,8 @@ func (b *planBuilder) add(s Step) {
 	}
 }
 
-// conditionMark is a sub-step's mark and words. A conditional step under a
-// component whose own line already carries the condition is `?` without saying
-// it twice; anywhere else the condition travels with the step.
+// conditionMark is a sub-step's mark and words: `?` alone under a component whose line
+// already carries the condition, elsewhere with the words.
 func conditionMark(s Step, g *planGroup) (say.Mark, string) {
 	if s.Unless == "" {
 		return say.Install, planText(s)
@@ -296,10 +266,8 @@ func conditionMark(s Step, g *planGroup) (say.Mark, string) {
 	return say.Question, text
 }
 
-// items finishes the plan: the components in their narrative order, each with
-// the sub-steps that configure it, then the lines that stand on their own, then
-// what box saw and will not change, then what box will not handle -- the two
-// things a person may have to act on.
+// items finishes the plan: components in narrative order with their sub-steps, the
+// plan's own lines, the warnings, then what box will not handle.
 func (b *planBuilder) items(warnings, notHandled []string) []say.Item {
 	var items []say.Item
 	for _, c := range planComponents {

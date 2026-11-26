@@ -1,23 +1,13 @@
-// Package platform applies the platform layer box owns: the pieces k0s does
-// not ship (PLAN.md, "platform layer"). `box bootstrap` decides, through
-// internal/bootstrap, which of the four capabilities is already there and
-// which one box must install; this package is the half that writes.
+// Package platform applies the platform layer box owns: the pieces k0s does not
+// ship (PLAN.md, "platform layer"). internal/bootstrap decides which of the four
+// capabilities is there and which box must install; this is the half that writes.
 //
-// It applies only the components the decision says "install". A component it
-// uses is left alone -- box never touches someone else's Gateway or
-// LoadBalancer -- and a component the decision refuses (a conflict) stops the
-// run before the first write. cert-manager is not implemented yet: when the
-// decision says to install it, box says so out loud and carries on with the
-// rest, rather than silently leaving a TLS hole.
-//
-// Like internal/release the flow is a decision over small interfaces
-// (Releases, Cluster, Confirmer), with the Helm SDK and client-go
-// implementations in this package beside it, so the plan, the ordering, the
-// refusal paths and "a refusal writes nothing" are tested from stubs without a
-// cluster. The versions are the chart release's (release.Versions, its
-// platform.yaml) and are passed in; the chart references below are not
-// versions, and box fetches the charts at run time -- no chart tarball is
-// embedded.
+// It applies only what the decision says "install": a component it uses is left alone
+// -- box never touches someone else's Gateway or LoadBalancer -- and a conflict stops
+// the run before the first write. The flow is a decision over small interfaces
+// (Releases, Cluster, Confirmer) with the Helm and client-go halves beside it, so the
+// plan, the order, the refusals and "a refusal writes nothing" are tested from stubs.
+// Versions come from the chart release's platform.yaml; no chart tarball is embedded.
 package platform
 
 import (
@@ -34,38 +24,32 @@ import (
 	"github.com/swizzin/s5n/internal/wait"
 )
 
-// The platform releases: where each chart comes from and what box calls the
-// result. The versions themselves are not here -- every version box installs
-// lives in the chart release's platform.yaml (release.Versions), so a bump
-// moves one line of the chart and this package installs it.
+// The platform releases: where each chart comes from and what box calls the result.
+// The versions are the chart release's platform.yaml, so a bump moves one chart line.
 const (
-	// EnvoyGatewayChart is the Envoy Gateway chart, which ships the Gateway
-	// API CRDs at the experimental channel it is built against. The chart owns
-	// the CRDs on purpose: a separately pinned standard channel can drift from
-	// (or conflict with) the set the controller expects.
+	// EnvoyGatewayChart is the Envoy Gateway chart, which ships the Gateway API CRDs at
+	// the channel it is built against: a separately pinned bundle could drift from the
+	// set the controller expects.
 	EnvoyGatewayChart     = "gateway-helm"
 	EnvoyGatewayRef       = "oci://docker.io/envoyproxy/gateway-helm"
 	EnvoyGatewayRelease   = "envoy-gateway"
 	EnvoyGatewayNamespace = "envoy-gateway-system"
 
-	// MetalLBChart is the MetalLB chart, in L2 mode: it makes
-	// `type: LoadBalancer` work on bare metal with no extra addresses.
+	// MetalLBChart is the MetalLB chart in L2 mode: `type: LoadBalancer` on bare metal.
 	MetalLBChart     = "metallb"
 	MetalLBRef       = "https://metallb.github.io/metallb"
 	MetalLBRelease   = "metallb"
 	MetalLBNamespace = "metallb-system"
 
-	// CertManagerChart is the cert-manager chart. Its CRDs and Gateway API
-	// support are part of the install: the CRDs are what a Certificate is,
-	// and config.gatewayAPI.enabled is what lets the controller solve an
-	// HTTP-01 challenge through the Gateway's HTTPRoute.
+	// CertManagerChart is the cert-manager chart, CRDs and Gateway API support
+	// included: the CRDs are what a Certificate is, and config.gatewayAPI.enabled is
+	// what lets the controller solve HTTP-01 through the Gateway's HTTPRoute.
 	CertManagerChart     = "cert-manager"
 	CertManagerRef       = "oci://quay.io/jetstack/charts/cert-manager"
 	CertManagerRelease   = "cert-manager"
 	CertManagerNamespace = "cert-manager"
 
-	// The Gateway the chart's HTTPRoutes attach to (install/platform/gateway/gateway.yaml,
-	// which the kind e2e applies and box embeds).
+	// The Gateway the chart's HTTPRoutes attach to (install/platform/gateway/gateway.yaml).
 	GatewayNamespace = "s5n-gateway"
 	GatewayName      = "s5n"
 
@@ -74,15 +58,13 @@ const (
 	MetalLBL2Name   = "s5n-l2"
 )
 
-// Condition names what has to be false for a step to run. A plan is printed
-// before the confirm, so a question that can only be settled by a write is
-// printed as a question (`?`) rather than guessed at.
+// Condition names what has to be false for a step to run: a question only a write can
+// settle is printed as `?` rather than guessed at.
 type Condition string
 
 const (
-	// UnlessGatewayAddress: the step runs only if the Gateway box applied
-	// gets no address of its own. The Gateway's status answers it, after the
-	// Gateway exists, which is why it is not known when the plan is printed.
+	// UnlessGatewayAddress: the step runs only if the Gateway box applied gets no address
+	// of its own, which its status answers once it exists.
 	UnlessGatewayAddress Condition = "unless the Gateway gets an address without it"
 )
 
@@ -94,22 +76,20 @@ const (
 	StepRelease StepKind = "release"
 	// StepManifests is an embedded manifest applied with server-side apply.
 	StepManifests StepKind = "manifests"
-	// StepPool is MetalLB's IPAddressPool/L2Advertisement, built from the
-	// node's primary InternalIP once the cluster is open.
+	// StepPool is MetalLB's IPAddressPool/L2Advertisement, from the node's InternalIP.
 	StepPool StepKind = "metallb-pool"
-	// StepIssuers is cert-manager's two ClusterIssuers. They are retried like
-	// the MetalLB pool: the webhook's endpoint can be Ready while the server
-	// still refuses its certificate, and the first apply is what waits it out.
+	// StepIssuers is cert-manager's two ClusterIssuers, retried like the MetalLB pool:
+	// the webhook's endpoint can be Ready while its server still refuses a
+	// connection.
 	StepIssuers StepKind = "cert-manager-issuers"
-	// StepGatewayAddress is the question the plan could not answer before the
-	// confirm: does the Gateway get an address without MetalLB? It waits, and
-	// what it finds decides the conditional steps that follow.
+	// StepGatewayAddress is the question the plan could not answer before the confirm:
+	// does the Gateway get an address without MetalLB? Its answer decides the
+	// conditional steps.
 	StepGatewayAddress StepKind = "gateway-address"
 	// StepReachable is the Gateway's address answering HTTP from this host.
 	StepReachable StepKind = "gateway-reachable"
-	// StepFirewall is the host's packet filter, when box installed k0s on this
-	// host and firewalld is running: the cluster's pod and service networks go
-	// into firewalld's trusted zone before anything is installed behind it.
+	// StepFirewall is the host's packet filter where box installed k0s and firewalld
+	// runs: the cluster's networks are trusted before anything is installed behind it.
 	StepFirewall StepKind = "host-firewall"
 )
 
@@ -122,15 +102,13 @@ const (
 	WaitCertificate WaitKind = "certificate"
 )
 
-// Wait is one readiness check after a step. The cluster implementation bounds
-// it; the decision only says what has to be true.
+// Wait is one readiness check after a step; the cluster implementation bounds it.
 type Wait struct {
 	Kind      WaitKind
 	Namespace string
 	Name      string
-	// Timeout bounds this wait when non-zero; otherwise the client's own
-	// bound applies. A caller with a shorter budget than the platform's five
-	// minutes (a certificate that is not issued yet) uses it.
+	// Timeout bounds this wait when non-zero; otherwise the client's own bound
+	// applies. A caller with a shorter budget uses it.
 	Timeout time.Duration
 }
 
@@ -166,12 +144,10 @@ func (r Release) String() string {
 type Step struct {
 	Component bootstrap.PlatformComponent
 	Kind      StepKind
-	// What names the step for the progress and done lines, where exact object
-	// names belong ("applied IPAddressPool s5n-pool ...").
+	// What names the step for progress and done lines, with exact object names.
 	What string
-	// Plan is what the printed plan calls the step when What names objects:
-	// the plan says what box does, and the names stay in the lines a person
-	// reads while it happens. Empty means What.
+	// Plan is what the printed plan calls the step when What names objects. Empty
+	// means What.
 	Plan    string
 	Release Release
 	// Documents is the objects of a StepManifests step, already parsed and
@@ -179,39 +155,32 @@ type Step struct {
 	// time keeps the apply path free of YAML.
 	Documents []map[string]any
 	Wait      []Wait
-	// Unless is set when the step only happens if the question the plan
-	// cannot answer before the confirm comes back one way: MetalLB and its
-	// pool are skipped when the Gateway has an address without them.
+	// Unless makes the step conditional on the question the plan cannot answer:
+	// MetalLB and its pool are skipped when the Gateway has an address without them.
 	Unless Condition
-	// Mode is the ownership a step that asks the cluster a question acts
-	// under: in external mode the Gateway must get an address from something
-	// box does not manage, in auto mode its absence is box's to fix.
+	// Mode is the ownership a questioning step acts under: external must get an
+	// address from something box does not manage, auto's absence is box's to fix.
 	Mode bootstrap.PlatformMode
-	// InstalledVersion is filled in by resolution: the chart version a
-	// deployed release already has. AtPin(InstalledVersion, Release.Version)
-	// means the step is verification only, and no Helm call happens.
+	// InstalledVersion is filled by resolution: what a deployed release has.
+	// AtPin(InstalledVersion, Release.Version) means verification only, no Helm call.
 	InstalledVersion string
-	// Foreign marks a deployed release of the same name that box did not
-	// install (it carries no ownership label). It is never upgraded; a
+	// Foreign marks a same-named release box did not install: never upgraded, and a
 	// conditional step that would have to run stops instead.
 	Foreign bool
-	// CIDRs are the networks a StepFirewall trusts: the cluster's pod and
-	// service networks, read by bootstrap from the k0s config it installed
-	// with.
+	// CIDRs are the networks a StepFirewall trusts, read by bootstrap from the k0s
+	// config it installed with.
 	CIDRs []string
 }
 
 // Plan is what bootstrap will apply, in order.
 type Plan struct {
 	Steps []Step
-	// Warnings are what box saw and will not change, printed with the plan
-	// before the confirm so the operator reads them together with what box
-	// does do. Today: a host running firewalld, on a cluster box did not
-	// install, with the two commands that would open its pod and service
-	// networks.
+	// Warnings are what box saw and will not change, printed with the plan so the
+	// operator reads them beside what box does do (a firewalld it does not own, with
+	// the commands that would open it).
 	Warnings []string
-	// NotHandled names decided installs this version of box does not do, with
-	// the reason. It is printed, never silently dropped.
+	// NotHandled names decided installs box does not do, with the reason: printed,
+	// never silently dropped.
 	NotHandled []string
 }
 
@@ -233,91 +202,81 @@ type Cluster interface {
 	PrimaryInternalIP(ctx context.Context) (string, error)
 	// Apply server-side-applies the documents with field manager box.
 	Apply(ctx context.Context, docs []map[string]any) error
-	// Await blocks until the object is ready, or the bound expires.
+	// Await blocks until the object is ready or the bound expires.
 	Await(ctx context.Context, w Wait) error
-	// CertificateReady answers a Certificate's Ready condition, with
-	// cert-manager's reason when it is not. Bootstrap polls it for the box
-	// root; the per-host step reads it after a wait ran out.
+	// CertificateReady answers a Certificate's Ready condition with cert-manager's
+	// reason. Bootstrap polls it for the box root; the per-host step reads it after a
+	// wait ran out.
 	CertificateReady(ctx context.Context, namespace, name string) (bool, string, error)
 }
 
 // Releases is the Helm side.
 type Releases interface {
-	// Version returns the chart version of a deployed release, whether box
-	// installed it (its ownership label), and false when the release is not
-	// installed.
+	// Version returns a deployed release's chart version, whether box installed it (its
+	// ownership label), and false when it is not installed.
 	Version(ctx context.Context, name, namespace string) (version string, owned, exists bool, err error)
-	// Install installs or upgrades the release and waits for its workloads.
-	// It always stamps box's ownership label.
+	// Install installs or upgrades the release, waits for its workloads and stamps
+	// box's ownership label.
 	Install(ctx context.Context, spec Release) error
 }
 
-// Firewall is the host's packet filter, as the one step that changes it needs:
-// the cluster's networks go into firewalld's trusted zone, permanently and in
-// the running configuration (bootstrap.Firewalld). Reading the host's filter is
-// bootstrap's; this package only carries out the step bootstrap planned.
+// Firewall is the one step that changes the host's filter: the networks into
+// firewalld's trusted zone, permanently and now (bootstrap.Firewalld). Reading it is
+// bootstrap's.
 type Firewall interface {
 	Trust(ctx context.Context, cidrs []string) error
 }
 
-// Confirmer asks the one question before the first write. def is the answer a
-// bare enter gives: the platform layer is asked with no, because it is a change
-// to a host that already runs.
+// Confirmer asks the one question before the first write. def is a bare enter's
+// answer; the platform layer is asked with no, since it changes a running host.
 type Confirmer interface {
 	Ask(question string, def bool) (bool, error)
 }
 
 // Decision is one `box bootstrap`'s platform half.
 type Decision struct {
-	// Open builds the cluster client. It does not contact the cluster, and it
-	// is only called when something will be read or written.
+	// Open builds the cluster client, contacting nothing, and is called only when
+	// something will be read or written.
 	Open     func() (Cluster, error)
 	Releases Releases
-	// Probe builds the Gateway probe. It is only called by a step that needs
-	// it -- after the confirm, never before -- and it does not contact the
-	// cluster either.
+	// Probe builds the Gateway probe, only from a step that needs it (after the
+	// confirm), and contacts nothing.
 	Probe   func() (GatewayProbe, error)
 	Confirm Confirmer
-	// Say is every line the decision writes. A nil reporter writes nothing;
-	// cmd/box always gives the plain or the live one, and policy stays here —
+	// Say is every line the decision writes; nil writes nothing. Policy stays here --
 	// only how a plan, a wait and a finished step look is the reporter's.
 	Say say.Reporter
-	// GatewayClass is the class bootstrap chose (bootstrap.Result.Gateway.
-	// Class). The Gateway box applies attaches to it; the GatewayClass itself
-	// is created only when this run installs its implementation.
+	// GatewayClass is the class bootstrap chose. The Gateway box applies attaches to
+	// it; the class itself is created only when this run installs the implementation.
 	GatewayClass string
-	// Pins is the platform pins of the chart release bootstrap pulled
-	// (release.Versions): the chart versions this plan installs. A plan
-	// cannot be built without them, and they come from the release rather
-	// than from this package, so a platform patch is a chart release.
+	// Pins is the chart release's platform pins: the versions this plan installs. A
+	// plan cannot be built without them, and they are the release's rather than this
+	// package's, so a platform patch is a chart release.
 	Pins release.Versions
-	// Firewall is what bootstrap found about the host's packet filter
-	// (bootstrap.FirewallState): whether firewalld is running, the networks
-	// box will trust, or the warning for a host box does not change.
+	// Firewall is what bootstrap found about the packet filter: whether firewalld
+	// runs, the networks box will trust, or the warning for a host box does not
+	// change.
 	Firewall bootstrap.FirewallState
-	// HostFirewall is how a StepFirewall is carried out. It is only reached on
-	// a host where box installed k0s; a plan with no such step never uses it.
+	// HostFirewall carries out a StepFirewall, reached only on a host where box
+	// installed k0s.
 	HostFirewall Firewall
-	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory.
-	// Empty in every real run: the manifest's Let's Encrypt production URL is
-	// the only one box ships. It exists for the e2e's Pebble server, which
-	// cannot be reached at the production URL and whose own certificate is
-	// self-signed.
+	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory; empty in
+	// every real run, it exists for the e2e's Pebble, which has no production URL and
+	// a self-signed certificate.
 	ACMEServer string
-	// CallerConfirms says the flow that runs this plan shows it and asks the
-	// one question itself, so this package does neither: a migration puts the
-	// platform plan first in its single confirm, and asking here as well is
-	// the second form that run exists to remove.
+	// CallerConfirms says the flow shows the plan and asks the question itself: a
+	// migration puts the platform plan in its single confirm, and asking twice is the
+	// form that run exists to remove.
 	CallerConfirms bool
 
-	// AddressTimeout is how long the Gateway gets to say it has no address
-	// before MetalLB is installed. Zero means AddressTimeout (15s).
+	// AddressTimeout is how long the Gateway gets to say it has no address before
+	// MetalLB is installed; zero means AddressTimeout.
 	AddressTimeout time.Duration
-	// ProbeTimeout is the whole wait for the Gateway to be Programmed with an
-	// address. Zero means ProbeTimeout (60s).
+	// ProbeTimeout is the whole wait for the Gateway to be Programmed; zero means
+	// ProbeTimeout.
 	ProbeTimeout time.Duration
-	// ReachTimeout is how long that address gets to answer HTTP. Zero means
-	// ReachTimeout (30s).
+	// ReachTimeout is how long that address gets to answer HTTP; zero means
+	// ReachTimeout.
 	ReachTimeout time.Duration
 	// PoolTimeout bounds how long the MetalLB webhook may refuse its pool.
 	// Zero means two minutes.
@@ -325,9 +284,8 @@ type Decision struct {
 	// WebhookTimeout bounds how long cert-manager's webhook may refuse the
 	// first ClusterIssuer apply. Zero means two minutes.
 	WebhookTimeout time.Duration
-	// RootTimeout bounds the wait for box's root Certificate to be Ready
-	// before the CA issuer that signs with it is applied. Zero means
-	// RootTimeout (two minutes).
+	// RootTimeout bounds the wait for box's root Certificate before the CA issuer that
+	// signs with it is applied; zero means RootTimeout.
 	RootTimeout time.Duration
 	// Poll is how often a refused pool is retried. Zero means two seconds.
 	Poll time.Duration
@@ -372,9 +330,8 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, err
 	}
 
-	// Every check below is a read, and they are the last thing before the
-	// confirm: a kubeconfig that cannot create a CRD is refused before the
-	// operator is asked, and before anything is written.
+	// The checks below are reads, the last thing before the confirm: a kubeconfig that
+	// cannot create a CRD is refused before the operator is asked.
 	if err := preflight(ctx, cl, preflightAccess(plan)); err != nil {
 		return res, err
 	}
@@ -390,9 +347,8 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		}
 	}
 
-	// answered is what the plan's question found, once it has been asked. It
-	// is only known after the Gateway is applied, so the steps carry it: every
-	// step with Unless runs or not depending on it.
+	// answered is what the plan's question found; every step with Unless runs or not
+	// depending on it.
 	answered := ""
 	runs := newComponentRuns(r, plan)
 	for i, s := range plan.Steps {
@@ -471,9 +427,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Verified = append(res.Verified, "Gateway "+address)
-			// The address is the one fact worth keeping on the row: it is
-			// what the person types, and what MetalLB or the external
-			// load balancer just gave this box.
+			// The address is the one fact worth keeping: what the person types.
 			runs.fact(address)
 		}
 		runs.end(i)
@@ -482,13 +436,12 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	return res, nil
 }
 
-// componentRun is one component's row on the screen: started at its first step
-// and finished at its last, so cert-manager's install, its three Deployment
-// waits and its ClusterIssuers read as one line with the time they took (rule
-// 4). Its steps are the log's (rule 5).
+// componentRun is one component's row: started at its first step and finished at its
+// last, so cert-manager's install, waits and issuers read as one line (rule 4); the
+// steps are the log's (rule 5).
 type componentRun struct {
 	handle say.Handle
-	// last is the index of the component's last step in the plan.
+	// last is the index of the component's last step.
 	last int
 	// facts are what the row says besides the duration.
 	facts []string
@@ -521,9 +474,8 @@ func newComponentRuns(r say.Reporter, plan Plan) *componentRuns {
 	return c
 }
 
-// begin starts the row of the component this step belongs to, or hands back the
-// one already running. A step that belongs to no component is its own row,
-// named by what it does.
+// begin starts this step's component row, or returns the one running; a step in no
+// component is its own row.
 func (c *componentRuns) begin(i int, s Step) *componentRun {
 	key := planGroupOf(s)
 	c.currentKey = key
@@ -551,9 +503,8 @@ func (c *componentRuns) end(i int) {
 	c.current.done()
 }
 
-// fact adds one fact to the row of the component that is running, or to the
-// gateway's when it has a row: the address is what the Gateway answers on, and
-// the row that proves it is the Gateway's.
+// fact adds one fact to the running component's row, or the Gateway's when it has
+// one: the address is what the Gateway answers on.
 func (c *componentRuns) fact(text string) {
 	if text == "" {
 		return
@@ -568,8 +519,8 @@ func (c *componentRuns) fact(text string) {
 	target.facts = append(target.facts, text)
 }
 
-// finish closes any row whose last step never ran, so a stopped run leaves no
-// half-drawn component behind.
+// finish closes a row whose last step never ran, so a stopped run leaves no
+// half-drawn component.
 func (c *componentRuns) finish() {
 	for _, key := range c.order {
 		c.runs[key].done()
@@ -602,9 +553,8 @@ func componentName(key string) string {
 	return key
 }
 
-// resolve reads which releases are already deployed, so the printed plan says
-// install or verify instead of guessing. A release at another version is an
-// upgrade: Helm's own action, one write.
+// resolve reads which releases are deployed, so the plan says install or verify. A
+// release at another version is an upgrade: Helm's action, one write.
 func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 	boxMetalLB := false
 	for i := range plan.Steps {
@@ -624,10 +574,9 @@ func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 			continue
 		}
 		if ok {
-			// A same-named release box did not install is the operator's.
-			// A conditional step may never run (the Gateway's own address
-			// decides), so it is only marked here; an unconditional one is
-			// refused before the confirm.
+			// A same-named release box did not install is the operator's. A conditional
+			// step may never run, so it is only marked; an unconditional one is refused
+			// before the confirm.
 			s.Foreign = true
 			if s.Unless == "" {
 				return fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
@@ -636,18 +585,15 @@ func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 		}
 	}
 	if boxMetalLB {
-		// A MetalLB release box installed is box's, at the pinned version or
-		// one upgrade behind: verify or upgrade it as before. There is no
-		// install left to decide, so the Gateway question goes -- and keeping
-		// it would skip box's own upgrade, since box's own MetalLB is exactly
-		// what gives the Gateway an address.
+		// Box's own MetalLB is already there: verify or upgrade it, and drop the
+		// Gateway question, since box's MetalLB is exactly what gives the Gateway an
+		// address and keeping the question would skip its upgrade.
 		plan.settle()
 	}
 	return nil
 }
 
-// settle drops the Gateway question and makes every conditional step
-// unconditional: box's MetalLB is already there, so nothing is being decided.
+// settle drops the Gateway question and makes every conditional step unconditional.
 func (p *Plan) settle() {
 	steps := make([]Step, 0, len(p.Steps))
 	for _, s := range p.Steps {
@@ -660,10 +606,8 @@ func (p *Plan) settle() {
 	p.Steps = steps
 }
 
-// gatewayAddress asks whether the Gateway got an address without box's
-// MetalLB. In auto mode no address is the answer that installs MetalLB; in
-// external mode it is a refusal, because the operator said the address layer
-// is theirs.
+// gatewayAddress asks whether the Gateway got an address without box's MetalLB: in
+// auto mode no address installs MetalLB, in external mode it is a refusal.
 func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMode) (GatewayAnswer, error) {
 	p, err := d.probe()
 	if err != nil {
@@ -679,9 +623,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		timeout = ProbeTimeout
 	}
 	if quick > timeout || mode == bootstrap.ModeExternal {
-		// In external mode the operator said something else hands out
-		// addresses, and a slow LoadBalancer is still a working one, so it
-		// gets the whole wait.
+		// External mode said something else hands out addresses, and a slow
+		// LoadBalancer is still a working one: it gets the whole wait.
 		quick = timeout
 	}
 	r.Detail(fmt.Sprintf("waiting up to %s for Gateway %s/%s to report an address", quick, GatewayNamespace, GatewayName))
@@ -690,9 +633,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		return answer, err
 	}
 	if settling(answer) && timeout > quick {
-		// Only "no address, AddressNotAssigned" is an answer at the short
-		// deadline. Anything else is still moving, so it gets the rest of
-		// the whole wait before box judges it.
+		// Only "no address, AddressNotAssigned" is an answer at the short deadline;
+		// anything else gets the rest of the whole wait.
 		r.Detail(fmt.Sprintf("the Gateway is still settling (%s); waiting up to another %s", reasonOr(answer.Reason), timeout-quick))
 		answer, err = p.Address(ctx, timeout-quick)
 		if err != nil {
@@ -707,9 +649,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	case answer.Address != "" && answer.Programmed():
 		r.Detail("the Gateway already has an address: " + answer.Address + "; MetalLB and its address pool are not installed")
 	case answer.Address != "" || !deferredReason(answer.Reason):
-		// An address the Gateway will not call Programmed, or no address for a
-		// reason an address layer cannot answer: both are failures at the
-		// deadline, and installing MetalLB over one would only hide it.
+		// An address the Gateway will not call Programmed, or no address for a reason
+		// an address layer cannot answer: installing MetalLB over either hides it.
 		return answer, gatewayFailure(answer, timeout)
 	case mode == bootstrap.ModeExternal:
 		return answer, fmt.Errorf("platform.loadbalancer.mode is external, but Gateway %s/%s got no address within %s (%s): something else has to assign one (MetalLB, k3s servicelb or a cloud provider). Install it and run `box bootstrap` again, or set platform.loadbalancer.mode=auto to let box install MetalLB",
@@ -720,8 +661,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	return answer, nil
 }
 
-// reachable is the last check on every path: the address the Gateway reports
-// has to answer HTTP from this host, not only in the API server's opinion.
+// reachable is the last check on every path: the Gateway's address must answer HTTP
+// from this host, not only in the API server's opinion.
 func (d *Decision) reachable(ctx context.Context) (string, error) {
 	p, err := d.probe()
 	if err != nil {
@@ -731,9 +672,8 @@ func (d *Decision) reachable(ctx context.Context) (string, error) {
 	if timeout <= 0 {
 		timeout = ProbeTimeout
 	}
-	// The same rule as the question, with one difference: MetalLB has been
-	// installed and its pool applied by now, so a second AddressNotAssigned is
-	// the end of what box can do.
+	// MetalLB and its pool are in place by now, so a second AddressNotAssigned is the
+	// end of what box can do.
 	r := d.report()
 	r.Detail(fmt.Sprintf("waiting up to %s for Gateway %s/%s to be Programmed with its address", timeout, GatewayNamespace, GatewayName))
 	answer, err := p.Address(ctx, timeout)
@@ -772,9 +712,8 @@ func (d *Decision) probe() (GatewayProbe, error) {
 	return p, nil
 }
 
-// gatewayFailure is box's refusal when the Gateway is not going to be fixed by
-// an address layer: it has an address but will not call itself Programmed, or
-// it has none and says why in a way MetalLB cannot answer.
+// gatewayFailure is the refusal when an address layer will not fix the Gateway: it has
+// an address but is not Programmed, or none and a reason MetalLB cannot answer.
 func gatewayFailure(answer GatewayAnswer, timeout time.Duration) error {
 	what := "has no address and is not Programmed"
 	if answer.Address != "" {
@@ -787,11 +726,10 @@ func gatewayFailure(answer GatewayAnswer, timeout time.Duration) error {
 	return fmt.Errorf("Gateway %s/%s %s after %s (%s)", GatewayNamespace, GatewayName, what, timeout, reason)
 }
 
-// settling says an answer at the short deadline is not yet one to act on: the
-// Gateway is neither Programmed with an address nor saying plainly that no
-// address was assigned, and it exists. Envoy Gateway reports NoResources with
-// its address already assigned while the proxy pod rolls out, which is the
-// common case on a cluster that already has a LoadBalancer.
+// settling says a short-deadline answer is not one to act on: the Gateway exists,
+// is neither Programmed nor plainly unassigned. Envoy reports NoResources with its
+// address assigned while the proxy rolls out, the common case where a LoadBalancer
+// already exists.
 func settling(a GatewayAnswer) bool {
 	if a.missing {
 		return false
@@ -802,16 +740,14 @@ func settling(a GatewayAnswer) bool {
 	return a.Address != "" || a.Reason != gatewayAddressNotAssigned
 }
 
-// deferredReason is a reason that says nothing about the address layer: the
-// Gateway's Service has no address yet, or the Gateway has not been reconciled
-// at all. Anything else (NoResources, AddressNotUsable) is about the data
-// plane, and box stops on it rather than installing MetalLB over it.
+// deferredReason is a reason about the address layer still arriving, not the data
+// plane: anything else (NoResources, AddressNotUsable) makes box stop rather than
+// installing MetalLB over it.
 func deferredReason(reason string) bool {
 	return reason == "" || reason == gatewayAddressNotAssigned
 }
 
-// reasonOr is the Gateway's own word for why it has no address, for box's
-// line: the field is empty on a Gateway that has not been reconciled yet.
+// reasonOr is the Gateway's own word, or "not reconciled yet" when it has none.
 func reasonOr(reason string) string {
 	if reason == "" {
 		return "not reconciled yet"
@@ -829,13 +765,10 @@ func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
 	return nil
 }
 
-// retryApply applies docs until the API server accepts them or the bound
-// expires. Both webhooks box talks to -- MetalLB's pool and cert-manager's
-// issuers -- are served by pods that are Ready a moment before they can accept
-// a connection (they load their certificate first), and the chart's wait only
-// proves the pod is Ready. The caller keeps its own words for the refusal, and
-// the last one is what it says: a webhook that refused for its own reason is
-// the thing the operator has to fix.
+// retryApply applies docs until the API server accepts them or the bound expires.
+// Both webhooks -- MetalLB's pool and cert-manager's issuers -- are served by pods
+// Ready before they can accept a connection, and the chart's wait only proves
+// Readiness. The last refusal is returned: it is the operator's to fix.
 func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string]any, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
@@ -861,8 +794,7 @@ func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string
 	return nil
 }
 
-// applyPool writes MetalLB's pool and advertisement, retrying until the
-// webhook answers.
+// applyPool writes MetalLB's pool and advertisement, retried until the webhook answers.
 func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 	r := d.report()
 	r.Detail("applying the MetalLB address pool")
@@ -907,11 +839,10 @@ func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[stri
 		}
 		return fmt.Errorf("cert-manager's webhook refused its ClusterIssuers for %s: %w (cert-manager is installed; fix the cause and run `box bootstrap` again)", wait, err)
 	}
-	// The root's Certificate is issued by the bootstrap issuer applied above,
-	// and the CA issuer below signs with its Secret. Applying the CA issuer
-	// first would leave it pointing at a Secret that does not exist yet, and
-	// every host's Certificate would wait on a failure that names the Secret
-	// rather than the ordering. So: root Ready, then the issuer that uses it.
+	// The root's Certificate is issued by the bootstrap issuer applied above, and the
+	// CA issuer below signs with its Secret: applied first, it would point at a Secret
+	// that does not exist, and every host's Certificate would wait on the wrong
+	// failure. So: root Ready, then the issuer that uses it.
 	if err := d.awaitRoot(ctx, cl); err != nil {
 		return err
 	}
@@ -925,17 +856,13 @@ func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[stri
 	return nil
 }
 
-// RootTimeout is how long box's root Certificate gets to be Ready before
-// bootstrap stops. It is a local signing operation, not an ACME exchange, so
-// the bound is a webhook and a controller catching up, not DNS.
+// RootTimeout is how long box's root Certificate gets to be Ready: a local signing
+// operation, so the bound is a webhook and a controller catching up, not DNS.
 const RootTimeout = 2 * time.Minute
 
-// awaitRoot waits for box's root Certificate, in the shape every other wait
-// in this package has: poll to the deadline, then branch on what the last
-// attempt said. A Certificate that is not Ready is cert-manager's reason to
-// report -- the root is the one thing a self-signed box can never re-derive
-// from the internet, so guessing at its absence wastes a run that could have
-// said what is wrong.
+// awaitRoot waits for box's root Certificate, polling to the deadline and reporting
+// cert-manager's own reason: the root is the one thing a self-signed box can never
+// re-derive, so a guess wastes a run that could have said what is wrong.
 func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	timeout := d.RootTimeout
 	if timeout <= 0 {
@@ -951,8 +878,8 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	waited, err := wait.Until(ctx, timeout, poll, func(ctx context.Context) (bool, error) {
 		ready, why, err := cl.CertificateReady(ctx, CertManagerNamespace, RootCertificateName)
 		if err != nil {
-			// A read that fails is not a Certificate that is slow: stop and
-			// say so rather than spending the budget on a broken client.
+			// A failed read is not a slow Certificate: stop rather than spending the
+			// budget on a broken client.
 			return false, err
 		}
 		if !ready {
@@ -977,12 +904,9 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	return nil
 }
 
-// Preview is the platform plan for a cluster whose layer is not applied yet,
-// built before anything is written so a flow can show it before its one
-// question: the same BuildPlan Apply calls, plus the firewall line bootstrap
-// found. It does not resolve the plan against the cluster (which reads deployed
-// releases to say install or verify), because the decision it is built from is
-// the probe's own answer: nothing is there, so every step is an install.
+// Preview is the plan for a cluster whose layer is not applied yet, shown before a
+// flow's one question: what Apply builds, plus the firewall line. It does not resolve
+// against the cluster, since every step is an install on nothing.
 func Preview(pins release.Versions, components []bootstrap.ComponentResult, class, acmeServer string, firewall bootstrap.FirewallState) (Plan, error) {
 	plan, err := BuildPlan(pins, components, class, acmeServer)
 	if err != nil {
@@ -991,18 +915,13 @@ func Preview(pins release.Versions, components []bootstrap.ComponentResult, clas
 	return withFirewall(plan, firewall), nil
 }
 
-// BuildPlan turns the decision's component results into the ordered list of
-// writes. It is pure: no cluster, no clock. Only `install` produces a release;
-// `use` and `verify` leave an implementation alone, and `stop` refuses the
-// whole run. pins are the chart release's platform.yaml, so every chart version
-// in the plan is the release's rather than a constant of this package.
+// BuildPlan turns the component results into the ordered list of writes. Pure: no
+// cluster, no clock. Only `install` produces a release; `use` and `verify` leave an
+// implementation alone and `stop` refuses the run. Every version is the release's.
 //
-// gatewayClass is the class bootstrap chose (bootstrap.Result.Gateway). The
-// Gateway box owns is written on every run, on that class: the chart's routes
-// attach to box's Gateway, so it has to exist whether box installed the
-// implementation or found one. The GatewayClass is written only when box
-// installs Envoy Gateway, because a class someone else's controller serves is
-// the operator's and must not be rewritten.
+// The Gateway box owns is written on every run on the chosen class, because the
+// chart's routes attach to it. The GatewayClass itself is written only when box
+// installs Envoy Gateway: a class someone else's controller serves is not box's.
 func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, gatewayClass, acmeServer string) (Plan, error) {
 	var plan Plan
 	byComponent := make(map[bootstrap.PlatformComponent]bootstrap.ComponentResult, len(components))
@@ -1021,9 +940,8 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 	lb := byComponent[bootstrap.ComponentLoadBalancer]
 	cm := byComponent[bootstrap.ComponentCertManager]
 
-	// Envoy Gateway is both the Gateway API CRDs and the controller, so an
-	// install of either capability is one Helm release -- and that release is
-	// exactly the case where box also creates the GatewayClass.
+	// Envoy Gateway is both the CRDs and the controller: an install of either is one
+	// release, and the case where box also creates the GatewayClass.
 	installEnvoy := gwAPI.Action == actionInstall || gw.Action == actionInstall
 	if installEnvoy {
 		plan.Steps = append(plan.Steps, Step{
@@ -1040,12 +958,9 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		})
 	}
 
-	// cert-manager is the TLS half of the platform. It is installed only when
-	// the decision says so; an existing install box can use is verified
-	// instead (the probe already refused one it cannot use). Its CRDs ship
-	// with the chart -- a separately pinned CRD bundle could drift from the
-	// controller -- and config.gatewayAPI.enabled is the controller setting
-	// that makes the Gateway HTTP-01 solver work at all.
+	// cert-manager is the TLS half, installed only when the decision says so (an
+	// existing usable install is verified). Its CRDs ship with the chart, and
+	// config.gatewayAPI.enabled is what makes the HTTP-01 solver work.
 	if cm.Action == actionInstall {
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentCertManager,
@@ -1071,22 +986,19 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		})
 	}
 
-	// MetalLB is the address layer, and the Gateway is what needs it: in
-	// s5n the torrent port is a NodePort, so a LoadBalancer Service exists
-	// only because the Gateway implementation creates one for the Gateway.
-	// That is what makes the Gateway's own status the capability probe.
+	// MetalLB is the address layer, which only the Gateway needs: the torrent port is a
+	// NodePort, so a LoadBalancer Service exists only because the Gateway implementation
+	// creates one -- which makes the Gateway's own status the probe.
 	//
-	// managed mode owns the address layer, so it installs it first and never
-	// asks anything. auto mode applies the Gateway and then asks whether it
-	// got an address on its own; only no address installs MetalLB. external
-	// mode owns nothing: the same question verifies the operator's answer.
+	// managed installs it first and asks nothing; auto applies the Gateway and installs
+	// MetalLB only if it got no address; external owns nothing and only verifies.
 	managedLB := lb.Action == actionInstall
 	if managedLB {
 		plan.Steps = append(plan.Steps, metalLBSteps(pins, "")...)
 	}
 
-	// Box's Gateway, on every path. On `use` it is still box's object: the
-	// chart's HTTPRoutes name it, and nothing else on the cluster does.
+	// Box's Gateway on every path: on `use` it is still box's object, since the chart's
+	// HTTPRoutes name it.
 	objects, err := gatewayObjects(gatewayClass, installEnvoy)
 	if err != nil {
 		return Plan{}, err
@@ -1099,11 +1011,9 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Documents: objects,
 	})
 
-	// The issuers are root's, and every seedbox's Certificate names one. They
-	// are applied after the Gateway they solve through, on every run: a
-	// re-apply is the same bytes, and it is what repairs a cluster whose
-	// ClusterIssuers were removed. They are only meaningful when cert-manager
-	// is going to be there, which the decision has already settled.
+	// The issuers are root's and every seedbox's Certificate names one: applied after
+	// the Gateway they solve through, on every run, which is what repairs a cluster
+	// whose issuers were removed.
 	issuers, err := issuerObjects(acmeServer)
 	if err != nil {
 		return Plan{}, err
@@ -1118,10 +1028,8 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 
 	switch lb.Action {
 	case actionProbe:
-		// auto mode: the Gateway's own status decides whether MetalLB is box's
-		// to install. The question is asked on every run -- a re-run asks the
-		// Gateway that is already there, and a cluster with none answers at
-		// once rather than waiting a minute.
+		// auto: the Gateway's status decides. Asked every run -- a re-run asks the
+		// Gateway already there, and a cluster with none answers at once.
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentLoadBalancer,
 			Kind:      StepGatewayAddress,
@@ -1130,8 +1038,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		})
 		plan.Steps = append(plan.Steps, metalLBSteps(pins, UnlessGatewayAddress)...)
 	case actionVerify:
-		// external mode: no MetalLB ever. The question verifies the operator's
-		// address layer against the Gateway box writes on this run.
+		// external: no MetalLB ever; the question verifies the operator's layer.
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentLoadBalancer,
 			Kind:      StepGatewayAddress,
@@ -1140,9 +1047,8 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		})
 	}
 
-	// Every path ends the same way: the address the Gateway reports has to
-	// answer HTTP from this host, whether it came from box's MetalLB, the
-	// operator's, or a cloud provider's.
+	// Every path ends the same way: the Gateway's address must answer HTTP from this
+	// host, whoever assigned it.
 	plan.Steps = append(plan.Steps, Step{
 		Component: bootstrap.ComponentLoadBalancer,
 		Kind:      StepReachable,
@@ -1150,10 +1056,9 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Plan:      "HTTP on :80",
 	})
 
-	// The admission policy is the platform layer's tenancy contract: root
-	// installs it once, `box adduser` binds it per namespace. Applying it on
-	// every run is safe (server-side apply, same bytes, no change) and it is
-	// what repairs a platform whose policy was removed.
+	// The admission policy is the tenancy contract: root installs it once and
+	// `box adduser` binds it per namespace. Re-applying the same bytes is safe, and is
+	// what repairs a policy that was removed.
 	policy, err := ParseManifests(admissionPolicy)
 	if err != nil {
 		return Plan{}, fmt.Errorf("the admission policy manifest: %w", err)
@@ -1169,25 +1074,19 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 	return plan, nil
 }
 
-// withFirewall is the plan's line about the host's packet filter. It is the
-// plan's first step because everything box installs behind it is reached
-// through the host: on a single-node k0s box, kube-router routes pod-to-pod
-// traffic through the host, so a firewall that does not know the cluster's
-// networks refuses Envoy's dial to an app and every request behind the login
-// fails.
+// withFirewall is the plan's line about the packet filter, its first step because
+// everything box installs is reached through the host: kube-router routes pod-to-pod
+// traffic through it, so a firewall that does not know the cluster's networks refuses
+// Envoy's dial and every request behind the login fails.
 //
-// Only a host where box installed k0s has networks box may trust: those come
-// from the k0s config box wrote (bootstrap.FirewallState.CIDRs). Everywhere
-// else box does not know them and does not change the host, so the plan
-// carries the warning with the two commands instead, printed before the
-// confirm.
+// Only a host where box installed k0s has networks box may trust; elsewhere the plan
+// carries the warning with the two commands.
 func withFirewall(plan Plan, fw bootstrap.FirewallState) Plan {
 	if !fw.Active {
 		return plan
 	}
 	if len(fw.CIDRs) > 0 {
-		// The plan names the zone and the networks it trusts; the row on the
-		// screen is the zone alone, because a name column is not a sentence.
+		// The plan names the zone and its networks; the screen row is the zone alone.
 		line := "firewalld's trusted zone: " + strings.Join(fw.CIDRs, " and ")
 		plan.Steps = append([]Step{{
 			Kind:  StepFirewall,
@@ -1202,8 +1101,7 @@ func withFirewall(plan Plan, fw bootstrap.FirewallState) Plan {
 	return plan
 }
 
-// gatewayStepName is how the plan names the one manifest step that is now on
-// every path: with the class box creates, or with the class it found.
+// gatewayStepName names the Gateway step by the class box creates or found.
 func gatewayStepName(class string, withClass bool) string {
 	if withClass {
 		return fmt.Sprintf("GatewayClass %s and Gateway %s/%s", class, GatewayNamespace, GatewayName)
@@ -1211,9 +1109,8 @@ func gatewayStepName(class string, withClass bool) string {
 	return fmt.Sprintf("Gateway %s/%s on GatewayClass %s", GatewayNamespace, GatewayName, class)
 }
 
-// metalLBSteps are the two writes the address layer needs: MetalLB itself and
-// the pool its speaker advertises. The condition is empty when box owns the
-// layer outright and non-empty when the Gateway may get an address without it.
+// metalLBSteps are the address layer's two writes; the condition is empty when box
+// owns the layer and set when the Gateway may get an address without it.
 func metalLBSteps(pins release.Versions, unless Condition) []Step {
 	return []Step{
 		{
@@ -1226,12 +1123,9 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 				Ref:       MetalLBRef,
 				Chart:     MetalLBChart,
 				Version:   pins.MetalLB,
-				// box announces the Gateway's address over L2 (the pool and
-				// L2Advertisement below) and never peers over BGP. The
-				// chart's frr-k8s backend, on by default since 0.15, is
-				// BGP's: a DaemonSet, a webhook and a status cleaner the
-				// install would wait on for nothing, and the slowest part of
-				// it on a loaded host. The speaker's own L2 needs none of it.
+				// box announces over L2 and never peers over BGP. frr-k8s, on by
+				// default since 0.15, is BGP's: a DaemonSet, a webhook and a status
+				// cleaner the install would wait on for nothing.
 				Values: map[string]any{
 					"frrk8s": map[string]any{"enabled": false},
 				},
@@ -1251,17 +1145,12 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 	}
 }
 
-// preflightAccess is the RBAC box needs for what the plan will write. It is a
-// fixed list rather than an enumeration of every chart object: these are the
-// cluster-scoped rights and the per-namespace writes a chart install needs, and
-// any identity that has them is cluster-admin enough for the platform.
+// preflightAccess is the RBAC the plan needs, a fixed list rather than every chart
+// object: any identity with these is cluster-admin enough for the platform.
 //
-// Every entry is an apply, not a create. box writes with server-side apply, and
-// the API server authorizes that as create for an object it has to make and as
-// patch for one that already exists -- which on every run after the first is
-// what the Gateway, the Certificate and the admission policy are. Asking only
-// for create passed an identity that could not patch, and the write failed
-// after the operator had confirmed the plan.
+// Every entry is an apply, not a create: the API server authorizes an apply as create
+// for a new object and patch for an existing one, and asking only for create passed an
+// identity that could not patch and failed after the confirm.
 func preflightAccess(plan Plan) []Access {
 	access := []Access{
 		{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"},
@@ -1294,9 +1183,8 @@ func preflightAccess(plan Plan) []Access {
 	return access
 }
 
-// preflight is the gate before the confirm and the first write. The question,
-// the verbs and the refusal live in internal/kube: `box apply`'s storage check
-// and root's per-host TLS write ask the same one.
+// preflight is the gate before the confirm and the first write; the question, the
+// verbs and the refusal live in internal/kube.
 func preflight(ctx context.Context, cl Cluster, access []Access) error {
 	return kube.Preflight(ctx, cl, access)
 }

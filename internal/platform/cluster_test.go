@@ -11,9 +11,8 @@ import (
 	"github.com/swizzin/s5n/internal/bootstrap"
 )
 
-// capturedStatus is the status Envoy Gateway 1.9.3 wrote for the login's
-// SecurityPolicy, read from the cluster into testdata rather than built here:
-// the point of these tests is the document a real controller writes.
+// capturedStatus is the status Envoy Gateway 1.9.3 wrote, captured into testdata: the
+// point is the document a real controller writes.
 func capturedStatus(t *testing.T) map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/securitypolicy-accepted.yaml")
@@ -40,9 +39,7 @@ func gatewayTarget() PolicyTarget {
 	}
 }
 
-// The captured document is the one that matters: acceptance lives under
-// status.ancestors, and status.conditions is not set at all. A wait that read
-// the top-level conditions would never see this policy accepted.
+// Acceptance lives under status.ancestors; status.conditions is not set at all.
 func TestPolicyAcceptedReadsTheCapturedStatus(t *testing.T) {
 	status := capturedStatus(t)
 	ok, why := PolicyAccepted(status, gatewayTarget())
@@ -54,9 +51,8 @@ func TestPolicyAcceptedReadsTheCapturedStatus(t *testing.T) {
 	}
 }
 
-// A status with only the top-level conditions is not an accepted policy:
-// Envoy Gateway never writes one, and reading it would make the wait pass on a
-// document that means nothing.
+// Top-level conditions alone are not an accepted policy: EG never writes one, and
+// reading it would pass the wait on a document that means nothing.
 func TestPolicyAcceptedRefusesATopLevelCondition(t *testing.T) {
 	status := map[string]any{"conditions": []any{map[string]any{
 		"type": "Accepted", "status": "True", "reason": "Accepted",
@@ -69,9 +65,8 @@ func TestPolicyAcceptedRefusesATopLevelCondition(t *testing.T) {
 	}
 }
 
-// Transient then accepted, on the real shape: the ancestor is there with the
-// condition False and a reason while the controller has not translated the
-// policy, and the same document with True is the answer the wait stops on.
+// Transient then accepted on the real shape: False with a reason while the policy is
+// untranslated, then True.
 func TestPolicyAcceptedTransientThenAccepted(t *testing.T) {
 	transient := capturedStatus(t)
 	condition := ancestorCondition(t, transient)

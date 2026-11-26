@@ -6,11 +6,10 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 )
 
-// Helm names the field manager of everything it applies after the running
-// binary's file name unless told otherwise, so a box run as box-linux-amd64 and
-// a later one run as box would be two owners of the same fields, and server-side
-// apply refuses the second. Every Helm write box makes is box's, under the one
-// name its own applies use.
+// Helm names the field manager of what it applies after the running binary unless told
+// otherwise, so box run as box-linux-amd64 and later as box would be two owners of one
+// field and server-side apply would refuse the second. Every Helm write is box's, under
+// the name its own applies use.
 func init() {
 	helmkube.ManagedFieldsManager = kube.FieldManager
 }

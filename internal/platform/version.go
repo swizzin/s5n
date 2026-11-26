@@ -8,29 +8,21 @@ import (
 
 // AtPin reports whether a deployed chart version is the pinned one.
 //
-// A Helm release stores the chart version it was installed from verbatim, and
-// charts publish both spellings: Envoy Gateway tags "1.9.3", cert-manager tags
-// "v1.21.3". So the comparison is the semver one and never the string: a
-// release at its pin is verified, and only a real version difference is an
-// upgrade (a Helm revision, plus a chart pull, per bootstrap). The pins used to
-// carry a "v" by hand so that a string compare would happen to hold; they no
-// longer need to.
-//
-// semver's Equal covers the precedence, and deliberately ignores build metadata
-// ("v1.37.2+k0s.1" and "v1.37.2+k0s.2" compare equal), so the metadata is
-// compared explicitly: k0s's tag is exactly that shape, and a rebuilt k0s is a
+// Charts publish both spellings (Envoy Gateway "1.9.3", cert-manager "v1.21.3"), so
+// the comparison is semver's, never the string: at the pin is verified, a real
+// difference is an upgrade. semver's Equal ignores build metadata ("v1.37.2+k0s.1"
+// equals "+k0s.2"), so the metadata is compared explicitly: a rebuilt k0s is a
 // different release.
 func AtPin(installed, pinned string) bool {
 	want, err := semver.NewVersion(pinned)
 	if err != nil {
-		// A pin that is not a version is box's own bug; no deployed release
-		// can be at it, and a test pins every entry in the file as semver.
+		// A pin that is not a version is box's own bug; a test pins every entry as
+		// semver.
 		return false
 	}
 	got, err := semver.NewVersion(installed)
 	if err != nil {
-		// An unreadable deployed version is not at the pin: box plans the
-		// upgrade, exactly as it did when the comparison was a string.
+		// An unreadable deployed version is not at the pin: box plans the upgrade.
 		return false
 	}
 	return got.Equal(want) && got.Metadata() == want.Metadata()
