@@ -1,9 +1,7 @@
-// Command issue-cert writes one host's Certificate and its Gateway listeners
-// the way `box init` does after an apply: the same platform.CertificateDecision,
-// over an explicit kubeconfig. It exists for the chart's e2e, which installs
-// with Helm and has no `box init` run to carry the per-host objects; the
-// self-signed and Pebble-issued paths are proven there, and box's own e2e
-// proves the same code through init.
+// Command issue-cert writes one host's Certificate and its Gateway listeners as `box init`
+// does after an apply: the same platform.CertificateDecision over an explicit kubeconfig.
+// It exists for the chart's e2e, which installs with Helm and has no init run to carry the
+// per-host objects; box's own e2e proves the same code through init.
 package main
 
 import (

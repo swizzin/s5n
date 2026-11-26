@@ -6,16 +6,14 @@ import (
 	"strings"
 )
 
-// Verdict is whether the e2e runs, and one line saying why -- the line the
-// job logs, whether it skipped the e2e or spent the runners.
+// Verdict is whether the e2e runs, and one line saying why -- the line the job logs either way.
 type Verdict struct {
 	Run    bool
 	Reason string
 }
 
-// A change is one path the push touched, as `git diff --name-status` names it:
-// status is its letter (M, A, D, R, C), path is where it is now, and old is
-// where it came from for a rename or a copy and empty otherwise.
+// A change is one path the push touched: the status letter (M, A, D, R, C), where it is now,
+// and where it came from for a rename or copy.
 type change struct {
 	status byte
 	old    string
@@ -24,18 +22,12 @@ type change struct {
 
 // docsOnly is the verdict for a set of changed paths: the e2e is skipped only
 // when every one of them is documentation.
+// docsOnly is the verdict for a set of changed paths: the e2e is skipped only when every one
+// is documentation -- a path ending in .md anywhere, or any path under docs/. Nothing reads
+// either at test or e2e time, so such a change cannot alter what an e2e asserts.
 //
-// Documentation is a path ending in .md anywhere, or any path under docs/.
-// Nothing in this repository reads either at test or e2e time -- no go:embed of
-// a .md, no test opening one, no hack/ script reading README or docs/ (hack/
-// brand writes them, and nothing compares what it writes) -- so a change that
-// touches only those cannot alter what an e2e asserts.
-//
-// A rename is documentation only when both of its paths are: a file moved out
-// of docs/ changes the code that reads it, even though the only path git lists
-// for an ordinary diff is the new one. A deletion counts by the path it
-// removed, so deleting docs/x.md is documentation and deleting a Go file is
-// not.
+// A rename is documentation only when both paths are (a file moved out of docs/ changes the
+// code that reads it), and a deletion counts by the path it removed.
 func docsOnly(changed []change) Verdict {
 	if len(changed) == 0 {
 		return Verdict{Run: true, Reason: "the e2e runs: the push changed no path"}
@@ -73,9 +65,8 @@ func first(paths []string, n int) []string {
 	return paths
 }
 
-// parseNameStatus reads `git diff --name-status -z`: one STATUS NUL path NUL
-// per change, and STATUS NUL old NUL new NUL for a rename or a copy, with the
-// status carrying git's similarity score (R100).
+// parseNameStatus reads `git diff --name-status -z`: STATUS and path per change, with the
+// status carrying git's similarity score for a rename or copy.
 func parseNameStatus(out string) ([]change, error) {
 	fields := strings.Split(out, "\x00")
 	var changed []change

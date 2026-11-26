@@ -2,15 +2,12 @@
 //
 //	render-grant <chart-dir> <namespace> <torrent-node-port> <service-type>
 //
-// The multi-document YAML it writes goes through `kubectl apply -f -` as root:
-// at `box adduser`, and again at `box install`, `box update` and
-// `box bootstrap`, so a chart release that blesses a new repository reaches
-// existing seedboxes. That is also why it reads the chart directory it is given
-// rather than a copy of the list: the params and the release have to agree.
+// The multi-document YAML it writes goes through `kubectl apply -f -` as root, at `box
+// adduser` and again on every apply, so a release that blesses a new repository reaches
+// existing seedboxes. It reads the chart directory it is given for the same reason.
 //
-// It is a hack because the logic belongs to box (internal/admission) and this
-// program is the platform layer's caller until `box adduser` exists — at which
-// point the e2e stops shelling out and box calls the same package.
+// It is a hack because the logic belongs to box (internal/admission) and this is the
+// platform layer's caller until `box adduser` exists.
 package main
 
 import (

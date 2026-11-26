@@ -1,23 +1,17 @@
-// Command authelia-users writes the users database box writes: one argon2id
-// digest per login, the same file `box init` puts on the login's claim.
+// Command authelia-users writes the users database box writes: one argon2id digest per
+// login, the same file `box init` puts on the login's claim.
 //
-// It exists for the kind e2e. box writes that file on the host, and the e2e's
-// host path is inside the test node, so `--paths-in-node` makes box skip the
-// write and the script has to seed it. Writing it through internal/authelia is
-// what keeps the e2e's file the same format as box's: a change to the hash or
-// the row shape changes this file, and the login in the cluster is running the
-// result. It is a test tool, like hack/render-grant, and nothing product-facing
-// calls it.
+// It exists for the kind e2e: box writes that file on the host, and the e2e's host path is
+// inside the test node, so --paths-in-node makes box skip the write. Writing it through
+// internal/authelia keeps the format identical, so a hash or row-shape change reaches the
+// login in the cluster. A test tool; nothing product-facing calls it.
 //
-// --login and --password-file are given once per account, in that order, so the
-// e2e can seed a second account: the provider's authorization policy admits
-// exactly one login per seedbox, and proving that refusal needs someone else to
-// try it. One pair is the shape a box has.
+// --login and --password-file are given once per account, in that order, so the e2e can
+// seed the second account the authorization policy must refuse.
 //
 // Usage:
 //
 //	go run ./hack/authelia-users --login alice --password-file /path --out /path/users_database.yml
-//	go run ./hack/authelia-users --login alice --password-file a --login bob --password-file b --out /path/users_database.yml
 package main
 
 import (

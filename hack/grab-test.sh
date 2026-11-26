@@ -180,7 +180,8 @@ spec:
     matchLabels: {app.kubernetes.io/instance: ${RELEASE}, s5n.io/grab: indexer}
   template:
     metadata:
-      # The release label lets the release's NetworkPolicies treat it like an app.
+      # The release label lets the release's NetworkPolicies treat it like an app, so
+      # Prowlarr and Sonarr can reach it without a rule of their own.
       labels: {app.kubernetes.io/instance: ${RELEASE}, s5n.io/grab: indexer}
     spec:
       securityContext:

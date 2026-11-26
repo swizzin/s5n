@@ -308,7 +308,8 @@ spec:
       labels:
         app: unblessed
     spec:
-      # Pod Security restricted is enforced, so the repository is the only reason to refuse it.
+      # Pod Security restricted is enforced here, so the pod is otherwise
+      # admissible: the only reason left to refuse it is the repository.
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000

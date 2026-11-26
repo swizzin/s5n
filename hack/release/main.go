@@ -1,19 +1,16 @@
-// Command release decides whether a push to main may cut a chart release, and
-// writes the body of the release it cuts.
+// Command release decides whether a push to main may cut a chart release, and writes
+// the body of the release it cuts.
 //
-// A release is cut on a push to main, after CI is green (docs/box.md, "Where a
-// release lives"). The decision is whether the net change since the last
-// s5n-v* tag is only bump Renovate may merge on main unattended: a patch or
-// digest bump of charts/s5n/variants.yaml (the app images) or
-// charts/s5n/platform.yaml (the platform pins, which ship in the chart), and
-// nothing else. Anything else -- a hand edit, a minor or major bump, any other
-// file -- waits for the maintainer's own tag, and the job names it.
+// A release is cut on a push to main, after CI is green (docs/box.md, "Where a release
+// lives"). The decision is whether the net change since the last s5n-v* tag is only a bump
+// Renovate may merge unattended: a patch or digest bump of charts/s5n/variants.yaml or
+// charts/s5n/platform.yaml, and nothing else. Anything else -- a hand edit, a minor or major
+// bump, any other file -- waits for the maintainer's own tag, and the job names it.
 //
-// The decision is a pure function over the changed paths and the two files at
-// the tag and at HEAD (decide.go), so the case table is the test and no git
-// history is needed to prove it; a thin git wrapper (below) builds those inputs
-// from the checkout. It is a hack because the decision belongs to the release
-// workflow and the workflow cannot unit-test itself.
+// The decision is a pure function over the changed paths and the two files at the tag and
+// at HEAD (decide.go), so the case table is the test; a thin git wrapper builds those
+// inputs. It is a hack because the decision belongs to the release workflow, which cannot
+// unit-test itself.
 //
 // Usage:
 //
@@ -23,9 +20,8 @@
 //	release images BASE HEAD    whether a pull request only bumps those files
 //	release overlay REF         lay those files from REF over the working tree
 //
-// The last two are what a pull request into main runs when it may be an image
-// bump: the same set decide releases on, applied to a branch instead of a tag
-// (see docs/box.md, "Automatic chart releases").
+// The last two are what a pull request into main runs when it may be an image bump (see
+// docs/box.md, "Automatic chart releases").
 package main
 
 import (
@@ -69,9 +65,8 @@ func usage() {
 	os.Exit(2)
 }
 
-// decideCmd prints the verdict for a push to main as KEY=VALUE on stdout, so
-// the workflow can append it to $GITHUB_OUTPUT, and the reason on stderr,
-// where it is the job's log.
+// decideCmd prints the verdict as KEY=VALUE on stdout, for $GITHUB_OUTPUT, and the reason
+// on stderr, where it is the job's log.
 func decideCmd() error {
 	p := planner{root: "."}
 	d, err := p.decide()
@@ -85,8 +80,7 @@ func decideCmd() error {
 	return nil
 }
 
-// planner reads git history from a working tree. root is the repository root:
-// "." for the command, a temp directory for a test.
+// planner reads git history from a working tree: "" for the command, a temp dir for a test.
 type planner struct {
 	root string
 }
@@ -107,8 +101,8 @@ func (p planner) git(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// decide builds the decision's inputs from git: the last s5n-v* tag, the paths
-// that differ between it and HEAD, and both files at each side.
+// decide builds the decision's inputs from git: the last tag, the paths that differ since
+// it, and both files at each side.
 func (p planner) decide() (Decision, error) {
 	tag, version, err := p.lastTag()
 	if err != nil {
@@ -134,8 +128,8 @@ func (p planner) decide() (Decision, error) {
 	return decideRange(changed, files[0], files[1], files[2], files[3], version)
 }
 
-// lastTag is the highest s5n-v* tag by semver, and its version without the
-// prefix. An empty tag means the family has never been released.
+// lastTag is the highest s5n-v* tag by semver, and its version without the prefix; empty
+// when the family has never been released.
 func (p planner) lastTag() (tag, version string, err error) {
 	out, err := p.git("tag", "--list", tagPrefix+"*")
 	if err != nil {
@@ -159,9 +153,8 @@ func (p planner) lastTag() (tag, version string, err error) {
 	return tag, version, nil
 }
 
-// changedSince is every path that differs between the tag and HEAD. The net
-// diff is the point: a merge commit contributes the files it actually changed,
-// so Renovate's merges (or a maintainer's) need no case of their own.
+// changedSince is the net diff between the tag and HEAD, so a merge commit contributes the
+// files it actually changed.
 func (p planner) changedSince(tag string) ([]string, error) {
 	out, err := p.git("diff", "--name-only", tag, "HEAD")
 	if err != nil {
@@ -176,9 +169,8 @@ func (p planner) changedSince(tag string) ([]string, error) {
 	return paths, nil
 }
 
-// fileAt is one file's bytes at a ref. A file that did not exist at that ref is
-// empty, not an error: platform.yaml only became a chart file with the release
-// that added it, so the tag before it has no such path.
+// fileAt is one file's bytes at a ref. A file that did not exist there is empty, not an
+// error: platform.yaml only became a chart file with the release that added it.
 func (p planner) fileAt(ref, file string) ([]byte, error) {
 	if _, err := p.git("cat-file", "-e", ref+":"+file); err != nil {
 		return nil, nil
@@ -190,10 +182,8 @@ func (p planner) fileAt(ref, file string) ([]byte, error) {
 	return []byte(out), nil
 }
 
-// notesCmd prints the s5n release's body: the app images and the platform pins
-// that moved between two refs, because both ship in the chart. It reuses the
-// decision's parsers, so "an image moved" means the same thing here as it does
-// there.
+// notesCmd prints the release body: the app images and platform pins that moved between two
+// refs, through the decision's own parsers.
 func notesCmd(args []string) error {
 	if len(args) != 2 {
 		usage()
@@ -241,9 +231,8 @@ func notesCmd(args []string) error {
 	return nil
 }
 
-// body is the release's markdown: both sections, each said plainly, so a user
-// reading the release sees what their update brings. prev is the previous tag,
-// empty for a first release.
+// body is the release's markdown: both sections, so a reader sees what an update brings.
+// prev is the previous tag, empty for a first release.
 func body(prev string, images, pins []string) string {
 	var b strings.Builder
 	if prev == "" {

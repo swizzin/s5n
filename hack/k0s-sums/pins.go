@@ -8,26 +8,20 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// pinFile is charts/s5n/platform.yaml as this command reads it: the k0s version,
-// the checksum pinned for each architecture, and the bytes, so --write can put a
-// new value on its own line and change nothing else in the file.
+// pinFile is platform.yaml as this command reads it: the version, the sums per
+// architecture, and the bytes, so --write touches one line and nothing else.
 type pinFile struct {
 	Version string
 	Sums    map[string]string
 	Raw     []byte
 }
 
-// sumLine is one checksum line: the key, a quoted value, and nothing else worth
-// preserving but a trailing comment if someone adds one. The value is captured
-// on its own so a rewrite replaces exactly those 64 characters -- the quotes,
-// the indentation and any comment survive byte for byte.
+// sumLine is one checksum line: the key, a quoted value, and a trailing comment if anyone
+// adds one. Only the value is captured, so a rewrite replaces exactly those 64 characters.
 var sumLine = regexp.MustCompile(`^([ \t]*k0sSHA256([a-z0-9]+)[ \t]*:[ \t]*"?)([0-9a-f]{64})("?[ \t]*(?:#.*)?\r?)$`)
 
-// readPins parses the file the way box does, so this command and box cannot
-// disagree about what a pin is, and then insists on exactly the architectures
-// box installs. A third architecture in the file is refused rather than
-// skipped: a sum this command does not check is a sum CI promises and does not
-// keep.
+// readPins parses the file the way box does and insists on exactly the architectures box
+// installs: a sum this command does not check is a sum CI promises and does not keep.
 func readPins(raw []byte) (pinFile, error) {
 	v, err := release.ParseVersions(raw)
 	if err != nil {
@@ -44,11 +38,9 @@ func readPins(raw []byte) (pinFile, error) {
 	return pinFile{Version: v.K0s, Sums: v.K0sSHA256, Raw: raw}, nil
 }
 
-// rewrite returns the file with the two checksum values replaced. Every other
-// byte is the file's own: the lines are split and rejoined, and only the value
-// inside a sum line's quotes is swapped. A line this command cannot recognise is
-// an error, not something to append to -- the shape is the chart's, and writing
-// a second line for one key would leave box and the file disagreeing.
+// rewrite returns the file with the two values replaced, every other byte its own. A line it
+// cannot recognise is an error: a second line for one key would leave box and the file
+// disagreeing.
 func rewrite(raw []byte, sums map[string]string) ([]byte, error) {
 	lines := strings.Split(string(raw), "\n")
 	written := make(map[string]bool, len(arches))
@@ -73,10 +65,8 @@ func rewrite(raw []byte, sums map[string]string) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n")), nil
 }
 
-// mismatch is one architecture whose checksums do not agree. Pinned is what the
-// file says, Asset what the downloaded bytes hash to, Published what the
-// release's sha256sums.txt says; a problem where Asset and Published differ is
-// the release's, not the file's.
+// mismatch is one architecture whose sums disagree: Pinned is the file, Asset the downloaded
+// bytes, Published what the release's sha256sums.txt says.
 type mismatch struct {
 	Arch      string
 	Pinned    string
@@ -84,9 +74,7 @@ type mismatch struct {
 	Published string
 }
 
-// String is the line --check prints for one architecture. It names the key, so
-// the maintainer knows which line to look at, and both sources, so it is clear
-// what the value should have been.
+// String names the key and both sources, so a maintainer knows which line and what it should be.
 func (m mismatch) String() string {
 	key := "k0sSHA256" + m.Arch
 	if m.Asset != m.Published {
@@ -109,9 +97,7 @@ func releaseConsistent(asset, published map[string]string) []mismatch {
 	return out
 }
 
-// checkSums compares the pinned sums with the hash of each asset and with the
-// release's published sum. One verdict per architecture that disagrees, and
-// none for the ones that do not.
+// checkSums: one verdict per architecture that disagrees, and none for the ones that do not.
 func checkSums(pins pinFile, asset, published map[string]string) []mismatch {
 	var out []mismatch
 	for _, arch := range arches {
@@ -128,10 +114,9 @@ func checkSums(pins pinFile, asset, published map[string]string) []mismatch {
 	return out
 }
 
-// parseSumsTxt reads a sha256sums.txt: one "<hex>  <name>" per line, the name
-// optionally marked as binary with a leading "*", blank lines and comments
-// skipped. A line that is neither is an error: a list this command half
-// understands is one it could read the wrong sum out of.
+// parseSumsTxt reads "<hex>  <name>" per line, the name optionally marked binary with a
+// leading "*". A line that is neither is an error: a half-understood list could give the
+// wrong sum.
 func parseSumsTxt(b []byte) (map[string]string, error) {
 	sums := make(map[string]string)
 	for i, line := range strings.Split(string(b), "\n") {

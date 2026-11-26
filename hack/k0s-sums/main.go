@@ -1,21 +1,16 @@
-// Command k0s-sums checks the k0s checksums charts/s5n/platform.yaml pins
-// beside k0s's version, and with --write sets them from the release itself.
+// Command k0s-sums checks the k0s checksums charts/s5n/platform.yaml pins beside k0s's
+// version, and with --write sets them from the release itself.
 //
-// box downloads k0s onto a clean host and runs it as root, so the sum it
-// verifies cannot be the one served beside the archive: that proves only that
-// both came from the same place. The sum lives in the chart instead, in the
-// same pull request as the version it describes, and that is only trustworthy
-// if something outside a maintainer's memory hashes the real asset. This is
-// that something: it reads the pinned version, downloads both architectures'
-// assets from the release, hashes them, fetches the release's sha256sums.txt,
-// and either checks the file against both or writes the two lines from them.
+// box downloads k0s onto a clean host and runs it as root, so the sum cannot be the one
+// served beside the archive -- that proves only that both came from the same place. The
+// sum lives in the chart, in the same pull request as the version it describes, and is
+// trustworthy only if something outside a maintainer's memory hashes the real asset: this
+// reads the pinned version, downloads both architectures' assets, hashes them, and checks
+// the file against the release's sha256sums.txt or writes the two lines from them.
 //
-// --check is the default and what CI runs: it exits non-zero, naming the
-// architecture, when a pinned sum is not the hash of the asset or not what the
-// release publishes, so a k0s bump that did not write its sums fails its own
-// pull request. --write rewrites the two sum lines, and only when the asset and
-// the published sum agree; everything else in the file is left byte for byte as
-// it was.
+// --check is the default and what CI runs: a k0s bump that did not write its sums fails its
+// own pull request. --write rewrites only the two sum lines, and only when the asset and
+// the published sum agree; everything else in the file is left byte for byte.
 //
 // Usage:
 //
@@ -37,19 +32,15 @@ import (
 )
 
 const (
-	// defaultFile is the chart's pins, relative to the repository root, which
-	// is where CI and a maintainer run this from.
+	// defaultFile is the chart's pins, relative to the repository root.
 	defaultFile = "charts/s5n/platform.yaml"
-	// k0sReleaseBase is where the k0s project publishes release assets: the
-	// same base bootstrap builds the URL box downloads from, so a sum written
-	// here is the sum of exactly the bytes box will fetch.
+	// k0sReleaseBase is where k0s publishes assets: the base box's k0sRelease.URL builds
+	// from, so a sum written here is of exactly the bytes box fetches.
 	k0sReleaseBase = "https://github.com/k0sproject/k0s/releases/download"
 )
 
-// arches is every architecture the chart pins a k0s checksum for, in the order
-// this command reports them. The keys in the file are this plus the prefix, and
-// readPins refuses a file that pins anything else, so a third architecture
-// cannot slip past unchecked.
+// arches is every architecture the chart pins a checksum for, and readPins refuses a file
+// pinning anything else, so a third architecture cannot slip past unchecked.
 var arches = []string{"amd64", "arm64"}
 
 func main() {
@@ -61,8 +52,7 @@ func main() {
 
 func run(args []string) error {
 	fs := flag.NewFlagSet("k0s-sums", flag.ContinueOnError)
-	// --check is the default rather than a flag the caller must remember: the
-	// run with no arguments is the one CI makes, and it must be the check.
+	// --check is the default rather than a flag to remember: CI's run is the check.
 	check := fs.Bool("check", false, "check the pinned sums against the release and exit non-zero on a mismatch (the default)")
 	write := fs.Bool("write", false, "rewrite the two checksum lines from the release's assets")
 	fs.Usage = func() {
@@ -94,9 +84,7 @@ func run(args []string) error {
 	}
 
 	ctx := context.Background()
-	// The fetch is box's own: the same downloader, with the same retries, so a
-	// sum this command writes is the sum of the bytes box will get from the
-	// same URL rather than of some other client's idea of them.
+	// The fetch is box's own downloader, so a sum written here is of the bytes box will get.
 	client := bootstrap.HTTPDownloader{}
 	asset, err := assetSums(ctx, client, pinned.Version)
 	if err != nil {
@@ -127,14 +115,11 @@ func run(args []string) error {
 	return nil
 }
 
-// writeSums replaces the two pinned sums, and says which line moved. It refuses
-// to write anything when the release's own two accounts of its asset disagree:
-// a sum copied from an inconsistent release would be a sum box could never
-// verify.
+// writeSums replaces the two pinned sums and says which line moved. It refuses when the
+// release's own two accounts of its asset disagree, which would be a sum box cannot verify.
 func writeSums(file string, pins pinFile, asset, published map[string]string) error {
-	// Only the release's own inconsistency blocks a write. A file whose sums
-	// are simply stale is exactly what --write is for, so what is refused here
-	// is the asset against the published sum, never the file's old value.
+	// A file whose sums are simply stale is what --write is for: only the asset against the
+	// published sum is refused.
 	if problems := releaseConsistent(asset, published); len(problems) > 0 {
 		return fmt.Errorf("%s: %s", file, problems[0].String())
 	}
@@ -157,9 +142,8 @@ func writeSums(file string, pins pinFile, asset, published map[string]string) er
 	return nil
 }
 
-// assetSums downloads the release's asset for every architecture and returns
-// its sha256. The bytes are hashed as they arrive, so a slow link costs time
-// rather than memory.
+// assetSums hashes the release's asset for every architecture as it arrives, so a slow link
+// costs time rather than memory.
 func assetSums(ctx context.Context, client bootstrap.HTTPDownloader, version string) (map[string]string, error) {
 	sums := make(map[string]string, len(arches))
 	for _, arch := range arches {
@@ -172,10 +156,8 @@ func assetSums(ctx context.Context, client bootstrap.HTTPDownloader, version str
 	return sums, nil
 }
 
-// publishedSums fetches the release's own sha256sums.txt and returns the sum it
-// publishes for each architecture's asset. A release that does not list one is
-// an error: the file's sum cannot be checked against a release that does not
-// describe the asset.
+// publishedSums returns the sum the release publishes for each architecture's asset; one it
+// does not list cannot be checked.
 func publishedSums(ctx context.Context, client bootstrap.HTTPDownloader, version string) (map[string]string, error) {
 	body, err := client.Fetch(ctx, sumsURL(version))
 	if err != nil {
@@ -219,9 +201,8 @@ func hashURL(ctx context.Context, client bootstrap.HTTPDownloader, url string) (
 // assetName is the file k0s publishes for one architecture.
 func assetName(version, arch string) string { return "k0s-" + version + "-" + arch }
 
-// assetURL is the release asset box downloads. The tag carries a '+', which a
-// path segment may hold literally, so it goes in as published -- the same way
-// bootstrap's k0sRelease.URL builds it.
+// assetURL is the release asset box downloads. The tag carries a '+', which a path segment
+// may hold literally, so it goes in as published -- as bootstrap's k0sRelease.URL does.
 func assetURL(version, arch string) string {
 	return k0sReleaseBase + "/" + url.PathEscape(version) + "/" + assetName(version, arch)
 }
