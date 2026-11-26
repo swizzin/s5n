@@ -36,8 +36,16 @@ type PbhOwned struct {
 // registered only with the account the chart owns (see docs/box.md, "An app
 // that keeps its own user table has one account box owns"). The instance's
 // qBittorrent login is written empty, so there is no fingerprint beside the id.
+//
+// ArrInstances is one row per Arr instance on the box, keyed by the instance's
+// name ("sonarr-4k"), and ArrFingerprints is the sha256-hex of the Arr API key
+// each row was last written and proven with: qui never answers a stored key
+// (internal/models/arr_instance.go marks it json:"-"), so the fingerprint is the
+// only way a rotation in the release Secret is visible.
 type QuiOwned struct {
-	Instance int `json:"instance,omitempty"`
+	Instance        int               `json:"instance,omitempty"`
+	ArrInstances    map[string]int    `json:"arrInstances,omitempty"`
+	ArrFingerprints map[string]string `json:"arrFingerprints,omitempty"`
 }
 
 // AutobrrOwned is what the Job owns in autobrr: one download client per Arr
@@ -133,6 +141,14 @@ func ParseOwnedRecord(raw []byte) (*OwnedRecord, error) {
 	}
 	if rec.Autobrr.Fingerprints == nil {
 		rec.Autobrr.Fingerprints = map[string]string{}
+	}
+	if rec.Qui != nil {
+		if rec.Qui.ArrInstances == nil {
+			rec.Qui.ArrInstances = map[string]int{}
+		}
+		if rec.Qui.ArrFingerprints == nil {
+			rec.Qui.ArrFingerprints = map[string]string{}
+		}
 	}
 	return rec, nil
 }
@@ -259,6 +275,51 @@ func (o *OwnedRecord) SetQuiInstanceID(id int) {
 		o.Qui = &QuiOwned{}
 	}
 	o.Qui.Instance = id
+}
+
+// QuiArrInstanceID returns the recorded id for one Arr instance's row in qui, or
+// 0 when nothing is recorded.
+func (o *OwnedRecord) QuiArrInstanceID(instance string) int {
+	if o.Qui == nil {
+		return 0
+	}
+	return o.Qui.ArrInstances[instance]
+}
+
+// SetQuiArrInstanceID records the id of the Arr row the Job created or adopted
+// for one instance, keeping the key fingerprint recorded beside it.
+func (o *OwnedRecord) SetQuiArrInstanceID(instance string, id int) {
+	if o.Qui == nil {
+		o.Qui = &QuiOwned{}
+	}
+	if o.Qui.ArrInstances == nil {
+		o.Qui.ArrInstances = map[string]int{}
+	}
+	o.Qui.ArrInstances[instance] = id
+}
+
+// QuiArrInstanceFingerprint returns the fingerprint of the Arr API key one row
+// in qui was last written and proven with, or "" when no successful write is on
+// record.
+func (o *OwnedRecord) QuiArrInstanceFingerprint(instance string) string {
+	if o.Qui == nil {
+		return ""
+	}
+	return o.Qui.ArrFingerprints[instance]
+}
+
+// SetQuiArrInstanceFingerprint records the fingerprint of the Arr API key the
+// Job just wrote into one of qui's Arr rows and proved with qui's own test. Call
+// it only after that succeeded: a fingerprint stored for a write the app did not
+// accept would hide a rotation.
+func (o *OwnedRecord) SetQuiArrInstanceFingerprint(instance, fingerprint string) {
+	if o.Qui == nil {
+		o.Qui = &QuiOwned{}
+	}
+	if o.Qui.ArrFingerprints == nil {
+		o.Qui.ArrFingerprints = map[string]string{}
+	}
+	o.Qui.ArrFingerprints[instance] = fingerprint
 }
 
 // AutobrrClientID returns the recorded id for one autobrr download client, or 0

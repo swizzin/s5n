@@ -47,9 +47,10 @@ func assertOnlyUpdated(t *testing.T, res *Result, want ...string) {
 	}
 }
 
-// A rotated Arr API key is copied into two apps -- Prowlarr's application for
-// that Arr, and autobrr's client for it -- and both are invisible on read
-// (masked), so both need the fingerprint. The other Arr's copies stay put.
+// A rotated Arr API key is copied into three apps -- Prowlarr's application for
+// that Arr, autobrr's client for it, and qui's Arr instance -- and all three are
+// invisible on read (masked, or never answered at all), so all three need the
+// fingerprint. The other Arr's copies stay put.
 func TestWiringFollowsOneArrKeyRotation(t *testing.T) {
 	h := newHarness(t)
 	fakes := h.withApps(t)
@@ -67,7 +68,16 @@ func TestWiringFollowsOneArrKeyRotation(t *testing.T) {
 	if res.Writes.Created != 0 {
 		t.Fatalf("rotated run created %d objects\n%s", res.Writes.Created, Summary(res))
 	}
-	assertOnlyUpdated(t, res, "prowlarr/application/sonarr", "autobrr/downloader/sonarr")
+	assertOnlyUpdated(t, res, "prowlarr/application/sonarr", "qui/arr/sonarr", "autobrr/downloader/sonarr")
+
+	// qui's row for Sonarr carries the new key; the one for Radarr was not
+	// rewritten at all.
+	if got := quiArrRow(t, fakes, "sonarr").Str("api_key"); got != "sonarr-key-2" {
+		t.Fatalf("qui's sonarr row holds %q, want the new key", got)
+	}
+	if got := quiArrRow(t, fakes, "radarr").Str("api_key"); got != "radarr-key" {
+		t.Fatalf("qui's radarr row holds %q, want its own unchanged key", got)
+	}
 
 	// Prowlarr's application for Sonarr carries the new key; the one for Radarr
 	// was not rewritten at all.
@@ -104,6 +114,19 @@ func autobrrClient(t *testing.T, f *appFakes, name string) apps.Item {
 		}
 	}
 	t.Fatalf("autobrr has no client named %s: %+v", name, f.autoRows)
+	return nil
+}
+
+// quiArrRow is one of qui's Arr rows, by the Arr's type: the Job names each row
+// after the instance, and the type is what the row means.
+func quiArrRow(t *testing.T, f *appFakes, kind string) apps.Item {
+	t.Helper()
+	for _, row := range f.quiArrRows {
+		if row.Str("type") == kind {
+			return row
+		}
+	}
+	t.Fatalf("qui has no %s row: %+v", kind, f.quiArrRows)
 	return nil
 }
 

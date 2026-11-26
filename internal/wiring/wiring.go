@@ -609,6 +609,48 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return err
 			}
 		}
+		// One Arr instance per Sonarr and Radarr on the box. qui's Arr
+		// integration is what resolves a title to the ID it searches for, and
+		// the request is made from qui's pod, so a row that cannot reach its
+		// Arr is qui's own test failing -- which is the receipt's proof that the
+		// catalog's `calls` and the callee's ingress agree.
+		//
+		// The address carries the Arr's own URL base, the way autobrr's client
+		// does: qui stores the whole URL and dials it as given. Lidarr has no
+		// instance type in qui (internal/models/arr_instance.go at v1.36.1), so
+		// a box's music Arr is reported as skipped rather than left unsaid.
+		for _, inst := range c.Instances {
+			var kind string
+			switch apps.Kind(inst.Kind) {
+			case apps.Sonarr:
+				// qui's instance types are the app names themselves
+				// (internal/models/arr_instance.go at v1.36.1).
+				kind = string(apps.Sonarr)
+			case apps.Radarr:
+				kind = string(apps.Radarr)
+			default:
+				name := "qui/arr/" + inst.Name
+				res.Steps = append(res.Steps, Step{Name: name, Result: "skipped",
+					Detail: fmt.Sprintf("qui has no %s instance type", inst.Kind)})
+				r.stepLog(name, "skipped")
+				continue
+			}
+			result, err := q.EnsureArrInstance(ctx, apps.QuiArrSpec{
+				Name:    inst.Name,
+				Type:    kind,
+				BaseURL: strings.TrimRight(inst.URL, "/") + inst.URLBase,
+				APIKey:  arrKeys[inst.Name],
+			}, owned.QuiArrInstanceID(inst.Name), owned.QuiArrInstanceFingerprint(inst.Name))
+			if err == nil && result.ID != 0 {
+				owned.SetQuiArrInstanceID(inst.Name, result.ID)
+				// Only after qui's own test proved the row: a fingerprint
+				// recorded for a write nothing accepted would hide a rotation.
+				owned.SetQuiArrInstanceFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
+			}
+			if err := r.ensureResult(res, "qui/arr/"+inst.Name, result, err); err != nil {
+				return err
+			}
+		}
 	}
 
 	if c.Autobrr != nil {

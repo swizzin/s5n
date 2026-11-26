@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,16 @@ type appFakes struct {
 	// autoLoginBody is the message autobrr's refusal carries, which is what
 	// separates a bad password from a login the app's auth mode does not offer.
 	autoLoginBody string
+
+	// qui's Arr instances: the rows the Job registers for ID lookups. A create
+	// is refused 409 at a (type, base_url) the table already has, the list never
+	// carries a stored key, and an update leaves unsent fields alone -- the
+	// app's own rules (internal/api/handlers/arr.go at v1.36.1).
+	quiArrRows     []apps.Item
+	quiArrNext     int
+	quiArrWrites   int
+	quiArrTested   int
+	quiArrTestFail bool
 }
 
 func (f *appFakes) quiHandler() http.HandlerFunc {
@@ -79,6 +90,61 @@ func (f *appFakes) quiHandler() http.HandlerFunc {
 				}
 			}
 			http.Error(w, "not found", http.StatusNotFound)
+		case path == "/api/arr/instances" && r.Method == http.MethodGet:
+			out := []apps.Item{}
+			for _, row := range f.quiArrRows {
+				c := row.Clone()
+				delete(c, "api_key")
+				out = append(out, c)
+			}
+			writeJSON(w, out)
+		case path == "/api/arr/instances" && r.Method == http.MethodPost:
+			var body apps.Item
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, row := range f.quiArrRows {
+				if strings.EqualFold(row.Str("type"), body.Str("type")) &&
+					strings.TrimRight(row.Str("base_url"), "/") == strings.TrimRight(body.Str("base_url"), "/") {
+					w.WriteHeader(http.StatusConflict)
+					writeJSON(w, map[string]string{"error": "An instance with this URL already exists for this type"})
+					return
+				}
+			}
+			f.quiArrNext++
+			body["id"] = f.quiArrNext
+			f.quiArrRows = append(f.quiArrRows, body)
+			f.quiArrWrites++
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, body)
+		case strings.HasPrefix(path, "/api/arr/instances/") && strings.HasSuffix(path, "/test"):
+			f.quiArrTested++
+			if f.quiArrTestFail {
+				writeJSON(w, map[string]any{"success": false, "error": "connection refused"})
+				return
+			}
+			writeJSON(w, map[string]any{"success": true})
+		case strings.HasPrefix(path, "/api/arr/instances/") && r.Method == http.MethodPut:
+			id := 0
+			if n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/api/arr/instances/"), "/")); err == nil {
+				id = n
+			}
+			var body apps.Item
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for i, row := range f.quiArrRows {
+				if row.Int("id") != id {
+					continue
+				}
+				for key, value := range body {
+					if key == "api_key" && value == "" {
+						continue
+					}
+					row[key] = value
+				}
+				f.quiArrRows[i] = row
+				f.quiArrWrites++
+				writeJSON(w, row)
+				return
+			}
+			http.Error(w, "ARR instance not found", http.StatusNotFound)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
