@@ -682,7 +682,7 @@ fi
 log "preparing host paths (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c "
   mkdir -p '$DATA_PATH' \\
-           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,filebrowser,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,filebrowser,plex,tautulli,seerr,jellyfin,qui,autobrr,maintainerr,pbh}
   chown -R $SEEDBOX_PUID:$SEEDBOX_PGID '$DATA_PATH' '$CONFIG_PATH'"
 
 # The update and upgrade scenarios' extra step. Their roots are a host directory
