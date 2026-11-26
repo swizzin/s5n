@@ -27,6 +27,7 @@ const (
 	fieldAPIKeyFile   = "apiKeyFile"
 	fieldPasswordFile = "passwordFile"
 	fieldTokenFile    = "tokenFile"
+	fieldName         = "name"
 )
 
 // Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
@@ -368,7 +369,7 @@ func (c *Config) validate() error {
 		}
 		for i, l := range c.Jellyfin.Libraries {
 			if err := requireFields(fmt.Sprintf("jellyfin libraries[%d]", i), map[string]string{
-				"name": l.Name, "collectionType": l.CollectionType, "path": l.Path,
+				fieldName: l.Name, "collectionType": l.CollectionType, "path": l.Path,
 			}); err != nil {
 				return err
 			}

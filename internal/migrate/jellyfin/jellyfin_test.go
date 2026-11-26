@@ -158,11 +158,11 @@ func TestTheRewriteMovesTheDatabasePaths(t *testing.T) {
 		t.Fatalf("%d rows changed, want 2: %+v", total, rep.Changes)
 	}
 
-	path, data := readRow(t, dir, "00000000-0000-0000-0000-0000000000a1")
+	path, _ := readRow(t, dir, "00000000-0000-0000-0000-0000000000a1")
 	if path != "/data/media/movies/A Film (2020)/A Film.mkv" {
 		t.Fatalf("item path = %q", path)
 	}
-	path, data = readRow(t, dir, "00000000-0000-0000-0000-0000000000a2")
+	path, data := readRow(t, dir, "00000000-0000-0000-0000-0000000000a2")
 	if path != "/config/root/movies" {
 		t.Fatalf("the app's own path was rewritten: %q", path)
 	}

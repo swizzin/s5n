@@ -50,21 +50,40 @@ func newJellyfinFake(t *testing.T) (*jellyfinFake, *Jellyfin) {
 func (f *jellyfinFake) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	q := r.URL.Query()
 	switch {
 	case r.URL.Path == "/System/Info/Public":
-		writeJSON(w, map[string]any{
-			"ServerName":             "s5n",
-			"Version":                "12.4.0",
-			"StartupWizardCompleted": f.wizardDone,
-		})
+		f.info(w)
+	case strings.HasPrefix(r.URL.Path, "/Startup/"):
+		f.startup(w, r)
+	case strings.HasPrefix(r.URL.Path, "/Users"):
+		f.userRoutes(w, r)
+	case r.URL.Path == "/Auth/Keys":
+		f.apiKeys(w, r)
+	case strings.HasPrefix(r.URL.Path, "/Library/"):
+		f.library(w, r)
+	case strings.HasPrefix(r.URL.Path, "/System/Configuration/"):
+		f.networkConfig(w, r)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (f *jellyfinFake) info(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"ServerName":             "s5n",
+		"Version":                "12.4.0",
+		"StartupWizardCompleted": f.wizardDone,
+	})
+}
+
+// startup is the wizard: anonymous until it is complete, and /Startup/User
+// refuses once the first account has a password -- the app's own rule, which is
+// what makes a re-run safe.
+func (f *jellyfinFake) startup(w http.ResponseWriter, r *http.Request) {
+	switch {
 	case r.URL.Path == "/Startup/User" && r.Method == http.MethodPost:
 		f.startupUserCalls++
-		if f.wizardDone {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		if f.firstUserPw != "" {
+		if f.wizardDone || f.firstUserPw != "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -76,143 +95,166 @@ func (f *jellyfinFake) handle(w http.ResponseWriter, r *http.Request) {
 		f.passwords[body.Name] = body.Password
 		f.writes = append(f.writes, "startup/user")
 		w.WriteHeader(http.StatusNoContent)
-	case r.URL.Path == "/Startup/User" && r.Method == http.MethodGet:
+	case r.URL.Path == "/Startup/User":
 		if f.firstUser == "" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		writeJSON(w, map[string]any{"Name": f.firstUser})
-	case r.URL.Path == "/Startup/RemoteAccess" && r.Method == http.MethodPost:
+	case r.URL.Path == "/Startup/RemoteAccess":
 		var body struct{ EnableRemoteAccess bool }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.network["EnableRemoteAccess"] = body.EnableRemoteAccess
 		f.writes = append(f.writes, "startup/remoteaccess")
 		w.WriteHeader(http.StatusNoContent)
-	case r.URL.Path == "/Startup/Complete" && r.Method == http.MethodPost:
+	case r.URL.Path == "/Startup/Complete":
 		f.wizardDone = true
 		f.writes = append(f.writes, "startup/complete")
 		w.WriteHeader(http.StatusNoContent)
-	case r.URL.Path == "/Users/AuthenticateByName" && r.Method == http.MethodPost:
-		var body struct{ Username, Pw string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if f.passwords[body.Username] != body.Pw || body.Pw == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		f.sessions++
-		token := "session-" + body.Username
-		f.tokens[token] = body.Username
-		writeJSON(w, map[string]any{"AccessToken": token, "User": map[string]any{"Name": body.Username}})
-	case r.URL.Path == "/Users" && r.Method == http.MethodGet:
-		if !f.auth(w, r) {
-			return
-		}
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (f *jellyfinFake) userRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/Users/AuthenticateByName" {
+		f.signIn(w, r)
+		return
+	}
+	if !f.auth(w, r) {
+		return
+	}
+	if r.URL.Path == "/Users" && r.Method == http.MethodGet {
 		out := make([]map[string]any, 0, len(f.users))
 		for _, u := range f.users {
 			out = append(out, u)
 		}
 		writeJSON(w, out)
-	case r.URL.Path == "/Users/New" && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		var body struct{ Name, Password string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if _, ok := f.users[body.Name]; ok {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-		u := map[string]any{"Id": "id-" + body.Name, "Name": body.Name,
-			"Policy": map[string]any{"IsAdministrator": false, "IsDisabled": false}}
-		f.users[body.Name] = u
-		f.passwords[body.Name] = body.Password
-		f.writes = append(f.writes, "users/new")
-		writeJSON(w, u)
-	case strings.HasPrefix(r.URL.Path, "/Users/") && strings.HasSuffix(r.URL.Path, "/Policy") && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/Users/"), "/Policy")
-		var policy map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&policy)
-		for _, u := range f.users {
-			if u["Id"] == id {
-				u["Policy"] = policy
-			}
-		}
-		f.policyWrites++
-		f.writes = append(f.writes, "users/policy")
-		w.WriteHeader(http.StatusNoContent)
-	case strings.HasPrefix(r.URL.Path, "/Users/") && strings.HasSuffix(r.URL.Path, "/Password") && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/Users/"), "/Password")
-		var body struct{ CurrentPw, NewPw string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		for name, u := range f.users {
-			if u["Id"] == id {
-				f.passwords[name] = body.NewPw
-			}
-		}
-		f.passwordWrites++
-		f.writes = append(f.writes, "users/password")
-		w.WriteHeader(http.StatusNoContent)
-	case strings.HasPrefix(r.URL.Path, "/Users/") && r.Method == http.MethodGet:
-		if !f.auth(w, r) {
-			return
-		}
-		id := strings.TrimPrefix(r.URL.Path, "/Users/")
-		for _, u := range f.users {
-			if u["Id"] == id {
-				writeJSON(w, u)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
-	case r.URL.Path == "/Auth/Keys" && r.Method == http.MethodGet:
-		if !f.auth(w, r) {
-			return
-		}
-		writeJSON(w, map[string]any{"Items": f.keys, "TotalRecordCount": len(f.keys)})
-	case r.URL.Path == "/Auth/Keys" && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		app := q.Get("app")
-		f.keys = append(f.keys, APIKey{AppName: app, AccessToken: "key-" + app})
-		w.WriteHeader(http.StatusNoContent)
-	case r.URL.Path == "/Library/VirtualFolders" && r.Method == http.MethodGet:
-		if !f.auth(w, r) {
-			return
-		}
-		writeJSON(w, f.libs)
-	case r.URL.Path == "/Library/VirtualFolders" && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		f.libraryAdds++
-		f.libs = append(f.libs, Library{Name: q.Get("name"), CollectionType: q.Get("collectionType"),
-			Locations: []string{q.Get("paths")}})
-		w.WriteHeader(http.StatusNoContent)
-	case r.URL.Path == "/System/Configuration/network" && r.Method == http.MethodGet:
-		if !f.auth(w, r) {
-			return
-		}
-		writeJSON(w, f.network)
-	case r.URL.Path == "/System/Configuration/network" && r.Method == http.MethodPost:
-		if !f.auth(w, r) {
-			return
-		}
-		var doc map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&doc)
-		f.network = doc
-		f.networkWrites++
-		f.writes = append(f.writes, "network")
-		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.URL.Path == "/Users/New" && r.Method == http.MethodPost {
+		f.createUser(w, r)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/Users/")
+	switch {
+	case strings.HasSuffix(id, "/Policy"):
+		f.setPolicy(w, r, strings.TrimSuffix(id, "/Policy"))
+	case strings.HasSuffix(id, "/Password"):
+		f.setPassword(w, r, strings.TrimSuffix(id, "/Password"))
+	case r.Method == http.MethodGet:
+		f.getUser(w, id)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (f *jellyfinFake) signIn(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Username, Pw string }
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if f.passwords[body.Username] != body.Pw || body.Pw == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	f.sessions++
+	token := "session-" + body.Username
+	f.tokens[token] = body.Username
+	writeJSON(w, map[string]any{"AccessToken": token, "User": map[string]any{"Name": body.Username}})
+}
+
+func (f *jellyfinFake) createUser(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Name, Password string }
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if _, ok := f.users[body.Name]; ok {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	u := map[string]any{"Id": "id-" + body.Name, "Name": body.Name,
+		"Policy": map[string]any{"IsAdministrator": false, "IsDisabled": false}}
+	f.users[body.Name] = u
+	f.passwords[body.Name] = body.Password
+	f.writes = append(f.writes, "users/new")
+	writeJSON(w, u)
+}
+
+func (f *jellyfinFake) setPolicy(w http.ResponseWriter, r *http.Request, id string) {
+	var policy map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&policy)
+	for _, u := range f.users {
+		if u["Id"] == id {
+			u["Policy"] = policy
+		}
+	}
+	f.policyWrites++
+	f.writes = append(f.writes, "users/policy")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *jellyfinFake) setPassword(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct{ CurrentPw, NewPw string }
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	for name, u := range f.users {
+		if u["Id"] == id {
+			f.passwords[name] = body.NewPw
+		}
+	}
+	f.passwordWrites++
+	f.writes = append(f.writes, "users/password")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *jellyfinFake) getUser(w http.ResponseWriter, id string) {
+	for _, u := range f.users {
+		if u["Id"] == id {
+			writeJSON(w, u)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (f *jellyfinFake) apiKeys(w http.ResponseWriter, r *http.Request) {
+	if !f.auth(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]any{"Items": f.keys, "TotalRecordCount": len(f.keys)})
+		return
+	}
+	app := r.URL.Query().Get("app")
+	f.keys = append(f.keys, APIKey{AppName: app, AccessToken: "key-" + app})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *jellyfinFake) library(w http.ResponseWriter, r *http.Request) {
+	if !f.auth(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, f.libs)
+		return
+	}
+	q := r.URL.Query()
+	f.libraryAdds++
+	f.libs = append(f.libs, Library{Name: q.Get("name"), CollectionType: q.Get("collectionType"),
+		Locations: []string{q.Get("paths")}})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (f *jellyfinFake) networkConfig(w http.ResponseWriter, r *http.Request) {
+	if !f.auth(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, f.network)
+		return
+	}
+	var doc map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&doc)
+	f.network = doc
+	f.networkWrites++
+	f.writes = append(f.writes, "network")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // auth checks the token the client sent, so a test that forgets to sign in

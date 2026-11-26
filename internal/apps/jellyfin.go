@@ -298,7 +298,7 @@ func (j *Jellyfin) EnsureLibrary(ctx context.Context, name, collectionType, path
 		}
 	}
 	q := url.Values{
-		"name":           {name},
+		fieldName:        {name},
 		"collectionType": {collectionType},
 		"paths":          {path},
 		"refreshLibrary": {"true"},

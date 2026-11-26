@@ -838,14 +838,14 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if c.Seerr != nil {
 				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
 			}
-			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending", Detail: detail})
+			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: stepPending, Detail: detail})
 			r.stepLog("plex/claim", "pending (no claim token)")
 		}
 	}
 
 	if c.Tautulli != nil {
 		if plexIdentity == nil {
-			res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: "plex is not deployed in this release"})
+			res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: stepPending, Detail: "plex is not deployed in this release"})
 		} else {
 			key, err := ReadSecret(c.Tautulli.APIKeyFile)
 			if err != nil {
@@ -889,7 +889,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
 			if pendingReason != "" {
-				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: pendingReason})
+				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: stepPending, Detail: pendingReason})
 				r.stepLog("tautulli/plex", "pending ("+pendingShort+")")
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
@@ -917,7 +917,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		// cannot reach deletes nothing and reports nothing. It takes the same
 		// server token Tautulli's PMS link does.
 		if plexIdentity == nil {
-			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: "plex is not deployed in this release"})
+			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: stepPending, Detail: "plex is not deployed in this release"})
 		} else {
 			plexToken, haveToken, err := ReadOptionalSecret(c.Maintainerr.PlexTokenFile)
 			if err != nil {
@@ -946,7 +946,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 			r.okStep(res, "maintainerr/ready", c.Maintainerr.URL+c.Maintainerr.URLBase)
 			if pendingReason != "" {
-				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: pendingReason})
+				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: stepPending, Detail: pendingReason})
 				r.stepLog("maintainerr/plex", "pending ("+pendingShort+")")
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
@@ -995,7 +995,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		// There is nothing left to ask of a box whose Seerr is set up, so
 		// that box prints no row at all rather than a to-do it cannot do.
 		if !public.Initialized {
-			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
+			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: stepPending,
 				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
 			r.stepLog("seerr/plex", "pending (needs one interactive Plex sign-in)")
 		}
