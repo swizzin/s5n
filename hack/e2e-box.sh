@@ -5111,7 +5111,7 @@ print(json.dumps({"status": {"conditions": conds}}))' >"$WORK/cert-status.json"
   # have taken it away.
   log "a public record and an apply: the anchor stays until the certificate moves"
   cat >"$WORK/dns-window" <<EOF
-192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST} ${JELLYFIN_HOST}
 EOF
   anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
@@ -5285,7 +5285,7 @@ PYCHECK
   # no-DNS card and the sign-in checks happen to name: a name left out of the
   # cluster's DNS is a certificate that can never issue, and the install stays
   # green while that host keeps serving its self-signed one.
-  hosts=("$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST")
+  hosts=("$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" "$JELLYFIN_HOST")
   certs=()
   for host in "${hosts[@]}"; do certs+=("$(host_cert "$host")"); done
   # What the run leaves a person is one block at its end: a to-finish label,
@@ -5329,7 +5329,7 @@ PYCHECK
   # Gateway, so the HTTP-01 challenge still arrives on port 80.
   log "a record exists: init again moves the same hosts to Let's Encrypt"
   cat >"$WORK/dns" <<EOF
-192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST} ${JELLYFIN_HOST}
 EOF
   install_pebble
   [ "$fail" = 0 ] || return 0

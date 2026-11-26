@@ -280,6 +280,36 @@ flag, prints no row on a box whose Seerr already has its admin (a migrated one d
 from the settings its snapshot carried), and names `seerr.<domain>` — never a
 `/seerr` path — as the address to sign in at.
 
+**Jellyfin keeps its own accounts, and box makes the one a person has to know
+(decided).** Its players authenticate against the server with its own tokens, so it
+is served at `jellyfin.<domain>` and that host bypasses the login, like Plex's. Its
+users, its API keys and its libraries are rows in `data/jellyfin.db`, and its first-run
+wizard is an API, so nothing can be sealed into a file before it starts: the wiring Job
+completes the wizard with the person's account (the box login's name), keeps an
+automation account of its own for every later run, and gives each Arr instance's
+library directory a library. The person's password is the one app credential box
+makes and shows once, at the end of the first run, and the release Secret is its only
+copy, so a person who changes it in the app breaks nothing and a re-run never resets
+it.
+
+That wizard is also the reason the chart serves no `/Startup` path at the edge. Until
+the wizard is complete Jellyfin's own authorization policy answers anyone on
+`/Startup/*` and `/Library/VirtualFolders`, and this host has no login in front of it,
+so whoever reached a fresh server first would name its first account. The chart sends
+those two prefixes to the app's own page instead, and the Job -- which reaches the
+Service inside the cluster -- is the only caller that can make either call. The same
+host has to be told whose forwarded address to trust (`KnownProxies`): with the list
+empty Jellyfin ignores `X-Forwarded-For` and every request through the Gateway counts
+as local, and a local caller reaches the endpoints Jellyfin answers without a
+credential. `init` reads the cluster's pod network from its Nodes' `podCIDR`s and
+records it in the grant, so the range is a fact about the cluster rather than a guess
+in a file.
+
+Seerr stays on Plex: nothing in this release wires a Jellyfin server to it, so a box
+that runs both has one media server per requester rather than a shared library.
+Hardware transcoding is not here either; Jellyfin transcodes in software until a GPU
+is a platform feature Plex and Jellyfin share (PLAN.md, "Catalog").
+
 Tautulli used to be the third, with its own Plex-based login on top of the app. That
 login is switched off behind the box's, and box seals it off on every start: a
 non-empty `http_password` is the switch that makes Tautulli ask for a password
