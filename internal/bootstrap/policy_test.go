@@ -12,16 +12,13 @@ import (
 	"github.com/swizzin/s5n/internal/release/releasetest"
 )
 
-// pins is the platform pins of the chart in this checkout: the k0s the release
-// names and the checksums of its assets, read from charts/s5n/platform.yaml
-// through the parser box uses.
+// pins is this checkout's chart pins, read from charts/s5n/platform.yaml through the
+// parser box uses.
 var pins = releasetest.MustPins()
 
-// The sums the chart pins are the only ones box has: nothing about k0s is
-// compiled in any more, so each architecture's checksum has to be in that file,
-// has to be a sha256, and has to be the one k0sReleaseFor hands the installer.
-// A chart that bumps the k0s line without writing its sums installs nothing,
-// loudly.
+// The chart's sums are the only ones box has: each architecture's checksum must be in
+// that file, a sha256, and the one k0sReleaseFor hands the installer. A chart that
+// bumps the k0s line without its sums installs nothing, loudly.
 func TestK0sPinsAreReal(t *testing.T) {
 	if pins.K0s == "" {
 		t.Fatal("the chart pins no k0s version")
@@ -50,9 +47,8 @@ func TestK0sPinsAreReal(t *testing.T) {
 	}
 }
 
-// An architecture the file pins no sum for is refused by name, before anything
-// is downloaded: box verifies what it installs, and an unchecked root binary is
-// the one thing this policy exists to prevent.
+// An architecture with no pinned sum is refused by name before anything is
+// downloaded.
 func TestK0sReleaseForRefusesUnpinnedArch(t *testing.T) {
 	_, err := k0sReleaseFor(pins, "riscv64")
 	if err == nil {
@@ -63,8 +59,8 @@ func TestK0sReleaseForRefusesUnpinnedArch(t *testing.T) {
 	}
 }
 
-// A release with no k0s line is refused too: box has no version to install and
-// no sum to check it against, and inventing either is what the pins replace.
+// A release with no k0s line is refused: there is no version and no sum, and
+// inventing either is what the pins replace.
 func TestK0sReleaseForRefusesAVersionWithoutAChecksum(t *testing.T) {
 	_, err := k0sReleaseFor(release.Versions{K0s: "v9.9.9+k0s.9"}, runtime.GOARCH)
 	if err == nil {
@@ -87,8 +83,7 @@ func TestK0sReleaseURL(t *testing.T) {
 	}
 }
 
-// testUplink is the host the plan tests install on: ethernet, 1500, the
-// address a default route would source.
+// testUplink is the host the plan tests install on: ethernet, 1500.
 var testUplink = Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500}
 
 func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
@@ -102,16 +97,14 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	if plan.Arch != runtime.GOARCH {
 		t.Errorf("arch = %q, want %q", plan.Arch, runtime.GOARCH)
 	}
-	// The checksum is the one pinned beside the version: the plan is not a
-	// second place a sum could be written, so it cannot disagree with the file.
+	// The checksum is the one pinned beside the version: the plan is not a second
+	// place a sum could be written.
 	if want := pins.K0sSHA256[runtime.GOARCH]; plan.SHA256 != want {
 		t.Errorf("sha256 = %q, want the pin %q", plan.SHA256, want)
 	}
 
-	// The version is a value passed in, never a constant: a release that pins
-	// another k0s moves the plan with it. Without a sum in that release the
-	// plan still names the version, so the installer refuses it by name rather
-	// than on an empty plan.
+	// The version is passed in, never a constant: another pin moves the plan. Without a
+	// sum the plan still names the version, so the installer refuses it by name.
 	other := k0sPlan(release.Versions{K0s: "v9.9.9+k0s.9"}, testUplink)
 	if other.Version != "v9.9.9+k0s.9" {
 		t.Errorf("version = %q, want the release's %q", other.Version, "v9.9.9+k0s.9")
@@ -120,9 +113,8 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 		t.Errorf("a release with no checksum got one anyway: %q", other.SHA256)
 	}
 
-	// The plan is also where the node identity travels from the decision to
-	// the installer: the address, the link it came from, and the config that
-	// pins the API address to it.
+	// The plan also carries the node identity: address, link, and the config pinning
+	// the API to it.
 	if plan.NodeIP != testUplink.Address {
 		t.Errorf("node IP = %q, want the uplink's %q", plan.NodeIP, testUplink.Address)
 	}
@@ -137,8 +129,8 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	}
 }
 
-// A host with no default route has nothing to pin, so the plan names no
-// address and the installer refuses it rather than letting the kubelet choose.
+// No default route means no address, and the installer refuses rather than letting
+// the kubelet choose.
 func TestK0sPlanWithoutAnUplinkPinsNothing(t *testing.T) {
 	plan := k0sPlan(pins, Uplink{})
 	if plan.NodeIP != "" || plan.ConfigText != "" {
@@ -207,8 +199,8 @@ func TestInstallRefusal(t *testing.T) {
 			}
 		})
 	}
-	// The undo instruction belongs in the refusal: an operator who is told no
-	// needs to know what to remove first, not to guess.
+	// The undo instruction belongs in the refusal: an operator told no needs to know
+	// what to remove first.
 	got := installRefusal(clean, true, []Finding{{Kind: "state", Name: K0sStateDir}})
 	if !strings.Contains(got, "k0s stop; k0s reset") {
 		t.Errorf("refusal = %q, want the undo command named", got)

@@ -1,9 +1,8 @@
 package bootstrap
 
-// preview_test.go is the decision that writes nothing: the one a flow asks
-// before its own question, so that a host whose answer is no is exactly as it
-// was. What it must get right is that it decides the same thing the real run
-// will, and that it changes no cluster, no k0s, no record and no firewall.
+// The decision that writes nothing: a flow asks it before its own question, so a host
+// whose answer is no is as it was. It must decide what the real run will, changing no
+// cluster, k0s, record or firewall.
 
 import (
 	"context"
@@ -13,8 +12,7 @@ import (
 	"testing"
 )
 
-// previewInstaller fails the test when it is reached: a preview installs
-// nothing, so reaching the installer is the whole bug.
+// previewInstaller fails when reached: a preview installs nothing.
 func previewInstaller(t *testing.T) *fakeInstaller {
 	t.Helper()
 	trace := &[]string{}
@@ -27,9 +25,8 @@ func previewInstaller(t *testing.T) *fakeInstaller {
 	return inst
 }
 
-// TestPreviewOnACleanHostDecidesAndInstallsNothing: the cluster box would
-// create, and the platform that follows from a cluster nothing is installed on,
-// without any of it happening.
+// The cluster box would create, and the platform that follows, without any of it
+// happening.
 func TestPreviewOnACleanHostDecidesAndInstallsNothing(t *testing.T) {
 	recs := &fakeRecords{}
 	inst := previewInstaller(t)
@@ -45,9 +42,8 @@ func TestPreviewOnACleanHostDecidesAndInstallsNothing(t *testing.T) {
 	if len(recs.saved) != 0 {
 		t.Errorf("a preview recorded a cluster it did not install: %v", recs.saved)
 	}
-	// The platform decision is the one a fresh k0s gives: box installs
-	// everything it ships, and the address layer is installed rather than
-	// probed because a fresh cluster hands out no addresses.
+	// A fresh k0s's decision: everything installed, the address layer installed rather
+	// than probed.
 	actions := map[PlatformComponent]string{}
 	for _, c := range res.Platform {
 		actions[c.Component] = c.Action
@@ -65,9 +61,8 @@ func TestPreviewOnACleanHostDecidesAndInstallsNothing(t *testing.T) {
 	}
 }
 
-// TestPreviewOnACleanHostTrustsTheNetworksItWouldWrite: a host running firewalld
-// gets the two networks the k0s config above carries, read from the text the
-// install would write rather than from a file that does not exist yet.
+// A host running firewalld gets the networks from the text the install would write,
+// not from a file that does not exist.
 func TestPreviewOnACleanHostTrustsTheNetworksItWouldWrite(t *testing.T) {
 	recs := &fakeRecords{}
 	d := newDecision(&fakeSource{}, nil, &fakeHost{}, recs, previewInstaller(t))
@@ -88,9 +83,8 @@ func TestPreviewOnACleanHostTrustsTheNetworksItWouldWrite(t *testing.T) {
 	}
 }
 
-// TestPreviewChangesNoFirewall: reading the host's filter is the whole of the
-// preview's contact with it. The plan is what adds the networks, after the
-// answer.
+// Reading the filter is the preview's whole contact with it; the plan adds the
+// networks after the answer.
 func TestPreviewChangesNoFirewall(t *testing.T) {
 	fw := &fakeFirewallCmd{running: true}
 	d := newDecision(&fakeSource{}, nil, &fakeHost{}, &fakeRecords{}, previewInstaller(t))
@@ -106,10 +100,8 @@ func TestPreviewChangesNoFirewall(t *testing.T) {
 	}
 }
 
-// TestPreviewOnAnExplicitClusterRecordsNothing: a cluster box was given is
-// probed for its platform layer, and the decision is returned without a record.
-// A record is what makes a host "have a box", and this host's answer has not been
-// given.
+// A cluster box was given is probed and the decision returned without a record: one
+// is what makes a host "have a box", and the answer has not been given.
 func TestPreviewOnAnExplicitClusterRecordsNothing(t *testing.T) {
 	const path = "/explicit.yaml"
 	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
@@ -147,9 +139,8 @@ func TestPreviewOnAnExplicitClusterRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestPreviewIsTheDecisionTheRunThenMakes: the same host, previewed and then
-// decided for real, gives the same platform and the same class. A preview that
-// disagreed would be asking about one run and doing another.
+// The same host, previewed and then decided for real, gives the same platform and
+// class.
 func TestPreviewIsTheDecisionTheRunThenMakes(t *testing.T) {
 	const path = "/explicit.yaml"
 	platform := PlatformProbe{
@@ -183,8 +174,7 @@ func TestPreviewIsTheDecisionTheRunThenMakes(t *testing.T) {
 	}
 }
 
-// TestPreviewWritesNoK0sConfig: the clean path's preview does not write the
-// config the install would, which is the file box reads the networks back from.
+// The preview does not write the config the install would.
 func TestPreviewWritesNoK0sConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "k0s.yaml")

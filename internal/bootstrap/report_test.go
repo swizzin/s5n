@@ -10,19 +10,16 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// report is what `box bootstrap` says about the cluster it found: one ✓ row,
-// then the evidence in the log. FormatResult stays the dry run's output, where
-// the decision itself is the answer.
+// What `box bootstrap` says about the cluster: one ✓ row, the evidence in the log.
+// FormatResult stays the dry run's output.
 func report(res Result) (screen, log string) {
 	var out, details bytes.Buffer
 	ReportResult(res, &say.Plain{W: &out, Log: &details})
 	return out.String(), details.String()
 }
 
-// TestTheClusterHalfOfTheScreenIsOneRow is the first block of a fresh install's
-// screen: what box found, in the facts that decide everything after it, and
-// nothing about the kubeconfig path, the four capability probes or the gateway
-// class on the screen. Those are the log's.
+// A fresh install's first block: what box found. The kubeconfig path, the probes and
+// the class are the log's.
 func TestTheClusterHalfOfTheScreenIsOneRow(t *testing.T) {
 	res := Result{
 		Action:       ActionUseCluster,
@@ -61,8 +58,7 @@ func TestTheClusterHalfOfTheScreenIsOneRow(t *testing.T) {
 	}
 }
 
-// A warning is `!`: a node on a tunnel is something the operator has to fix, and
-// the row above it says the cluster is otherwise usable.
+// A warning is `!`: a node on a tunnel is the operator's to fix.
 func TestAWarningIsTheOneThingOnTheScreenBesidesTheRow(t *testing.T) {
 	res := Result{
 		Action:       ActionUseCluster,
@@ -78,8 +74,7 @@ func TestAWarningIsTheOneThingOnTheScreenBesidesTheRow(t *testing.T) {
 	}
 }
 
-// A clean host is the one case where box has not seen a cluster: the row says
-// what it will do about that, and the installer's own rows follow it.
+// A clean host: the row says what box will do, and the installer's rows follow.
 func TestACleanHostIsOneRow(t *testing.T) {
 	screen, _ := report(Result{Action: ActionInstall, Source: SourceK0sManaged, Distribution: DistK0s})
 	if want := "✓ clean host · box installs k0s\n"; screen != want {
@@ -87,8 +82,7 @@ func TestACleanHostIsOneRow(t *testing.T) {
 	}
 }
 
-// A refusal is a ✗ row with the reason under it, two columns in: a stop is one
-// fact and its consequences, never a heading and a list of candidates.
+// A refusal is a ✗ row with the reason under it: one fact and its consequences.
 func TestARefusalIsOneCrossRow(t *testing.T) {
 	res := Result{
 		Action: ActionStop,
@@ -110,9 +104,8 @@ func TestARefusalIsOneCrossRow(t *testing.T) {
 	}
 }
 
-// TestTheK0sRefusalIsTheFactAndTheFix: the one refusal the design page draws
-// byte for byte -- what is in the way, the command that moves it, and what to
-// do next. The why is the log's.
+// The one refusal the design page draws byte for byte: what is in the way, the
+// command, what next. The why is the log's.
 func TestTheK0sRefusalIsTheFactAndTheFix(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "k0s.yaml")

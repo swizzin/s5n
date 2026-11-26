@@ -5,13 +5,12 @@ import (
 	"path/filepath"
 )
 
-// FilesystemSource reads kubeconfigs from the distribution conventions in
-// PLAN.md's order, plus the user's ~/.kube/config.
+// FilesystemSource reads kubeconfigs from the distribution conventions in PLAN.md's
+// order, plus ~/.kube/config.
 type FilesystemSource struct{}
 
-// Candidates returns the candidate paths in PLAN.md's order, each marked with
-// whether the distribution that owns this host writes it. A candidate only
-// counts after the prober validates it; most will not exist on a given host.
+// Candidates returns the paths in PLAN.md's order, each marked with whether a
+// distribution writes it; a candidate counts only after the prober validates it.
 func (FilesystemSource) Candidates() []Candidate {
 	home, err := os.UserHomeDir()
 	if err != nil {

@@ -18,12 +18,12 @@ import (
 
 const testK0sVersion = "v9.9.9-test"
 
-// testNodeIP is the uplink address every test plan pins: TEST-NET-1, so no
-// example in this file can be mistaken for a real host's address.
+// testNodeIP is the pinned uplink address, TEST-NET-1, so no example reads as a real
+// host.
 const testNodeIP = "192.0.2.10"
 
-// The stubs record into one shared trace, so a test can assert the order of
-// the whole sequence and not only its outcome.
+// The stubs record into one trace, so a test asserts the sequence's order, not only
+// its outcome.
 type installStubs struct {
 	trace *[]string
 	fetch *stubFetcher
@@ -66,9 +66,8 @@ type stubReady struct {
 	attempts  int
 	failFirst int
 	err       error
-	// nodeIPs is what the stub Node registered. Nil means the address the
-	// plan pinned, so the ordinary sequence verifies; a test that wants a
-	// mismatch sets another one.
+	// nodeIPs is what the stub registered; nil means the plan's address, so the
+	// ordinary sequence verifies.
 	nodeIPs []string
 	addrErr error
 }
@@ -93,9 +92,8 @@ func (s *stubReady) NodeIPs(context.Context) ([]string, error) {
 	return s.nodeIPs, nil
 }
 
-// testInstaller builds an installer that touches only t.TempDir(): the release
-// pin is a checksum of the payload the stub serves, and the clock does not
-// actually wait.
+// testInstaller touches only t.TempDir(): the pin is the stub payload's checksum, and
+// the clock does not wait.
 func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 	t.Helper()
 	dir := t.TempDir()
@@ -126,17 +124,14 @@ func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 
 var testPayload = []byte("#!/bin/sh\n# a k0s stand-in\n")
 
-// testSum is the checksum of what the stub serves: the plan carries it the way
-// k0sPlan carries the chart's pin, and the installer verifies the download
-// against it.
+// testSum is the stub payload's checksum, carried as k0sPlan carries the chart's.
 func testSum() string {
 	sum := sha256.Sum256(testPayload)
 	return hex.EncodeToString(sum[:])
 }
 
-// testPlan is the clean-host plan a test installs: the release pin, the node
-// identity box chose on a plain ethernet uplink, and the config box would
-// write -- beside the binary, so the test never touches /etc.
+// testPlan is a clean-host plan: the pin, the node identity, and the config beside the
+// binary, so the test never touches /etc.
 func testPlan(config string) InstallPlan {
 	return InstallPlan{
 		Version:    testK0sVersion,
@@ -150,14 +145,12 @@ func testPlan(config string) InstallPlan {
 	}
 }
 
-// testConfigPath is where a test's k0s config goes: in the installer's own
-// temporary directory.
+// testConfigPath is in the installer's own temporary directory.
 func testConfigPath(k K0sInstaller) string {
 	return filepath.Join(filepath.Dir(k.BinPath), "k0s.yaml")
 }
 
-// testInstallArgs is the one command a plan installs with, spelled out here so
-// a test asserts the literal flags box runs.
+// testInstallArgs spells out the flags box runs.
 func testInstallArgs(plan InstallPlan) string {
 	return "install controller --single --config " + plan.ConfigPath + " --kubelet-extra-args=--node-ip=" + plan.NodeIP
 }
@@ -174,8 +167,7 @@ func TestK0sInstallSequence(t *testing.T) {
 		t.Fatalf("sequence = %v, want %v", *stubs.trace, want)
 	}
 
-	// The node IP is pinned where the kubelet reads it, with the config that
-	// pins the API address beside it.
+	// The node IP where the kubelet reads it, the API's in the config beside it.
 	if !strings.Contains(testInstallArgs(plan), "--kubelet-extra-args=--node-ip="+testNodeIP) {
 		t.Errorf("the install does not pin the node IP: %q", testInstallArgs(plan))
 	}
@@ -206,8 +198,7 @@ func TestK0sInstallSequence(t *testing.T) {
 	}
 }
 
-// Every refusal happens before the first byte is fetched and before anything is
-// written: a run that stops here leaves the host exactly as it was.
+// Every refusal happens before the first byte and before anything is written.
 func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -242,9 +233,8 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			want: "k0s is already on this host (state " + K0sStateDir + ")",
 		},
 		{
-			// The sum is the pins' and nothing else re-derives it: a plan that
-			// carries none is one box cannot verify, so it is refused by
-			// architecture before the download, whatever asked for it.
+			// The sum is the pins'; a plan without one is refused by architecture before
+			// the download.
 			name: "plan carries no checksum for this architecture",
 			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
 				p := testPlan(testConfigPath(*k))
@@ -264,9 +254,7 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			want: "names no k0s release",
 		},
 		{
-			// The address the node registers with is what the CNI's MTU comes
-			// from, so a plan that pins none is refused by architecture rather
-			// than left to the host.
+			// The CNI's MTU comes from that address, so a plan pinning none is refused.
 			name: "plan pins no node IP",
 			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
 				p := testPlan(testConfigPath(*k))

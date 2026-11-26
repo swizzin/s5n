@@ -18,46 +18,36 @@ import (
 )
 
 // kubeClient builds the HTTP client and base URL for a kubeconfig's current
-// context through client-go's clientcmd, the loader kubectl itself uses. That
-// keeps the prober on the same auth box's later client-go writes use: bearer
-// tokens, tokenFile, client certificates, and exec credential plugins, which
-// client-go runs lazily inside the transport on the first request.
-//
-// This is the one place bootstrap turns kubeconfig bytes into a client;
-// HTTPProber and APIReadiness (k0s.go) both call it.
+// context through clientcmd, the loader kubectl uses, so the prober runs on the same
+// auth as box's writes (tokens, tokenFile, certificates, exec plugins run lazily on
+// the first request). HTTPProber and APIReadiness (k0s.go) both call it.
 func kubeClient(kubeconfig []byte, timeout time.Duration) (*http.Client, string, error) {
-	// clientcmd reports a kubeconfig with no current-context as "no
-	// configuration has been provided", which reads as an empty file. Say what
-	// is actually missing. box does not pick a context itself: the writers
-	// load the same file through clientcmd and would refuse it too.
+	// clientcmd calls a kubeconfig with no current-context "no configuration has
+	// been provided", which reads as an empty file. Say what is missing; box never
+	// picks a context itself.
 	if raw, err := clientcmd.Load(kubeconfig); err == nil && raw.CurrentContext == "" {
 		return nil, "", fmt.Errorf("kubeconfig sets no current-context: select one with `kubectl config use-context`")
 	}
-	// The same config (and the same silenced warnings) every writer builds,
-	// from the bytes box already has.
+	// The same config, with warnings silenced, that every writer builds.
 	return kube.ProbeClient(kubeconfig, timeout)
 }
 
-// HTTPProber is the real, read-only Prober: it talks to the API server with
-// the client client-go builds from the kubeconfig, so every credential
-// clientcmd understands works the same way it does for box's later writes.
+// HTTPProber is the read-only Prober: the API server through client-go, so every
+// credential clientcmd understands works as it does for box's writes.
 type HTTPProber struct {
 	baseURL   string
 	client    *http.Client
 	localOnly bool
-	// localAddrs is this machine's own interface addresses. It is a field so
-	// a test can stand in a fake host instead of depending on the machine it
-	// runs on; nil means net.InterfaceAddrs.
+	// localAddrs is this machine's addresses, a field so a test stands in a fake
+	// host; nil means net.InterfaceAddrs.
 	localAddrs func() ([]net.IP, error)
 }
 
-// NewHTTPProber builds a prober for a kubeconfig's current context. When
-// localOnly is set, every call first refuses to touch a server that is not
-// this machine, returning ErrRemoteCluster — the --dry-run guard. Local means
-// loopback or an IP literal bound to one of this host's interfaces: a local
-// kubeadm cluster's admin.conf names the node's own address, not 127.0.0.1.
-// The check runs before any request, so an exec credential plugin has not run
-// yet either.
+// NewHTTPProber builds a prober for a kubeconfig's current context. With localOnly,
+// every call first refuses a server that is not this machine, returning
+// ErrRemoteCluster -- the --dry-run guard. Local is loopback or an IP literal on one
+// of this host's interfaces (a kubeadm admin.conf names the node's own address), and
+// the check runs before any request, so no exec plugin has run either.
 func NewHTTPProber(kubeconfig []byte, localOnly bool) (Prober, error) {
 	client, baseURL, err := kubeClient(kubeconfig, 20*time.Second)
 	if err != nil {
@@ -84,10 +74,9 @@ func (p *HTTPProber) checkLocal() error {
 	return fmt.Errorf("%w (server %s)", ErrRemoteCluster, host)
 }
 
-// isLocal reports whether host is this machine: loopback, or an IP literal
-// bound to one of its interfaces. A name other than localhost is never local.
-// Proving a name would need a DNS lookup, and this guard must make no network
-// call before it has decided.
+// isLocal reports whether host is this machine: loopback, or an IP literal on one of
+// its interfaces. Any other name is never local -- proving one needs a DNS lookup,
+// and this guard makes no network call before it decides.
 func isLocal(host string, addrs func() ([]net.IP, error)) bool {
 	if isLoopback(host) {
 		return true
@@ -101,8 +90,7 @@ func isLocal(host string, addrs func() ([]net.IP, error)) bool {
 	}
 	local, err := addrs()
 	if err != nil {
-		// The machine's addresses cannot be read, so its own address cannot
-		// be proved: refuse rather than guess.
+		// Its own address cannot be proved: refuse rather than guess.
 		return false
 	}
 	for _, a := range local {
@@ -113,8 +101,7 @@ func isLocal(host string, addrs func() ([]net.IP, error)) bool {
 	return false
 }
 
-// interfaceAddrs is the real lookup behind isLocal: every address bound to an
-// interface on this host, whatever the family.
+// interfaceAddrs is the real lookup: every address on this host, whatever the family.
 func interfaceAddrs() ([]net.IP, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -218,10 +205,9 @@ func (p *HTTPProber) Version(ctx context.Context) (Version, error) {
 	return Version{GitVersion: v.GitVersion}, nil
 }
 
-// adminAccess is what bootstrap needs to install a cluster: the cluster-scoped
-// writes k0s's platform layer makes through Helm. Every one is an apply, because
-// a re-run patches what the first run created and an identity that can only
-// create would pass this probe and then fail mid-install.
+// adminAccess is what installing needs: the cluster-scoped writes the platform layer
+// makes through Helm. Each is an apply, because a re-run patches what the first run
+// created, and a create-only identity would fail mid-install.
 func adminAccess() []kube.Access {
 	return []kube.Access{
 		{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"},
@@ -230,10 +216,9 @@ func adminAccess() []kube.Access {
 	}
 }
 
-// CanAdmin checks, with one SelfSubjectAccessReview per privilege, that the
-// identity can manage the cluster box is about to install onto. The questions
-// and the verbs are kube's; the sentence is bootstrap's, because this is a
-// probe that goes into a skip reason, not a write that stopped.
+// CanAdmin checks, one SelfSubjectAccessReview per privilege, that the identity can
+// manage the cluster. The questions and verbs are kube's; the sentence is
+// bootstrap's, because this goes into a skip reason and not a failed write.
 func (p *HTTPProber) CanAdmin(ctx context.Context) error {
 	denied, err := kube.Denied(ctx, p, adminAccess())
 	if err != nil {
@@ -245,10 +230,9 @@ func (p *HTTPProber) CanAdmin(ctx context.Context) error {
 	return nil
 }
 
-// Allowed answers one SelfSubjectAccessReview as this kubeconfig's identity
-// (kube.Reviewer). The prober posts the review itself rather than building a
-// typed client: a kubeconfig this read-only client can use must not be refused
-// later by a client it cannot build.
+// Allowed answers one SelfSubjectAccessReview (kube.Reviewer). The prober posts it
+// itself rather than building a typed client: a kubeconfig this read-only client can
+// use must not be refused by a client it cannot build.
 func (p *HTTPProber) Allowed(ctx context.Context, a kube.Access) (bool, error) {
 	return p.ssar(ctx, a)
 }
@@ -277,8 +261,8 @@ func (p *HTTPProber) ssar(ctx context.Context, a kube.Access) (bool, error) {
 	return out.Status.Allowed, nil
 }
 
-// Describe reads the node count, the nodes' InternalIPs, the first node's
-// labels, and whether a kubeadm-config ConfigMap exists.
+// Describe reads the node count, InternalIPs, the first node's labels, and whether a
+// kubeadm-config ConfigMap exists.
 func (p *HTTPProber) Describe(ctx context.Context) (Cluster, error) {
 	var nodes struct {
 		Items []struct {
@@ -335,10 +319,9 @@ func (p *HTTPProber) getKubeadmConfig(ctx context.Context) (any, error) {
 	return out, nil
 }
 
-// Platform runs the read-only subset of the capability probes. The
-// LoadBalancer probe asks whether box's own Gateway got an address, and that
-// Gateway is written after the confirm, so it is never run here and reports
-// not-probed.
+// Platform runs the read-only capability probes. LoadBalancer asks whether box's own
+// Gateway got an address, and that Gateway is written after the confirm, so it
+// reports not-probed.
 func (p *HTTPProber) Platform(ctx context.Context) (PlatformProbe, error) {
 	var probe PlatformProbe
 
@@ -385,10 +368,8 @@ func (p *HTTPProber) Platform(ctx context.Context) (PlatformProbe, error) {
 	return probe, nil
 }
 
-// deploymentList is the subset of apps/v1 Deployment box reads to tell whether
-// an installed cert-manager can do what s5n needs. Only the controller's
-// command line, its mounted controller configuration and the webhook's
-// availability matter.
+// deploymentList is the part of an apps/v1 Deployment box reads: the controller's
+// command line, its mounted configuration and the webhook's availability.
 type deploymentList struct {
 	Items []deploymentItem `json:"items"`
 }
@@ -437,10 +418,9 @@ type deploymentCondition struct {
 	Status string `json:"status"`
 }
 
-// certManagerState reads an existing cert-manager: the controller's version,
-// whether its webhook is available, and whether the controller runs with
-// Gateway API support. It reads flags and the controller's own configuration
-// file; it never changes either.
+// certManagerState reads an existing cert-manager: the controller's version, the
+// webhook's availability and whether Gateway API support is on, from flags and the
+// controller's own configuration. It changes nothing.
 func (p *HTTPProber) certManagerState(ctx context.Context, crd bool) (CertManagerState, error) {
 	var s CertManagerState
 	if !crd {
@@ -471,8 +451,8 @@ func (p *HTTPProber) certManagerState(ctx context.Context, crd bool) (CertManage
 	return s, nil
 }
 
-// deployments lists Deployments cluster-wide with a label selector: an
-// install box did not make may live in any namespace.
+// deployments lists Deployments cluster-wide by label: an install box did not make
+// may live anywhere.
 func (p *HTTPProber) deployments(ctx context.Context, selector string) (deploymentList, error) {
 	var out deploymentList
 	path := "/apis/apps/v1/deployments?labelSelector=" + url.QueryEscape(selector)
@@ -482,10 +462,9 @@ func (p *HTTPProber) deployments(ctx context.Context, selector string) (deployme
 	return out, nil
 }
 
-// webhookAvailable finds the webhook Deployment beside the controller and
-// answers whether it is Available. The upstream chart names it
-// "<release>-webhook"; a differently named one in the same namespace with the
-// webhook component label is accepted too.
+// webhookAvailable finds the webhook Deployment beside the controller and answers
+// whether it is Available: "<release>-webhook", or a sibling with the webhook
+// component label.
 func (p *HTTPProber) webhookAvailable(ctx context.Context, namespace, controller string) (bool, error) {
 	var list deploymentList
 	path := "/apis/apps/v1/namespaces/" + namespace + "/deployments"
@@ -495,9 +474,8 @@ func (p *HTTPProber) webhookAvailable(ctx context.Context, namespace, controller
 	var chosen *deploymentItem
 	for i := range list.Items {
 		item := &list.Items[i]
-		// The chart labels the webhook app.kubernetes.io/name=webhook, not
-		// cert-manager, so the name is the reliable match; a differently
-		// named sibling with the webhook component label is the fallback.
+		// The chart labels the webhook name=webhook, not cert-manager, so the name is
+		// the reliable match; the component label is the fallback.
 		if item.Metadata.Name == controller+"-webhook" {
 			chosen = item
 			break
@@ -517,9 +495,8 @@ func (p *HTTPProber) webhookAvailable(ctx context.Context, namespace, controller
 	return chosen.Status.AvailableReplicas > 0, nil
 }
 
-// controllerVersion is the version the controller runs, from its image tag.
-// The chart also labels the Deployment with app.kubernetes.io/version; that is
-// the fallback for a digest-pinned image.
+// controllerVersion is the version the controller runs, from its image tag, with
+// the Deployment's app.kubernetes.io/version label for a digest-pinned image.
 func controllerVersion(dep deploymentItem) string {
 	for _, c := range dep.Spec.Template.Spec.Containers {
 		if !strings.Contains(c.Image, "cert-manager-controller") && len(dep.Spec.Template.Spec.Containers) > 1 {
@@ -546,10 +523,9 @@ func imageTag(image string) string {
 	return ref[colon+1:]
 }
 
-// gatewayAPIEnabled reads whether the controller has Gateway API support on:
-// the legacy boolean flag, or gatewayAPI.enabled in the controller
-// configuration file the Deployment mounts. The file is the chart's
-// config.gatewayAPI.enabled setting; box reads it and never rewrites it.
+// gatewayAPIEnabled reads whether the controller has Gateway API support: the legacy
+// boolean flag, or gatewayAPI.enabled in the mounted configuration (the chart's
+// config.gatewayAPI.enabled). box reads it and never rewrites it.
 func gatewayAPIEnabled(ctx context.Context, p *HTTPProber, dep deploymentItem) (bool, error) {
 	for _, c := range dep.Spec.Template.Spec.Containers {
 		for _, arg := range c.Args {
@@ -569,10 +545,9 @@ func gatewayAPIEnabled(ctx context.Context, p *HTTPProber, dep deploymentItem) (
 	return false, nil
 }
 
-// pollConfigMap resolves --config=<path> through the container's volume mounts
-// to a ConfigMap and reads the one setting. A configuration mounted some other
-// way is not something box can read, so it answers false and the refusal names
-// the setting.
+// pollConfigMap resolves --config=<path> through the volume mounts to a ConfigMap and
+// reads the one setting. A configuration mounted another way cannot be read, so it
+// answers false and the refusal names the setting.
 func pollConfigMap(ctx context.Context, p *HTTPProber, dep deploymentItem, c deploymentContainer, path string) (bool, error) {
 	volume := volumeForPath(c.VolumeMounts, path)
 	if volume == "" {
@@ -643,10 +618,9 @@ func (p *HTTPProber) hasCRD(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
-// gatewayClasses reads every GatewayClass with what box needs to choose one:
-// its controller, whether it is Accepted (and why not), whether box created it,
-// and the features its controller publishes. It is a read; box acts on it in
-// gatewayChoice, not here.
+// gatewayClasses reads every GatewayClass with what choosing one needs: controller,
+// Accepted (and why not), whether box created it, its published features. Box acts on
+// it in gatewayChoice.
 func (p *HTTPProber) gatewayClasses(ctx context.Context) ([]GatewayClass, error) {
 	var list struct {
 		Items []struct {

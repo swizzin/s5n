@@ -8,18 +8,15 @@ import (
 	"strings"
 )
 
-// LinuxHost reports, read-only, the host-level signs PLAN.md step 3 lists: a
-// running kubelet process; a kubelet/k3s/k0s/rke2/microk8s binary or unit; or
-// anything listening on 6443, 10250 or 2379. Docker and containerd are scanned
-// as well, but they are never blockers by themselves: they also run on hosts
-// that have no Kubernetes at all, and k0s brings its own containerd. classifyFindings
-// separates them from the blockers, and a runtime that is actually holding an
-// API port is caught by the port finding itself.
+// LinuxHost reports the host-level signs PLAN.md step 3 lists: a running kubelet; a
+// kubelet/k3s/k0s/rke2/microk8s binary or unit; anything listening on 6443, 10250 or
+// 2379. Docker and containerd are scanned too but never block by themselves -- they
+// run on hosts with no Kubernetes, and k0s brings its own -- so classifyFindings makes
+// them notes, and a runtime holding an API port is caught by the port finding.
 type LinuxHost struct{}
 
-// Present scans /proc, PATH, the systemd unit directories and /proc/net for
-// evidence of an existing cluster installation. Callers pass the result
-// through classifyFindings to drop bare container runtimes to notes.
+// Present scans /proc, PATH, the unit directories and /proc/net for an existing
+// installation; pass the result through classifyFindings to drop bare runtimes.
 func (LinuxHost) Present() []Finding {
 	var out []Finding
 	out = append(out, runningProcesses(processNames()...)...)
@@ -33,21 +30,17 @@ func processNames() []string {
 	return []string{"kubelet", "containerd", "dockerd", "k3s", "k0s", "rke2", "microk8s", "microk8s.daemon-kubelite"}
 }
 
-// containerRuntimeProcesses are processes that back Kubernetes but do not
-// imply it: Docker and containerd run on plenty of hosts with no cluster, and
-// a k0s install runs its own containerd. Such a runtime is a note, never a
-// blocker; when one is holding 6443, 10250 or 2379 the listener check reports
-// that port as a blocker on its own, and a k0s-managed containerd is named by
-// the k0s binary or unit.
+// containerRuntimeProcesses back Kubernetes without implying it: Docker and
+// containerd run on hosts with no cluster, and a k0s install brings its own. Such a
+// runtime is a note, never a blocker; if it holds 6443 the listener check says so, and
+// a k0s-managed one is named by the k0s binary or unit.
 var containerRuntimeProcesses = map[string]bool{
 	"dockerd":    true,
 	"containerd": true,
 }
 
-// classifyFindings splits host evidence into blockers and informational notes.
-// Only container runtime processes are notes; every other finding keeps its
-// blocking meaning, so a k0s binary or unit still stops the install even when
-// its containerd is also visible.
+// classifyFindings splits evidence into blockers and notes: only container runtime
+// processes are notes, so a k0s binary or unit still stops the install.
 func classifyFindings(findings []Finding) (blockers, notes []Finding) {
 	for _, f := range findings {
 		if f.Kind == "process" && containerRuntimeProcesses[f.Name] {
@@ -135,8 +128,7 @@ func installedUnits(names ...string) []Finding {
 	return out
 }
 
-// listeningOn reports which of the given TCP ports are in LISTEN, from
-// /proc/net/tcp and /proc/net/tcp6.
+// listeningOn reports which TCP ports are in LISTEN, from /proc/net/tcp{,6}.
 func listeningOn(ports ...int) []Finding {
 	want := map[int]bool{}
 	for _, p := range ports {

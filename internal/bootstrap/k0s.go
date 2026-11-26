@@ -16,14 +16,12 @@ import (
 	"github.com/swizzin/s5n/internal/fetch"
 )
 
-// This file holds the real implementations behind the installer's three
-// seams: the network, the command runner and the readiness check. They are
-// separated from the sequence so the sequence can be read and tested without
-// any of them, and so nothing here is reached on a path that refuses.
+// The real implementations behind the installer's seams: the download, the command
+// runner and the readiness check. Kept apart so the sequence reads and tests without
+// them, and nothing here is reached on a path that refuses.
 
-// k0sEvidence is what the host shows before box writes anything: a k0s binary
-// where box would put one, k0s's state directory, its systemd unit, or
-// something already listening on the API port. It is read-only and cheap.
+// k0sEvidence is what the host shows before box writes: a k0s binary where box would
+// put one, its state directory, its unit, something listening on the API port.
 func k0sEvidence() []Finding {
 	var out []Finding
 	if _, err := os.Stat(K0sBinaryPath); err == nil {
@@ -37,11 +35,9 @@ func k0sEvidence() []Finding {
 	return out
 }
 
-// k0sStatePresent reports whether path holds a k0s state directory: it exists
-// and has something in it. An empty directory is not evidence of an install --
-// it is what a prepared mount point or a leftover from a refused run looks
-// like -- and refusing on it would make box unable to install onto a host whose
-// operator had already laid the directory out.
+// k0sStatePresent reports a k0s state directory with something in it: an empty one is
+// a prepared mount point or a refused run's leftover, and refusing on it would block a
+// host whose operator laid the directory out.
 func k0sStatePresent(path string) bool {
 	entries, err := os.ReadDir(path)
 	return err == nil && len(entries) > 0
@@ -49,23 +45,19 @@ func k0sStatePresent(path string) bool {
 
 // HTTPDownloader fetches a release asset over HTTPS. The zero value is usable.
 type HTTPDownloader struct {
-	// Client, when set, is used as it is instead of the client box builds:
-	// no retries, no timeout of box's. It exists so a test can replace the
-	// network entirely.
+	// Client, when set, replaces the client box builds, retries and timeout included: a
+	// test replaces the network entirely.
 	Client *http.Client
-	// Timeout covers the whole download, body included: a k0s binary is a few
-	// hundred megabytes, and a stalled connection must not hang bootstrap.
+	// Timeout covers the whole download, body included: the binary is hundreds of
+	// megabytes, and a stalled connection must not hang bootstrap.
 	Timeout time.Duration
-	// Retry is the policy for a transient upstream failure. A release asset
-	// comes from a public CDN on a first run, and one 5xx there must not fail
-	// an install the operator cannot fix from this side. Zero means box's
-	// policy (four attempts, 1s/2s/4s); a test replaces the sleeper so the
-	// backoff costs no time.
+	// Retry is the policy for a transient upstream failure: one 5xx from a public CDN
+	// must not fail an install the operator cannot fix. Zero is box's policy (four
+	// attempts, 1s/2s/4s); a test replaces the sleeper.
 	Retry fetch.Policy
 }
 
-// client is what one fetch goes through: box's client, with the retrying
-// transport, unless a test supplied its own.
+// client is box's client with the retrying transport, unless a test supplied one.
 func (d HTTPDownloader) client() *http.Client {
 	if d.Client != nil {
 		return d.Client
@@ -94,11 +86,9 @@ func (d HTTPDownloader) Fetch(ctx context.Context, url string) (io.ReadCloser, e
 	return resp.Body, nil
 }
 
-// withoutMethodAndURL drops the wrapper net/http puts around a transport
-// error ("Get \"https://…\": …") when box's retrying transport already said
-// what happened. That sentence names the URL and the attempt count, and box
-// does not say it twice; any other failure keeps the wrapper, which names the
-// method and the URL.
+// withoutMethodAndURL drops net/http's transport-error wrapper when box's retrying
+// transport already said what happened, with the URL and attempt count. Any other
+// failure keeps the wrapper.
 func withoutMethodAndURL(err error) error {
 	var uerr *url.Error
 	if !errors.As(err, &uerr) {
@@ -121,23 +111,21 @@ func (ExecRunner) Run(ctx context.Context, path string, args ...string) ([]byte,
 	return cmd.CombinedOutput()
 }
 
-// APIReadiness asks the cluster box just started, through the admin kubeconfig
-// k0s wrote, whether it can serve.
+// APIReadiness asks the cluster box just started, through the admin kubeconfig k0s
+// wrote, whether it can serve.
 //
-// /readyz alone is not the question box needs answered: it turns true a moment
-// before the node object exists, and the decision that runs next refuses a
-// cluster that lists no nodes. So this waits for both: readyz, and one node
-// whose Ready condition is true.
+// /readyz alone is not the answer: it turns true a moment before the node object
+// exists, and the next decision refuses a cluster listing no nodes. So it waits for
+// both: readyz, and one node whose Ready condition is true.
 type APIReadiness struct {
 	// ConfigPath is the admin kubeconfig. Empty means K0sAdminConfig.
 	ConfigPath string
-	// Timeout bounds one attempt. Zero means 10s.
+	// Timeout bounds one attempt; zero means 10s.
 	Timeout time.Duration
 }
 
-// Ready performs one attempt: read the kubeconfig, hit /readyz, then list
-// nodes. The kubeconfig is re-read every attempt because k0s may still be
-// writing its PKI the first time box asks.
+// Ready performs one attempt: read the kubeconfig, hit /readyz, list nodes. The
+// kubeconfig is re-read each attempt, since k0s may still be writing its PKI.
 func (a APIReadiness) Ready(ctx context.Context) error {
 	client, base, err := a.client()
 	if err != nil {
@@ -163,10 +151,9 @@ func (a APIReadiness) Ready(ctx context.Context) error {
 	return fmt.Errorf("the node is not Ready yet")
 }
 
-// NodeIPs reads the InternalIPs the nodes registered. It is asked once, after
-// Ready said yes, to check the node took the address box pinned -- a kubelet
-// that ignored --node-ip would still be Ready, and the failure would only show
-// up later as packets that fragment.
+// NodeIPs reads the InternalIPs the nodes registered, once after Ready: a kubelet
+// that ignored --node-ip would still be Ready, and the failure would surface later as
+// packets that fragment.
 func (a APIReadiness) NodeIPs(ctx context.Context) ([]string, error) {
 	client, base, err := a.client()
 	if err != nil {
@@ -212,8 +199,7 @@ func (a APIReadiness) client() (*http.Client, string, error) {
 	return client, base, nil
 }
 
-// nodeList is the part of /api/v1/nodes box reads: whether a node is Ready,
-// and the addresses it registered.
+// nodeList is the part of /api/v1/nodes box reads: Ready, and registered addresses.
 type nodeList struct {
 	Items []struct {
 		Status struct {
@@ -272,7 +258,7 @@ func get(ctx context.Context, client *http.Client, url string) ([]byte, int, err
 	return body, resp.StatusCode, nil
 }
 
-// firstLine keeps a server error short enough to sit inside box's sentence.
+// firstLine keeps a server error short enough for box's sentence.
 func firstLine(body []byte) string {
 	line := strings.TrimSpace(string(body))
 	if i := strings.IndexByte(line, '\n'); i >= 0 {

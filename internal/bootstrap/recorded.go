@@ -5,17 +5,14 @@ import (
 	"fmt"
 )
 
-// finishRecorded is the decision for a cluster a record names. The record is a
-// cached decision, not evidence: it says which cluster box chose, who owns its
-// lifecycle, the platform modes and the GatewayClass, but the cluster itself is
-// probed again so a re-run plans against what is there now. That is what makes
-// a second bootstrap repair a first run whose platform apply failed: the
-// missing Envoy Gateway, Gateway API CRDs, MetalLB and admission policy are
-// installs from the probe's outcomes, not the record's old configuration.
+// finishRecorded is the decision for a cluster a record names. The record is a cached
+// decision, not evidence: it says which cluster, who owns its lifecycle, the platform
+// modes and the class, while the cluster is probed again so a re-run plans against
+// what is there now. That is what lets a second bootstrap repair a first run whose
+// platform apply failed: the missing pieces are installs from the probe's outcomes.
 //
-// Nothing here writes the record. The decision a record holds has not changed;
-// only its cached view of the cluster has, and rewriting it would hide a drift
-// the next run still has to check.
+// Nothing here writes the record: its decision has not changed, only its cached view,
+// and rewriting that would hide a drift the next run still checks.
 func (d *Decision) finishRecorded(ctx context.Context, obs clusterProbes, rec *Record, how string) Result {
 	plat, err := obs.probe.Platform(ctx)
 	if err != nil {
@@ -56,28 +53,21 @@ func (d *Decision) finishRecorded(ctx context.Context, obs clusterProbes, rec *R
 	return res
 }
 
-// recordedClass keeps the class the record chose while the cluster still
-// serves it: the class is a decision, and asking again could silently move a
-// box's routes, so the record wins over a second look. The cluster is still
-// the evidence, though, so the class must be Accepted and must belong to Envoy
-// Gateway, the only implementation box supports. A recorded class that is no
-// longer Accepted stops with the same refusal a chosen class gets; so does one
-// for another controller, or one that is gone while another implementation is
-// serving the cluster, because box will not move a box's routes to a different
-// implementation on its own.
+// recordedClass keeps the class the record chose while the cluster serves it: a class
+// is a decision, and asking again could silently move a box's routes. The cluster is
+// the evidence, so the class must be Accepted and Envoy Gateway's; one that is not, or
+// is gone while another implementation serves, stops rather than moving routes.
 //
-// The one vanished class box repairs is its own `eg`, and only when the
-// platform decision found no accepted class at all: then the implementation
-// box installed is what is missing, and the install below writes the class back
-// with it. Managed mode owns its implementation and always writes `eg`.
+// The one vanished class box repairs is its own `eg`, and only when no class is
+// accepted at all: what box installed is missing, and the install writes it back.
+// Managed mode owns its implementation and always writes `eg`.
 func (d *Decision) recordedClass(rec *Record, probe PlatformProbe, gw ComponentResult) (GatewayChoice, string) {
 	if rec.Platform.Gateway == ModeManaged {
 		return GatewayChoice{Class: EnvoyGatewayClass, BoxInstalls: true}, ""
 	}
 	class := rec.GatewayClass
 	if class == "" {
-		// Records written before box recorded the class came from a box that
-		// only ever wrote its own.
+		// Older records came from a box that only ever wrote its own class.
 		class = EnvoyGatewayClass
 	}
 	for _, c := range probe.Classes {

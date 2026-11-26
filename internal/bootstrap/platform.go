@@ -8,13 +8,11 @@ import (
 type PlatformMode string
 
 const (
-	// ModeAuto probes for a working instance; uses it if found, installs one
-	// if not.
+	// ModeAuto probes for a working instance: uses it if found, installs one if not.
 	ModeAuto PlatformMode = "auto"
 	// ModeManaged is always box's own: box installs, upgrades and removes it.
 	ModeManaged PlatformMode = "managed"
-	// ModeExternal is the user's: box never installs or touches it, only
-	// verifies it.
+	// ModeExternal is the user's: box only verifies it.
 	ModeExternal PlatformMode = "external"
 )
 
@@ -36,7 +34,7 @@ const (
 	OutcomePresent ProbeOutcome = "present"
 	// OutcomeAbsent: no working instance.
 	OutcomeAbsent ProbeOutcome = "absent"
-	// OutcomeConflict: something conflicting is present (box stops in every mode).
+	// OutcomeConflict: something conflicting is present; box stops in every mode.
 	OutcomeConflict ProbeOutcome = "conflict"
 	// OutcomeNotProbed: the capability was not probed (e.g. dry run).
 	OutcomeNotProbed ProbeOutcome = "not-probed"
@@ -66,14 +64,12 @@ type PlatformProbe struct {
 	LoadBalancer ProbeOutcome
 	Gateway      ProbeOutcome
 	CertManager  ProbeOutcome
-	// Classes is every GatewayClass the cluster serves, accepted or not. The
-	// Gateway outcome above is "present" only when at least one is Accepted;
-	// the classes themselves decide which one box's Gateway attaches to.
+	// Classes is every GatewayClass the cluster serves, accepted or not: the classes
+	// decide which one box's Gateway attaches to.
 	Classes []GatewayClass
-	// CertManagerReason is the probe's own words for a cert-manager it found
-	// but cannot use (Gateway API off, too old, webhook not answering). The
-	// component decision carries it to the operator instead of the generic
-	// "conflicting implementation" line.
+	// CertManagerReason is the probe's own words for a cert-manager it cannot use
+	// (Gateway API off, too old, webhook not answering), carried to the operator
+	// instead of the generic "conflicting implementation" line.
 	CertManagerReason string
 }
 
@@ -98,9 +94,9 @@ var componentSet = []struct {
 	{ComponentCertManager, func(c PlatformConfig) PlatformMode { return c.CertManager }, func(p PlatformProbe) ProbeOutcome { return p.CertManager }},
 }
 
-// decidePlatform resolves each component's mode against its probe outcome. It
-// returns the per-component results and, when any probe found something
-// conflicting — which stops box in every mode — a non-empty stop reason.
+// decidePlatform resolves each component's mode against its outcome, returning the
+// results and, for anything conflicting (which stops box in every mode), a stop
+// reason.
 func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult, string) {
 	out := make([]ComponentResult, 0, len(componentSet))
 	for _, c := range componentSet {
@@ -111,9 +107,8 @@ func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult,
 		}
 		cr.Action, cr.Reason = decideComponent(cr.Component, cr.Mode, cr.Outcome)
 		if cr.Component == ComponentCertManager && cr.Outcome == OutcomeConflict && probe.CertManagerReason != "" {
-			// The probe saw what is wrong (Gateway API off, an old version,
-			// a webhook that does not answer); naming the setting is the
-			// operator's next move.
+			// The probe saw what is wrong; naming the setting is the operator's next
+			// move.
 			cr.Reason = probe.CertManagerReason
 		}
 		out = append(out, cr)
@@ -126,10 +121,9 @@ func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult,
 	return out, ""
 }
 
-// decideComponent maps a component, a mode and a probe outcome to an action.
-// The LoadBalancer is the one capability a read-only probe cannot settle: what
-// it has to look at is the Gateway box itself writes, so "not probed" there
-// means "settled after the confirm", never "unknown".
+// decideComponent maps a component, mode and outcome to an action. LoadBalancer is
+// the one capability a read-only probe cannot settle -- it looks at the Gateway box
+// writes -- so "not probed" there means "settled after the confirm".
 func decideComponent(component PlatformComponent, mode PlatformMode, out ProbeOutcome) (action, reason string) {
 	switch out {
 	case OutcomeConflict:
@@ -160,10 +154,9 @@ func decideComponent(component PlatformComponent, mode PlatformMode, out ProbeOu
 	}
 }
 
-// deferredLoadBalancer is what box can say about the address layer before the
-// Gateway exists to ask: in auto mode MetalLB is installed unless the Gateway
-// gets an address without it, in managed mode it is installed regardless, in
-// external mode the Gateway's address verifies the operator's own.
+// deferredLoadBalancer is what box can say about the address layer before the Gateway
+// exists: auto installs MetalLB unless the Gateway gets an address without it, managed
+// installs regardless, external verifies the operator's own.
 func deferredLoadBalancer(mode PlatformMode) (action, reason string) {
 	switch mode {
 	case ModeManaged:

@@ -152,9 +152,8 @@ func (f *fakeInstaller) Install(_ context.Context, p InstallPlan) error {
 	return f.err
 }
 
-// releasePins is the chart release a test's bootstrap reads its platform pins
-// from. It is a function because the real one is a pull: the decision only asks
-// on the branch that installs.
+// releasePins is the pins a test's bootstrap reads; a function because the real one is
+// a pull, asked only on the install branch.
 func releasePins(p release.Versions) func(context.Context) (release.Versions, error) {
 	return func(context.Context) (release.Versions, error) { return p, nil }
 }
@@ -166,8 +165,7 @@ func newDecision(src *fakeSource, prober *fakeProber, host *fakeHost, recs *fake
 		Records: recs,
 		Install: inst,
 		Pins:    releasePins(pins),
-		// A clean host's uplink, fixed: the tests must not read the machine
-		// they run on. A test that cares about the host's routes replaces it.
+		// A fixed uplink, so no test reads the machine it runs on.
 		Net: testNet{uplink: Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500}},
 	}
 	if prober != nil {
@@ -300,8 +298,8 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 // ---- candidate: /version answers but SSAR denies -> not usable ----
 
 func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
-	// A user-owned kubeconfig is often a remote cluster: unusable, it is a skip
-	// rather than evidence that this host holds a broken installation.
+	// A user-owned kubeconfig is often a remote cluster: unusable, it is a skip, not
+	// evidence of a broken installation.
 	const candidate = "/home/example/.kube/config"
 
 	t.Run("falls through to clean host", func(t *testing.T) {
@@ -365,10 +363,9 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 
 // ---- a dead distribution kubeconfig blocks; a dead user one does not ----
 
-// A distribution writes its admin kubeconfig only after it installed a
-// cluster, so one that exists but no longer answers is a broken installation.
-// Installing k0s on top would be a second cluster over the first. The finding
-// names it alongside any host evidence, and the skip line keeps the reason.
+// A distribution writes its admin kubeconfig only after installing a cluster, so one
+// that no longer answers is a broken installation: installing over it would be a
+// second cluster. The finding names it, and the skip keeps the reason.
 func TestBootstrapDeadDistributionKubeconfigStops(t *testing.T) {
 	const candidate = "/etc/kubernetes/admin.conf"
 	trace := &[]string{}
@@ -398,8 +395,7 @@ func TestBootstrapDeadDistributionKubeconfigStops(t *testing.T) {
 	if len(res.Skips) != 1 || !strings.Contains(res.Skips[0], candidate) || !strings.Contains(res.Skips[0], "connection refused") {
 		t.Errorf("skips = %v, want the skip line kept with its reason", res.Skips)
 	}
-	// No gate after a side effect: nothing is capability-probed, installed or
-	// recorded.
+	// No gate after a side effect: nothing is probed, installed or recorded.
 	if prober.calls["platform"] != 0 {
 		t.Errorf("platform probed before the refusal: %v", prober.calls)
 	}
@@ -411,8 +407,8 @@ func TestBootstrapDeadDistributionKubeconfigStops(t *testing.T) {
 	}
 }
 
-// ~/.kube/config is not distribution-owned: it is often a remote cluster, so
-// an unusable one stays a printed skip and the clean-host install goes ahead.
+// ~/.kube/config is not distribution-owned, so an unusable one is a skip and the
+// clean-host install goes ahead.
 func TestBootstrapDeadUserKubeconfigInstalls(t *testing.T) {
 	const candidate = "/home/example/.kube/config"
 	src := &fakeSource{
@@ -442,9 +438,8 @@ func TestBootstrapDeadUserKubeconfigInstalls(t *testing.T) {
 	}
 }
 
-// A dry run refuses to probe a remote cluster (ErrRemoteCluster), even at a
-// distribution path reached through a symlink or a copied file. That guard is
-// not evidence of a broken install and must not block the plan.
+// A dry run refuses a remote cluster even at a distribution path reached through a
+// symlink: that guard is not evidence and must not block the plan.
 func TestBootstrapRemoteCandidateSkipStillPlans(t *testing.T) {
 	const candidate = "/etc/rancher/k3s/k3s.yaml"
 	src := &fakeSource{
@@ -600,8 +595,7 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 				if len(inst.plans) != 1 || inst.plans[0].Version != pins.K0s {
 					t.Errorf("installer should get one plan for %s: %v", pins.K0s, inst.plans)
 				}
-				// The plan is all a dry run produces: the cluster it describes
-				// does not exist yet, so nothing can be probed or recorded.
+				// The plan is all a dry run produces: the cluster does not exist yet.
 				if len(recs.saved) != 0 {
 					t.Errorf("a dry run recorded a cluster it did not install")
 				}
