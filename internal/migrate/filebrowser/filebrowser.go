@@ -207,10 +207,8 @@ func newMapping(configured []source, users []userRow) *mapping {
 		configured: map[string]bool{},
 		stored:     map[string]bool{},
 	}
-	known := map[string]bool{}
 	for _, c := range configured {
 		if c.path != "" {
-			known[c.path] = true
 			m.configured[c.path] = true
 		}
 	}
