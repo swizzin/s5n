@@ -10,12 +10,9 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// userTable is qui's own account table at v1.35.0
-// (internal/database/migrations/001_initial_schema.sql:2-9): exactly one row,
-// and the row's id is 1 by the schema's own CHECK. api_keys and sessions carry
-// no user column, and the two tables that do carry a user_id -- dashboard
-// settings and filter views -- refer to it by that value (026 and 085), so a
-// rename in place keeps every one of them pointing at the one account.
+// userTable is qui's account table at v1.35.0 (001_initial_schema.sql:2-9): one
+// row, id 1 by the schema's CHECK. dashboard settings and filter views carry its
+// user_id (026, 085), so a rename in place keeps them pointing at the account.
 const userTable = `
 CREATE TABLE user (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -31,7 +28,7 @@ CREATE TABLE dashboard_settings (
 );
 `
 
-// withUser is the fixture set up with qui's account table in it, holding rows.
+// withUser is the fixture with the account table and its rows.
 func withUser(t *testing.T, rows string) rewrite.Input {
 	t.Helper()
 	in := setup(t)
@@ -39,8 +36,7 @@ func withUser(t *testing.T, rows string) rewrite.Input {
 	return in
 }
 
-// userRows is the account table and the row that points at it, as the file has
-// them now.
+// userRows is the account table and the row pointing at it.
 func userRows(t *testing.T, dir string) (string, []int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -69,12 +65,9 @@ func userRows(t *testing.T, dir string) (string, []int64) {
 	return name, ids
 }
 
-// TestTheAccountsNameBecomesBoxs: qui allows one account, and the chart's init
-// container signs in as box's own (rewrite.WiringAccount) on every start. The
-// source's account is the one row there is, so the migration renames it in
-// place, and the rows that refer to it by id keep referring to it: the app's own
-// settings stay the migrated user's, and the init writes the release Secret's
-// password onto the account as on any start.
+// TestTheAccountsNameBecomesBoxs: the init signs in as rewrite.WiringAccount, so
+// the one row is renamed in place and rows referring to it by id keep pointing at
+// it; the init then writes the release Secret's password onto it.
 func TestTheAccountsNameBecomesBoxs(t *testing.T) {
 	ctx := context.Background()
 	in := withUser(t, `INSERT INTO user (id, username, password_hash) VALUES (1, 'source-login', 'a-hash');
@@ -117,8 +110,7 @@ func TestTheAccountsNameBecomesBoxs(t *testing.T) {
 	}
 }
 
-// TestAnAccountAlreadyBoxsIsNotRenamed: a source that already signs in as box's
-// account needs nothing.
+// TestAnAccountAlreadyBoxsIsNotRenamed: nothing to do.
 func TestAnAccountAlreadyBoxsIsNotRenamed(t *testing.T) {
 	in := withUser(t, `INSERT INTO user (id, username, password_hash) VALUES (1, 's5n', 'a-hash');`)
 	rep, err := rewriter{}.Check(context.Background(), in)
@@ -136,9 +128,7 @@ func TestAnAccountAlreadyBoxsIsNotRenamed(t *testing.T) {
 	}
 }
 
-// TestNoAccountIsNothingToDo: a source whose user table is empty (or whose
-// database predates the table) is one the init container gives an account on the
-// first start, so there is nothing here to rename.
+// TestNoAccountIsNothingToDo: the init gives an empty or absent table its account.
 func TestNoAccountIsNothingToDo(t *testing.T) {
 	ctx := context.Background()
 	for name, sql := range map[string]string{
@@ -159,13 +149,11 @@ func TestNoAccountIsNothingToDo(t *testing.T) {
 	}
 }
 
-// TestTwoAccountsAreRefused: qui's schema allows one row and the app refuses a
-// second, so a database holding two is not one this migration understands. It
-// stops naming the count and the app rather than pick one.
+// TestTwoAccountsAreRefused: a two-row database is not one this migration
+// understands, so it stops naming the count rather than pick one.
 func TestTwoAccountsAreRefused(t *testing.T) {
 	in := withUser(t, "")
-	// The CHECK on the id is the app's own guard; this fixture drops it to
-	// reproduce a database that has two rows anyway, which is what a hand-edited
+	// The id CHECK is the app's guard; dropping it reproduces what a hand-edited
 	// file or an older schema can be.
 	exec(t, in.Dir, `DROP TABLE user;
 		CREATE TABLE user (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);

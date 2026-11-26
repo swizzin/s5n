@@ -17,9 +17,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// configFixture is a config.toml shaped like qui's own template
-// (internal/config/config.go: wDefaultConfig at v1.35.0): root settings only,
-// baseUrl commented out, everything else a comment.
+// configFixture is qui's own template shape (config.go: wDefaultConfig at
+// v1.35.0): root settings only, baseUrl commented out.
 const configFixture = `# config.toml - Auto-generated on first run
 
 # Hostname / IP
@@ -45,11 +44,8 @@ sessionSecret = "synthetic-secret"
 backupDir = "/srv/apps/qui/backups"
 `
 
-// dbFixture is the subset of qui's schema this package reads, shaped after the
-// migrations at v1.35.0: the string pool (010), instances (010/040), the Arr
-// instances (043), the dir scanner (053), the orphan scanner (037), external
-// programs (011), instance backups (009) and the cache tables those features
-// fill. Values that qui interns are read through their *_id columns.
+// dbFixture is the schema subset this package reads, after the v1.35.0
+// migrations; interned values are read through their *_id columns.
 const dbFixture = `
 CREATE TABLE string_pool (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,17 +225,15 @@ func setup(t *testing.T) rewrite.Input {
 	return rewrite.Input{App: "qui", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
 }
 
-// runs is every instance the fixture plan has of each catalog app: one of each,
-// which is what a proposal needs.
+// runs is one instance of each catalog app, which is what a proposal needs.
 func runs() map[string][]string {
 	return map[string][]string{
 		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "qui": {"qui"},
 	}
 }
 
-// TestUnsettledInstanceProposesTheBoxsQBittorrent: qui's instance column is a
-// qBittorrent, so an address nothing settles there can only be the box's, when
-// the box runs exactly one. Two instances and nothing is proposed.
+// TestUnsettledInstanceProposesTheBoxsQBittorrent: an unsettled instance address
+// is the box's when it runs one; two instances and nothing is proposed.
 func TestUnsettledInstanceProposesTheBoxsQBittorrent(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -331,9 +325,7 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		t.Errorf("path_mappings = %+v", mappings)
 	}
 
-	// The interned value is a new pool row, not an edited old one: the old text
-	// may be referenced from elsewhere, and the app's own interning only ever
-	// appends.
+	// A new pool row, not an edited one: the old text may be referenced elsewhere.
 	if !poolHas(t, in.Dir, "http://qbittorrent:8080") {
 		t.Error("the rewritten instance host was not interned")
 	}
@@ -352,7 +344,7 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		}
 	}
 
-	// A second pass has nothing left to do, and no address is unclassified.
+	// A second pass has nothing to do, and no address is unclassified.
 	rep2, err := rewriter{}.Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -365,9 +357,8 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 	}
 }
 
-// TestDataDirOutsideTheConfigIsAGap: qui's database sits wherever dataDir says.
-// A dataDir no rule covers is a gap in the plan like any other path, and the run
-// stops before it writes.
+// TestDataDirOutsideTheConfigIsAGap: a dataDir no rule covers is a gap, and the
+// run stops before it writes.
 func TestDataDirOutsideTheConfigIsAGap(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -402,8 +393,8 @@ func TestDataDirOutsideTheConfigIsAGap(t *testing.T) {
 	}
 }
 
-// TestDataDirInsideTheConfigIsFollowed: a dataDir under the staged config is
-// where the database is, and it moves with the rest.
+// TestDataDirInsideTheConfigIsFollowed: the database is under the staged config
+// and moves with the rest.
 func TestDataDirInsideTheConfigIsFollowed(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -458,9 +449,8 @@ func TestCheckWritesNothing(t *testing.T) {
 	}
 }
 
-// TestInstanceURLResolvesByItsPath: an instance's host column is a whole URL, so
-// its path says which app it is on a host that serves several, and the box's own
-// address replaces the URL the source stored -- its path included.
+// TestInstanceURLResolvesByItsPath: the host column is a whole URL whose path says
+// which app it is, and the box's address replaces it, path included.
 func TestInstanceURLResolvesByItsPath(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -471,8 +461,7 @@ func TestInstanceURLResolvesByItsPath(t *testing.T) {
     path: /qui
     app: qui
 `))
-	// The instance's own path under the app's: coverage is what settles it, and
-	// the rest of the stored path is the source's shape.
+	// Coverage settles it; the rest of the stored path is the source's shape.
 	exec(t, in.Dir, `INSERT INTO string_pool (value) VALUES ('https://panel.example.com/qbittorrent/torrents');
 		UPDATE instances SET host_id = (SELECT id FROM string_pool WHERE value = 'https://panel.example.com/qbittorrent/torrents') WHERE id = 1;`)
 	rep, err := rewriter{}.Check(ctx, in)
@@ -537,8 +526,7 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 }
 
-// TestServiceNameConnection: the Arr connection stores a Service's short name,
-// and the plan's host rule is what settles it.
+// TestServiceNameConnection: the host rule settles a Service's short name.
 func TestServiceNameConnection(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
@@ -574,7 +562,7 @@ func readConfig(t *testing.T, dir string) map[string]string {
 	return out
 }
 
-// query reads the columns the rewriter changes, keyed "table.column".
+// query reads the changed columns, keyed "table.column".
 func query(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	ctx := context.Background()
@@ -642,8 +630,7 @@ func exec(t *testing.T, dir, sql string) {
 	}
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()

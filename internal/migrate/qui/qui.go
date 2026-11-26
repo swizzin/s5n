@@ -1,30 +1,12 @@
-// Package qui rewrites the directories and connections qui stored, and drops
-// the caches that a new path invalidates.
-//
-// qui keeps everything under /config (WORKDIR and VOLUME /config, and
-// XDG_CONFIG_HOME=/config is passed straight through by GetDefaultConfigDir,
-// internal/config/config.go:778-800 at v1.35.0): a config.toml, and qui.db
-// beside it unless dataDir moves it (GetDatabasePath, :923-925).
-//
-// The database is the interesting half. qui interns repeated strings into a
-// string_pool table: the columns that use it hold an integer reference
-// (internal/database/migrations/010_add_files_cache_and_string_interning.sql),
-// and a value is inserted once and referenced by id. So a rewritten path has to
-// be interned first and the row pointed at the new id, never edited in place in
-// string_pool -- the same text can be referenced from another table, and
-// changing it there would rewrite that too. The app itself does exactly this
-// (internal/dbinterface's InternStrings, and the pool is only ever appended to
-// and cleaned when unreferenced), so a rewrite through the same two statements
-// is safe.
-//
-// Only two of the path-bearing columns are interned: instances.host and
-// arr_instances.base_url. The rest are plain TEXT: the dir-scan and orphan-scan
-// settings, the external programs' paths, and the backup directories
-// (053_add_dir_scan.sql:35-36, 037_add_orphan_scan.sql:10, 011_add_external_programs.sql:7-11,
-// 009_add_instance_backups.sql:15, 040_move_hardlink_to_instance.sql). The scan
-// caches and run rows are rows a scan rebuilds: they are dropped and counted,
-// which is what makes the rewritten directories consistent instead of matching
-// a cache of files found under the old ones.
+// Package qui rewrites the directories and connections qui stored, and drops the
+// caches a new path invalidates. Everything lives under /config
+// (internal/config/config.go:778-800 at v1.35.0): config.toml and qui.db, unless
+// dataDir moves it. The database interns repeated strings into string_pool, so a
+// rewritten value is interned and the row pointed at the new id, never edited in
+// place -- the same text can be referenced from another table (InternStrings).
+// Only instances.host and arr_instances.base_url are interned; the scan caches are
+// emptied, because a cache of files found under a moved directory is wrong even
+// when every path in it is rewritten.
 package qui
 
 import (
@@ -50,29 +32,24 @@ func init() { rewrite.Register("qui", rewriter{}) }
 const (
 	configName = "config.toml"
 	dbName     = "qui.db"
-	// bindAddr is what a pod needs; qui's default is localhost, which inside a
-	// pod answers nobody but itself (internal/config/config.go:356).
+	// bindAddr is what a pod needs; qui's localhost default answers nobody but
+	// itself (internal/config/config.go:356).
 	bindAddr = "0.0.0.0"
-	// appQBittorrent is the app qui's instance column names: every instance qui
-	// manages is a qBittorrent.
+	// appQBittorrent is the app qui's instance column names.
 	appQBittorrent = "qbittorrent"
 
-	// tableUser is qui's account table, one row by the schema's own CHECK
-	// (001_initial_schema.sql:2-9 at v1.35.0), and keyUsername its name column.
+	// tableUser is qui's account table, one row by the schema's CHECK
+	// (001_initial_schema.sql:2-9 at v1.35.0); keyUsername is its name column.
 	tableUser   = "user"
 	keyUsername = "username"
 )
 
-// configPaths are config.toml's path keys. backupDir is the one the research
-// names (internal/config/config.go:937-950); dataDir and logPath are the same
-// kind of value and are rewritten so a box does not inherit a host directory
-// the seedbox does not have.
+// configPaths are config.toml's path keys (config.go:937-950 for backupDir):
+// rewritten so a box does not inherit a host directory the seedbox lacks.
 var configPaths = []string{"backupDir", "dataDir", "logPath"}
 
-// scanCaches are the tables a scan rebuilds. They are emptied rather than
-// rewritten: a cache of files found under a directory that moved is wrong even
-// when every path in it is rewritten, and qui's own rescan is the fix.
-// Order matters: children before the runs they point at.
+// scanCaches are the tables a scan rebuilds, emptied rather than rewritten;
+// qui's own rescan is the fix. Order matters: children before their runs.
 var scanCaches = []string{
 	"dir_scan_run_injections",
 	"dir_scan_files",
@@ -95,8 +72,7 @@ func (rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, er
 	return run(ctx, in, true)
 }
 
-// work is everything both passes decide, kept in one place so Write cannot
-// drift from the Check before it.
+// work is what both passes decide, so Write cannot drift from its Check.
 type work struct {
 	tomlEdits []tomlEdit
 	dbEdits   []sqlEdit
@@ -171,8 +147,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rewrite.Report, err
 	return rep, nil
 }
 
-// decide reads config.toml and qui.db and builds the work. One function for
-// both passes is what makes Write's changes exactly Check's.
+// decide reads config.toml and qui.db and builds the work, the same for both
+// passes.
 func decide(ctx context.Context, in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Report) (work, error) {
 	var w work
 	edits, err := planTOML(in, end, t, rep)
@@ -209,25 +185,15 @@ func decide(ctx context.Context, in rewrite.Input, end rewrite.Endpoint, t tally
 	return w, nil
 }
 
-// planAccounts makes the source's one account box's own.
-//
-// qui allows exactly one account (001_initial_schema.sql's CHECK (id = 1)), and
-// the chart's init container signs in as s5n.wiringAccount on every start: it
-// creates the account when the table is empty and writes the release Secret's
-// password onto it otherwise. A migrated database therefore has to name its one
-// row that account, or the init's change-password looks for a name the table
-// does not have and the pod never starts. The row keeps its id, which is what
-// the two tables that carry a user_id refer to -- dashboard_settings and
-// filter_views (026 and 085 at v1.35.0, both without a foreign key) -- so the
-// migrated settings stay the one account's. api_keys and sessions carry no user
-// column at all.
-//
-// A table with two rows is not a source this migration understands: qui's own
-// schema refuses the second, so picking one of them would drop an account nobody
-// asked it to drop, and the run stops naming the count.
+// planAccounts makes the source's one account box's own. qui allows exactly one
+// (001_initial_schema.sql's CHECK (id = 1)), and the chart's init signs in as
+// s5n.wiringAccount: a row with another name leaves the init's change-password
+// looking for a name the table lacks, and the pod never starts. The row keeps its
+// id, which dashboard_settings and filter_views (026, 085) carry, so the migrated
+// settings stay the account's. Two rows is not a source this migration
+// understands, so the run stops naming the count.
 func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report, w *work) error {
-	// The table is the app's; a database from before it existed has none, and
-	// then the init container creates the account on the first start.
+	// A database from before the table existed gets the account from the init.
 	ok, err := hasColumn(ctx, db, tableUser, keyUsername)
 	if err != nil {
 		return err
@@ -269,9 +235,8 @@ func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report, w *work)
 	return nil
 }
 
-// databasePath is where qui keeps qui.db: the config directory unless dataDir
-// moves it. The staged copy only holds what was under the config mount, so a
-// dataDir that maps outside it is refused rather than silently skipped.
+// databasePath is qui.db's place: the config directory unless dataDir moves it. A
+// dataDir mapping outside the staged /config is refused, not silently skipped.
 func databasePath(in rewrite.Input, rep *rewrite.Report) (string, error) {
 	path := filepath.Join(in.Dir, configName)
 	raw, err := os.ReadFile(path)
@@ -320,8 +285,7 @@ func underConfig(p string) (string, bool) {
 	return "", false
 }
 
-// planTOML is config.toml: the log, backup and data paths, and the listen
-// settings.
+// planTOML is config.toml: the paths and the listen settings.
 func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Report) ([]tomlEdit, error) {
 	path := filepath.Join(in.Dir, configName)
 	raw, err := os.ReadFile(path)
@@ -367,9 +331,8 @@ func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Repo
 		v, ok := f.get(s.key)
 		switch {
 		case !ok:
-			// qui's template ships baseUrl commented out, and a setting that is
-			// commented out is not a setting: the chart's value is added so the
-			// file agrees with what the release runs.
+			// qui ships baseUrl commented out, which is not a setting: the chart's
+			// value is added so the file agrees with the release.
 			if s.key == "baseUrl" {
 				edits = append(edits, insertString(s.key, s.value))
 				t.add(configName, s.key, s.what)
@@ -412,9 +375,9 @@ func (e dbEdit) apply(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// internEdit points a row at the interned string, inserting it when the pool
-// does not have it yet. The old id is left alone: another row may reference the
-// same text, and qui's own cleanup removes it once nothing does.
+// internEdit points a row at the interned string, inserting it when absent. The
+// old id is left alone: another row may reference the same text, and qui's
+// cleanup removes it once nothing does.
 type internEdit struct {
 	table, column string
 	id            int64
@@ -438,9 +401,8 @@ func (e internEdit) apply(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// planConfigColumns rewrites the plain TEXT path columns: the dir-scan
-// directories and their qBittorrent-side prefix, the orphan scanner's ignore
-// list, the external programs, the backup directory and the hardlink base.
+// planConfigColumns rewrites the plain TEXT path columns: scan directories, the
+// orphan ignore list, external programs, backups and the hardlink base.
 func planConfigColumns(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep *rewrite.Report, w *work) error {
 	type column struct {
 		table, column     string
@@ -517,8 +479,7 @@ func planConfigColumns(ctx context.Context, db *sql.DB, in rewrite.Input, t tall
 	return nil
 }
 
-// rewriteJSONList rewrites a JSON array of paths (qui stores the orphan
-// scanner's ignore list and the external programs' path mappings that way).
+// rewriteJSONList rewrites a JSON array of paths, as qui stores the ignore list.
 func rewriteJSONList(in rewrite.Input, where, raw string) (string, []plan.Uncovered) {
 	var list []string
 	if err := json.Unmarshal([]byte(raw), &list); err != nil {
@@ -547,9 +508,8 @@ func rewriteJSONList(in rewrite.Input, where, raw string) (string, []plan.Uncove
 	return string(out), nil
 }
 
-// rewriteMappings rewrites both sides of every path mapping: `from` is what the
-// client reports and `to` is what qui sees, and both are absolute paths
-// (internal/models/external_program.go:19-22 at v1.35.0).
+// rewriteMappings rewrites both sides of a mapping: `from` is what the client
+// reports, `to` what qui sees (models/external_program.go:19-22 at v1.35.0).
 func rewriteMappings(in rewrite.Input, where, raw string) (string, []plan.Uncovered) {
 	type mapping struct {
 		From string `json:"from"`
@@ -584,16 +544,15 @@ func rewriteMappings(in rewrite.Input, where, raw string) (string, []plan.Uncove
 	return string(out), nil
 }
 
-// planInterned rewrites the two interned connections: the qBittorrent instance
-// URL and the Arr base URLs.
+// planInterned rewrites the two interned connections: instance URL and Arr base
+// URLs.
 func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep *rewrite.Report, w *work) error {
 	for _, c := range []struct{ table, column string }{
 		{"instances", "host"},
 		{"arr_instances", "base_url"},
 	} {
-		// The plain column is gone once a table is interned (010 recreates
-		// these tables without it), so the reference column is what says
-		// whether the table is there at all.
+		// 010 recreates these tables without the plain column, so the reference
+		// column says whether the table is there at all.
 		poolColumn := c.column + "_id"
 		if ok, err := hasColumn(ctx, db, c.table, poolColumn); err != nil {
 			return err
@@ -628,8 +587,7 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 				return fmt.Errorf("qui: %s.%s: %w", c.table, c.column, err)
 			}
 			where := c.table + "." + c.column
-			// The stored value is a whole URL, so its path is part of what says
-			// which app it meant on a host that serves several.
+			// A whole URL: its path settles which app it meant on a host of paths.
 			res := in.ResolveURL(u)
 			switch res.Verdict {
 			case plan.Rewrite:
@@ -651,8 +609,8 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 				rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 					App: in.App, File: dbName, Where: where, Host: u.Hostname(), Port: rewrite.URLPort(u),
 				})
-				// qui's instance column is a qBittorrent by name: an address
-				// nothing settles can only be the box's, when there is one.
+				// The instance column is a qBittorrent by name: an unsettled address
+				// is the box's, when there is one.
 				app := appQBittorrent
 				if c.table == "arr_instances" {
 					app = ""
@@ -720,9 +678,8 @@ func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, err
 	return rows.Next(), rows.Err()
 }
 
-// parseURL is a stored value as the URL it is. qui writes the instance
-// columns from its UI's URL field, so a value with no scheme is refused rather
-// than guessed at.
+// parseURL is a stored URL; qui writes these from its UI's URL field, so one with
+// no scheme is refused.
 func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -748,8 +705,7 @@ func (t tally) add(file, where, what string) {
 	t[[3]string{file, where, what}]++
 }
 
-// addN counts n of one kind at once: a dropped table is one line with its row
-// count, not one line per row.
+// addN counts n at once: a dropped table is one line with its row count.
 func (t tally) addN(file, where, what string, n int) {
 	t[[3]string{file, where, what}] += n
 }
