@@ -1,17 +1,8 @@
-// Package report is the migration report: the page a person reads in full.
-//
-// A migration moves, renames and leaves behind more than anyone reads on the
-// screen while it runs (docs/output.md, rule 7). So the full account goes into
-// one sectioned plain-text file beside the snapshot, readable with `less`, and
-// the screen keeps the counts and one line naming it. The file opens with a
-// short summary -- the numbers a person takes in at a glance -- and then the
-// sections: the apps, the data, every rewritten address, what box decided, its
-// notes, and what stays behind.
-//
-// Nothing here holds a secret: the counts, the paths, the addresses and the
-// reasons are what a plan and a discovery report already carry, and the release
-// Secret's values are never in either. A report is written 0600 beside a
-// snapshot that is 0600, in a directory box makes 0700.
+// Package report is the migration report: a migration leaves behind more than
+// the screen shows (docs/output.md, rule 7), so the full account goes into one
+// sectioned plain-text file beside the snapshot, opened by the summary. Nothing
+// here holds a secret; the file is 0600 beside a 0600 snapshot in a 0700
+// directory.
 package report
 
 import (
@@ -23,12 +14,11 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// Width is the column the report fits: the same 80 every screen and log fits,
-// because the file is read in the terminal it was written for.
+// Width is the column the report fits, the same 80 every screen and log fits.
 const Width = 80
 
-// suffix is what a report beside a snapshot is named with: the snapshot's own
-// name, less its archive suffix, and this.
+// suffix names a report beside a snapshot: the snapshot's name, less its
+// archive suffix.
 const suffix = "-report.txt"
 
 // Row is one line of a section: what the line is about, and the facts that
@@ -55,8 +45,8 @@ type Count struct {
 type Doc struct {
 	// Kind is the snapshot's mode: survey, rehearsal or final.
 	Kind string
-	// Snapshot is the file this report is about. It is named in the first line
-	// and in the file name beside it.
+	// Snapshot is the file this report is about, named in the first line and in
+	// the file name beside it.
 	Snapshot string
 	// Taken is when the source was read.
 	Taken time.Time
@@ -104,15 +94,14 @@ func (d Doc) Text() string {
 	return b.String()
 }
 
-// Name is where a snapshot's report is written: beside it, named for it. It is
-// the read's page -- what discovery found, what its checks settled -- and it is
-// the same text the snapshot carries as its report.txt.
+// Name is the read's page, beside the snapshot and named for it: the same text
+// the snapshot carries as its report.txt.
 func Name(snapshot string) string {
 	return beside(snapshot, suffix)
 }
 
-// applySuffix is a run's own page, written beside the same snapshot: the other
-// half of the migration, so it never replaces the read's.
+// applySuffix is a run's own page beside the same snapshot, so it never replaces
+// the read's.
 const applySuffix = "-apply-report.txt"
 
 // ApplyName is where a run's own report is written: beside the snapshot, named
@@ -130,15 +119,14 @@ func beside(snapshot, suffix string) string {
 	return filepath.Join(filepath.Dir(snapshot), base+suffix)
 }
 
-// Write puts the report beside the snapshot it is about, 0600: it names the
-// source's own paths and addresses, and it is a sibling of a file that holds the
-// source's API keys.
+// Write puts the report beside the snapshot, 0600: it names the source's paths
+// and addresses, beside a file that holds its API keys.
 func Write(path string, d Doc) error {
 	return atomicfile.Write(path, []byte(d.Text()), 0o600)
 }
 
-// writeText writes text at indent, wrapping at Width with the continuation
-// hanging under the text rather than under the rows' names (rule 7).
+// writeText writes text at indent, wrapped at Width with the continuation hanging
+// under the text, not under a row's name (rule 7).
 func writeText(b *strings.Builder, indent int, text string) {
 	for _, line := range Wrap(text, Width-indent) {
 		b.WriteString(strings.Repeat(" ", indent))
@@ -147,9 +135,8 @@ func writeText(b *strings.Builder, indent int, text string) {
 	}
 }
 
-// writeField writes one row: the name padded into the column it lines up in, two
-// columns, and then the facts, wrapped so a reason that does not fit hangs under
-// the facts and not under the name.
+// writeField writes one row: the name padded into its column, two columns, then
+// the facts, wrapped so a long reason hangs under the facts.
 func writeField(b *strings.Builder, indent int, name string, column int, facts string) {
 	head := strings.Repeat(" ", indent)
 	if name != "" {
@@ -162,8 +149,8 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 			b.WriteString(strings.TrimRight(head, " ") + "\n")
 			return
 		}
-		// A name that takes the whole column leaves no room for its facts on the
-		// same line: they go under it, at the row's own indentation, whole.
+		// A name as wide as the column leaves no room for facts: they go under
+		// it.
 		if Cols(head)+2+Cols(facts) > Width && width > column {
 			b.WriteString(strings.TrimRight(head, " ") + "\n")
 			head = strings.Repeat(" ", indent+2)
@@ -174,10 +161,8 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	if facts == "" {
 		return
 	}
-	// A row with no name is its facts, and its continuation hangs two columns
-	// further in: a wrapped line that started at the row's own indent would read
-	// as another row (a reader's eye, and every tool that joins a wrapped row
-	// back up).
+	// A row with no name is its facts, its continuation two columns further in:
+	// one starting at the row's indent would read as another row.
 	hang := Cols(head)
 	if name == "" {
 		hang += 2
@@ -191,13 +176,12 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	}
 }
 
-// Cols is how many columns s takes on a terminal: one per character, so an
-// arrow or a middle dot (three bytes) is one column, as a person sees it.
+// Cols is how many columns s takes on a terminal: one per character, so a
+// multi-byte arrow is one column.
 func Cols(s string) int { return utf8.RuneCountInString(s) }
 
-// Wrap breaks text into lines of at most width columns, never inside a word: a
-// path or an address that does not fit goes on a line of its own, whole, because
-// half a path is a different path.
+// Wrap breaks text into lines of at most width columns, never inside a word: half
+// a path is a different path.
 func Wrap(text string, width int) []string {
 	if width < 1 {
 		width = 1
@@ -231,7 +215,7 @@ func widestLabel(counts []Count) int {
 }
 
 // widestRow is the width of a section's name column, capped so one long name
-// does not push every fact off the column it lines up in.
+// does not push every fact out of line.
 func widestRow(rows []Row) int {
 	const cap = 24
 	w := 0
@@ -251,9 +235,8 @@ func pad(s string, width int) string {
 	return s
 }
 
-// glueSeparators keeps a middle dot on the line of the fact before it: a wrapped
-// line that started with "·" would read as a row of its own, so the dot ends
-// the line it follows and the next line starts with a fact.
+// glueSeparators keeps a middle dot on the line of the fact before it, so a
+// wrapped line never starts with one.
 func glueSeparators(words []string) []string {
 	out := make([]string, 0, len(words))
 	for _, w := range words {

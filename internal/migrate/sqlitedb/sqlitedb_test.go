@@ -46,8 +46,8 @@ func TestReadOnlyCannotWriteAndReadWriteCan(t *testing.T) {
 	}
 }
 
-// mustCreate leaves an empty file so open's existence check passes for the
-// seeding handle; SQLite treats an empty file as an empty database.
+// mustCreate leaves an empty file, which SQLite treats as an empty database, so
+// open's existence check passes.
 func mustCreate(t *testing.T, path string) string {
 	t.Helper()
 	if err := os.WriteFile(path, nil, 0o600); err != nil {

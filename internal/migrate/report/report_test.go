@@ -1,9 +1,7 @@
 package report
 
-// report_test.go is the migration report's golden: the file a person reads in
-// full, section by section, from a document the two commands build. It pins the
-// shape -- the summary first, lowercase headings, columns, 80 columns -- and the
-// file's name beside its snapshot.
+// report_test.go is the report's golden: the shape (summary first, lowercase
+// headings, columns, 80 columns) and the file's name beside its snapshot.
 
 import (
 	"os"
@@ -13,9 +11,7 @@ import (
 	"time"
 )
 
-// doc is one finished report, the way `box migrate cutover` builds it: a source
-// read on one day, six apps, the data renamed onto box's layout, three addresses
-// left as they were, and a client the box cannot run.
+// doc is one finished report as `box migrate cutover` builds it.
 func doc() Doc {
 	return Doc{
 		Kind:     "final",
@@ -63,9 +59,8 @@ func doc() Doc {
 	}
 }
 
-// TestTheReportIsThePageAPersonReads is the golden: the summary a person takes
-// in at a glance, then the sections, every row in its column, nothing wrapped
-// inside a path.
+// TestTheReportIsThePageAPersonReads is the golden: every row in its column,
+// nothing wrapped inside a path.
 func TestTheReportIsThePageAPersonReads(t *testing.T) {
 	want := `s5n migration report · final · migrate-20261123T045038Z-final.tar.gz
 read 2026-11-23 04:50 UTC by box 0.6.2
@@ -139,16 +134,13 @@ func TestEveryLineFitsTheColumn(t *testing.T) {
 			t.Errorf("%d columns: %q", len(line), line)
 		}
 	}
-	// A word wider than the column is kept whole rather than split: half a path
-	// is a different path.
 	if !strings.Contains(d.Text(), "  /a/path/that/is/longer/than/the/whole/column/by/some/characters/and/must/not/be/broken\n") {
 		t.Errorf("the long path was broken up:\n%s", d.Text())
 	}
 }
 
-// TestTheReportSitsBesideItsSnapshot: the file is named for the snapshot it
-// explains, in the same directory, 0600, and it holds the snapshot's name so a
-// person reading a copy knows which run it is.
+// TestTheReportSitsBesideItsSnapshot: named for the snapshot, in its directory,
+// 0600, holding the snapshot's name.
 func TestTheReportSitsBesideItsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	snapshot := filepath.Join(dir, "migrate-20261123T045038Z-survey.tar.gz")
@@ -177,8 +169,6 @@ func TestTheReportSitsBesideItsSnapshot(t *testing.T) {
 	}
 }
 
-// TestAnEmptySectionIsNotAHeading: a report with nothing to say about a section
-// leaves it out rather than printing a heading over nothing.
 func TestAnEmptySectionIsNotAHeading(t *testing.T) {
 	d := Doc{Sections: []Section{{"notes", nil}, {"apps", []Row{{"sonarr", []string{"from sonarr in legacy"}}}}}}
 	text := d.Text()
@@ -190,8 +180,7 @@ func TestAnEmptySectionIsNotAHeading(t *testing.T) {
 	}
 }
 
-// TestTheRunsPageDoesNotReplaceTheReads: the snapshot's report is the read's, and
-// a run that applies it writes its own beside the same file rather than over it.
+// TestTheRunsPageDoesNotReplaceTheReads: a run's page sits beside the read's.
 func TestTheRunsPageDoesNotReplaceTheReads(t *testing.T) {
 	snapshot := "/var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz"
 	if got, want := Name(snapshot), "/var/lib/s5n/migrate/migrate-20261123T045038Z-final-report.txt"; got != want {

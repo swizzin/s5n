@@ -1,10 +1,6 @@
-// Package sqlitedb opens the SQLite databases the migrated apps keep, for the
-// rewriters and for discovery. It is the one place the driver is chosen: a
-// pure Go one, so box stays a static binary with no cgo.
-//
-// It is not for Plex. Plex's library database uses ICU tokenizers compiled
-// into Plex's own SQLite, which no stock build has, so Plex is only ever
-// written through the `Plex SQLite` shipped in the pinned Plex image.
+// Package sqlitedb opens the migrated apps' SQLite databases, the one place the
+// driver is chosen (pure Go, so box stays static with no cgo). Plex is not here:
+// its library uses ICU tokenizers only Plex's own SQLite has.
 package sqlitedb
 
 import (
@@ -17,17 +13,15 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
-// OpenReadOnly opens an existing database without any way to change it: the
-// check pass and discovery read a copy, and a read that could write (a WAL
-// checkpoint, a journal recovery) would make the copy differ from what was
-// checked.
+// OpenReadOnly opens an existing database with no way to change it: a read that
+// could write (a WAL checkpoint, a journal recovery) would make the copy differ
+// from what was checked.
 func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
 	return open(ctx, path, "ro")
 }
 
-// OpenReadWrite opens an existing database for the write pass. It never
-// creates one: a rewriter that finds no database where it expected one has
-// read the wrong directory.
+// OpenReadWrite opens an existing database for the write pass, never creating
+// one: no database where one was expected means the wrong directory.
 func OpenReadWrite(ctx context.Context, path string) (*sql.DB, error) {
 	return open(ctx, path, "rw")
 }
@@ -47,8 +41,8 @@ func open(ctx context.Context, path, mode string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	// One connection: a rewrite is one transaction, and a second connection
-	// would only add a writer for the busy timeout to wait on.
+	// One connection: a rewrite is one transaction, and a second would only add
+	// a writer for the busy timeout.
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
@@ -57,9 +51,8 @@ func open(ctx context.Context, path, mode string) (*sql.DB, error) {
 	return db, nil
 }
 
-// IntegrityCheck runs SQLite's own check and returns its findings, nil when
-// the database is sound. A copy taken from a running app can be torn; this is
-// what tells apply so before it rewrites one.
+// IntegrityCheck runs SQLite's own check, returning nil when the database is
+// sound: a copy taken from a running app can be torn.
 func IntegrityCheck(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
 	if err != nil {
