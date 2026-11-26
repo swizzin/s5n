@@ -17,9 +17,6 @@ login: example
 
 # The person's Jellyfin password. box init makes one and shows it once; a plain
 # helm install names its own, which is the only way the account is usable.
-secrets:
-  jellyfinUserPassword: example-password
-
 storage:
   data:
     existingClaim: box-catalog-data

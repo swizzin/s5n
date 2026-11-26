@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -280,11 +279,6 @@ type Result struct {
 	Login             string
 	NewPassword       bool
 	GeneratedPassword string
-	// JellyfinPassword is the password box made for the person's Jellyfin
-	// account, on the one run that creates it. The caller shows it once, like
-	// the login's; it reaches the release Secret through the apply it is handed
-	// to and is written to no file here.
-	JellyfinPassword string
 	// Applied says the hand-over ran. It does not say the release changed:
 	// apply decides that, and a re-run is a no-op there too.
 	Applied bool
@@ -537,24 +531,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
 
-	// Jellyfin's person account. It is the one app credential a person has to
-	// know, because nothing can put it in a file: the account is a row the
-	// wiring Job creates inside the app, and its players sign in with it. So box
-	// makes it the way it makes the login's own password and shows it once
-	// (cmd/box), and hands it to that one apply as a transient answer, which is
-	// what keeps it off this host: the release Secret is the only copy.
-	//
-	// Only a first install makes one. From then on the Secret keeps it -- the
-	// chart preserves an existing key -- and a re-run that generated a new one
-	// would print a password the app does not accept.
-	if !res.ReRun && contains(apps, "jellyfin") {
-		jellyfinPassword, err := authelia.GeneratePassword()
-		if err != nil {
-			return res, d.stop(err)
-		}
-		res.JellyfinPassword = jellyfinPassword
-	}
-
 	// The namespace follows the login: a seedbox's is s5n-<login>, beside box's
 	// own s5n-system and s5n-gateway. A re-run keeps the grant's, so a box that
 	// already has `seedbox` keeps it whatever this run's login is, and an
@@ -789,29 +765,12 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}
 	// The answers that outlive no file: the catalog's transient questions, and
-	// the password box just made for an app that keeps its own accounts.
-	extra := map[string]any{}
-	if contains(apps, "jellyfin") {
-		// The key is dropped from every diff, not only the run that makes one:
-		// the first run passes the password as a value and every later run does
-		// not, so without this a re-run would see the Secret's password as a
-		// value disappearing and rewrite the release.
-		req.TransientKeys = append(req.TransientKeys, "secrets.jellyfinUserPassword")
-	}
-	if res.JellyfinPassword != "" {
-		extra["secrets.jellyfinUserPassword"] = res.JellyfinPassword
-	}
-	if len(transient) > 0 || len(extra) > 0 {
+	// nothing else -- an app password is a key of the release Secret now, not a
+	// value this run carries.
+	if len(transient) > 0 {
 		asked := d.transientAsker(transient, opts)
 		req.AfterConfirm = func(ctx context.Context) (map[string]any, error) {
-			out, err := asked(ctx)
-			if err != nil {
-				return nil, err
-			}
-			for k, v := range extra {
-				out[k] = v
-			}
-			return out, nil
+			return asked(ctx)
 		}
 	}
 	if err := d.Apply(ctx, req); err != nil {

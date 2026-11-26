@@ -17,6 +17,10 @@
       "type": "string",
       "description": "The palette box draws its dialogs in, and the one the login page is drawn in: a pair name is the dark page, a variant name pins one."
     },
+    "login": {
+      "type": "string",
+      "description": "The account root's login admits, written by box from the grant: an app that keeps its own accounts names its first one after it."
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -63,11 +64,16 @@ func NewSecretFor(namespace string, cs kubernetes.Interface) *KubeSecret {
 }
 
 // Get reads one key. The Secret's data is plain base64 of the value, which is
-// what corev1.Secret already holds decoded.
+// what corev1.Secret already holds decoded. A Secret that is not there yet is
+// an absent key, not a failed read: apply asks an app's key before the release
+// that creates it exists.
 func (s *KubeSecret) Get(ctx context.Context, key string) (string, error) {
 	sec, err := s.secret(ctx)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read secret %s in %s: %w", s.name, s.namespace, err)
 	}
 	return string(sec.Data[key]), nil
 }
@@ -78,7 +84,7 @@ func (s *KubeSecret) Get(ctx context.Context, key string) (string, error) {
 func (s *KubeSecret) Set(ctx context.Context, key, value string) error {
 	sec, err := s.secret(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("read secret %s in %s: %w", s.name, s.namespace, err)
 	}
 	if sec.Data == nil {
 		sec.Data = map[string][]byte{}
@@ -93,7 +99,7 @@ func (s *KubeSecret) Set(ctx context.Context, key, value string) error {
 func (s *KubeSecret) secret(ctx context.Context) (*corev1.Secret, error) {
 	sec, err := s.cs.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("read secret %s in %s: %w", s.name, s.namespace, err)
+		return nil, err
 	}
 	return sec, nil
 }

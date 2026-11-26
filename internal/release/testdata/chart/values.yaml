@@ -11,6 +11,11 @@ global:
 # from this file, and the chart renders nothing from it.
 theme: s5n
 
+# The account root's login admits, written by box from the grant. It is here
+# because the fixture chart is a slice of the real one, and Jellyfin (the app
+# whose generated password a test reads) names its first account after it.
+login: ""
+
 storage:
   data:
     existingClaim: ""

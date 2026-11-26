@@ -40,6 +40,15 @@ import (
 // receipt (`s5n-wiring`) is the same object whichever path installed it.
 const ReleaseName = "s5n"
 
+// The app whose person-facing password the chart generates, and the Secret key
+// it lives in (charts/s5n/templates/secret.yaml). It is an app credential, not
+// a release setting: box reads the key once, to show it on the apply that made
+// it, and never writes it.
+const (
+	jellyfinApp             = "jellyfin"
+	jellyfinUserPasswordKey = "jellyfin-user-password"
+)
+
 // ErrCancelled says the operator answered no, or could not be asked. Nothing
 // was written; the caller prints the voice and stops.
 var ErrCancelled = errors.New("cancelled")
@@ -562,9 +571,16 @@ type Result struct {
 	NamespaceCreated bool
 	// StorageCreated is how many of those it wrote.
 	StorageCreated int
-	Applied        bool
-	Revision       int
-	Receipt        Receipt
+	// JellyfinPassword is the person's Jellyfin password, and JellyfinLogin the
+	// name of the account it belongs to. They are set only on the apply that
+	// created the release Secret's key, which is the one time a person can be
+	// shown it: the chart generates it and keeps it, and a later run would be
+	// printing a credential the person already has.
+	JellyfinPassword string
+	JellyfinLogin    string
+	Applied          bool
+	Revision         int
+	Receipt          Receipt
 }
 
 // Applier is `box apply`'s whole decision.
@@ -1065,6 +1081,22 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		res.PlexToken = a.writePlexToken(ctx, r, plexToken)
 	}
 
+	// The Jellyfin password is the chart's: it generates jellyfin-user-password
+	// the first time the release renders with Jellyfin on, and preserves it by
+	// lookup after that. It is the one app credential a person has to know, so
+	// box shows it -- but only on the run that made it. Read the key before the
+	// release moves: absent means this apply is the one that creates it. A
+	// read that fails shows nothing, because printing a stored password back on
+	// every later run is the failure this exists to prevent.
+	var jellyfinPasswordNew bool
+	if a.OpenSecret != nil && appEnabled(values, jellyfinApp) {
+		if store, err := a.OpenSecret(namespace); err == nil {
+			if pw, err := store.Get(ctx, jellyfinUserPasswordKey); err == nil && pw == "" {
+				jellyfinPasswordNew = true
+			}
+		}
+	}
+
 	started := time.Now()
 	// The release is one row: what moved, and what the box now runs. The
 	// revision and the namespace are the log's (rule 5).
@@ -1079,6 +1111,19 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	res.Revision = rev
 	r.Detail(fmt.Sprintf("applied %s revision %d in %s", ReleaseName, rev, namespace))
 	upgrade.Done(strings.Join(releaseFacts(values, res.FirstInstall, chartMoved, installed.ChartVersion), " · "))
+
+	// The key was absent before this apply and the release has just written it,
+	// so this is the first person to see it. A key that is still absent is a
+	// chart that does not generate one (an older release): print nothing rather
+	// than an empty credential.
+	if jellyfinPasswordNew {
+		if store, err := a.OpenSecret(namespace); err == nil {
+			if pw, err := store.Get(ctx, jellyfinUserPasswordKey); err == nil && pw != "" {
+				res.JellyfinPassword = pw
+				res.JellyfinLogin, _ = values["login"].(string)
+			}
+		}
+	}
 
 	// An apply that ran no hooks has no receipt to wait for: the chart's
 	// wiring Job has not run, and its receipt would be the previous release's.

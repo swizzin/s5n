@@ -827,6 +827,7 @@ func runApply(ctx context.Context, args []string) {
 	if res.Host != "" {
 		out.Banner("seedbox ready", res.Host)
 	}
+	showJellyfinPassword(out, res)
 }
 
 func runInit(ctx context.Context, args []string) {
@@ -1017,6 +1018,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if o.dnsFile != "" {
 		resolver = setup.FileResolver{Path: o.dnsFile}
 	}
+	// applied is the apply init hands over to: its result is where the one
+	// Jellyfin password is, when this run is the one that made it.
+	var applied release.Result
 	d := &setup.Decision{
 		Host:     setup.LinuxPathHost{},
 		Prompt:   prompt,
@@ -1060,7 +1064,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				},
 			}
 			holds := newBoxHolds(out)
-			_, err = applyThenSettle(ctx, app.Apply, release.Options{
+			applied, err = applyThenSettle(ctx, app.Apply, release.Options{
 				Chart:         &chart,
 				GrantPath:     req.GrantPath,
 				ValuesPath:    req.ValuesPath,
@@ -1146,14 +1150,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
-	if res.JellyfinPassword != "" {
-		// The second credential a person has to know, and the only app
-		// credential box makes: Jellyfin keeps its accounts in its database, its
-		// players sign in with this, and nothing writes it to a file. The
-		// account is the login's name, printed above with the login.
-		redact(res.JellyfinPassword)
-		out.Line("jellyfin password: " + res.JellyfinPassword + "  (shown once; sign in to Jellyfin as " + res.Login + ", and change it there if you like)")
-	}
+	// The second credential a person has to know, on the one run that made it.
+	showJellyfinPassword(out, applied)
 	// What a name with no DNS record leaves a person: the records to add, and
 	// the command that moves the certificates once they exist. It is one row
 	// of the run's to-finish block, so a bootstrap that also could not install
@@ -1165,6 +1163,19 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		o.followUps = append(o.followUps, row)
 	}
 	return nil
+}
+
+// showJellyfinPassword prints the person's Jellyfin password on the one run
+// that made it: the chart generates the key and keeps it, so apply only has it
+// when this run created it, and a later run has nothing to show. The line is on
+// screen for the person, and the run log keeps the fact instead of the value --
+// the board this is read from is a terminal someone may scroll back through.
+func showJellyfinPassword(out say.Reporter, res release.Result) {
+	if res.JellyfinPassword == "" {
+		return
+	}
+	redact(res.JellyfinPassword)
+	out.Line("jellyfin password: " + res.JellyfinPassword + "  (shown once; sign in to Jellyfin as " + res.JellyfinLogin + ", and change it there if you like)")
 }
 
 // noDNSFollowUp is the one thing a run whose names have no record leaves a

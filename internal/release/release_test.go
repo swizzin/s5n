@@ -257,10 +257,10 @@ type fakes struct {
 	// snaps is the snapshot step, when the test is about where in the apply
 	// it runs rather than what it copies.
 	snaps *fakeSnapshots
-	// secret is the release Secret, when the test is about the token apply
-	// takes out of Plex's own settings; nil leaves the applier with no handle
-	// on it, which is every test about something else.
-	secret *fakeSecret
+	// secret is the release Secret, when the test is about a credential apply
+	// reads from it; nil leaves the applier with no handle on it, which is
+	// every test about something else.
+	secret SecretKeys
 }
 
 func newFakes(t *testing.T) *fakes {
