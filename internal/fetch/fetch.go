@@ -1,19 +1,8 @@
-// Package fetch is the one network policy `box bootstrap` fetches through.
-//
-// A bootstrap is a first run: the k0s binary and the platform charts (their
-// repository index and their tarball) are fetched from the internet, once, on
-// a host the operator has just prepared. An upstream 5xx at that moment — a
-// GitHub 504 while Helm pulled the MetalLB chart — has nothing to do with the
-// host and nothing the operator can fix, yet it aborted the install. So a
-// transient failure is retried here, once, for every fetch bootstrap makes,
-// rather than at each call site or by telling the operator to run it again.
-//
-// What is retried is deliberately narrow: an idempotent method (GET, HEAD),
-// failing with a 5xx, a 429, or a connection that was refused, reset or timed
-// out before its response headers arrived. A 404, a 403 or a certificate error
-// is returned on the first attempt, because the second one gets the same
-// answer. The attempt count is bounded so a real outage still fails the run
-// instead of hanging it.
+// Package fetch is the one network policy `box bootstrap` fetches through. An
+// upstream 5xx during bootstrap has nothing to do with the host, so GET and
+// HEAD are retried on 5xx, 429, or a refused, reset or timed-out connection.
+// A 404, 403 or certificate error is the answer on the first try, and the
+// attempt count is bounded so a real outage fails the run rather than hangs it.
 package fetch
 
 import (
@@ -33,22 +22,18 @@ import (
 const (
 	// DefaultAttempts is how many times one fetch is tried in total.
 	DefaultAttempts = 4
-	// DefaultDelay is the wait before the second attempt; each later wait
+	// DefaultDelay is the wait before the second attempt; each later one
 	// doubles it (1s, 2s, 4s).
 	DefaultDelay = time.Second
-	// DefaultMaxDelay caps one wait, a server's Retry-After included: a
-	// bootstrap that waits longer than this on one fetch is not retrying,
-	// it is hanging.
+	// DefaultMaxDelay caps one wait, Retry-After included: longer is hanging.
 	DefaultMaxDelay = 10 * time.Second
-	// jitterShare is the fraction of a wait added at random, so fetches that
-	// failed together do not all come back at the same instant.
+	// jitterShare is the fraction added at random, so simultaneous failures do
+	// not all return together.
 	jitterShare = 10
 )
 
-// Policy is the retry rule: how many attempts, how long between them, and how
-// the waiting is done. The zero value is box's policy. Sleep and Now are
-// fields so a test can run the backoff without spending the time, and so the
-// attempt count and delays can be asserted exactly.
+// Policy is the retry rule. The zero value is box's policy; Sleep and Now let
+// a test run the backoff without spending the time.
 type Policy struct {
 	// Attempts is the total number of tries, the first included. Zero means
 	// DefaultAttempts.
@@ -73,18 +58,14 @@ type Attempt struct {
 	Retry bool
 	// RetryAfter is the wait the server asked for, when it asked for one.
 	RetryAfter time.Duration
-	// Status names the failure the way box says it — "504 Gateway Timeout",
-	// or the transport error — and is what the final sentence quotes.
+	// Status names the failure the way box says it, and the final sentence
+	// quotes it.
 	Status string
 }
 
-// Failure is what Do returns when it gives up: the URL, the last thing that
-// went wrong, and how many attempts it took, as one sentence in box's voice:
-//
-//	fetching https://example.com/chart.tgz: 504 Gateway Timeout after 4 attempts
-//
-// It is a type so a caller that adds its own context can tell box's finished
-// sentence from a failure the retry never touched.
+// Failure is what Do returns when it gives up, as box's sentence: "fetching
+// <url>: 504 Gateway Timeout after 4 attempts". The type lets a caller tell
+// box's finished sentence from a failure the retry never touched.
 type Failure struct {
 	URL      string
 	Status   string
@@ -99,11 +80,9 @@ func (f *Failure) Error() string {
 	return fmt.Sprintf("fetching %s: %s after %d %s", f.URL, f.Status, f.Attempts, noun)
 }
 
-// Do runs try under the policy: until it succeeds, until it fails in a way
-// another attempt cannot fix, or until the attempts run out. A failure no
-// retry can fix is returned as the caller gave it; an exhausted retry is a
-// *Failure, which names the URL, the last thing that went wrong and how many
-// tries it took.
+// Do runs try until it succeeds, fails in a way no retry can fix, or runs out
+// of attempts. A fixable failure is returned as given; an exhausted retry is a
+// *Failure.
 func (p Policy) Do(ctx context.Context, url string, try func() Attempt) error {
 	attempts := p.attempts()
 	for attempt := 1; ; attempt++ {
@@ -171,9 +150,8 @@ func (p Policy) wait(ctx context.Context, attempt int, retryAfter time.Duration)
 	if max := p.maxDelay(); d > max {
 		d = max
 	}
-	// A server's Retry-After is taken at its word (capped above). Box's own
-	// backoff gets jitter, so two fetches that failed together do not both
-	// come back in the same millisecond.
+	// A server's Retry-After is taken at its word (capped above); box's own
+	// backoff gets jitter.
 	if !fromServer && d > 0 {
 		d += time.Duration(rand.Int64N(int64(d)/jitterShare + 1))
 	}
@@ -195,17 +173,15 @@ func (p Policy) sleep(ctx context.Context, d time.Duration) error {
 }
 
 // Retryable reports whether an HTTP status is worth another attempt: a server
-// that is briefly unwell (5xx) or that is telling box to slow down (429).
-// Every other answer, 4xx included, is the server's decision and stands.
+// briefly unwell (5xx) or asking box to slow down (429). Other answers stand.
 func Retryable(status int) bool {
 	return status == http.StatusTooManyRequests || (status >= 500 && status <= 599)
 }
 
-// IsTransient reports whether a transport error is the kind a second attempt
-// can fix: a timeout, a connection refused, reset or closed under the request,
-// or a response that ended before its headers. Anything else — a certificate
-// the host cannot verify, a URL that does not parse, a name that does not
-// exist — is not made better by asking again.
+// IsTransient reports whether a transport error is one a second attempt can
+// fix: a timeout, a refused, reset or closed connection, or a response that
+// ended before its headers. A certificate, an unparseable URL or a missing
+// name is not made better by asking again.
 func IsTransient(err error) bool {
 	if err == nil {
 		return false
@@ -230,8 +206,8 @@ func IsTransient(err error) bool {
 	return false
 }
 
-// retryAfterAt reads a Retry-After header, which is either a number of seconds
-// or an HTTP date. Zero means the server did not ask for a wait.
+// retryAfterAt reads a Retry-After header, seconds or HTTP date; zero means no
+// wait was asked for.
 func retryAfterAt(h http.Header, now time.Time) time.Duration {
 	value := strings.TrimSpace(h.Get("Retry-After"))
 	if value == "" {
@@ -251,8 +227,8 @@ func retryAfterAt(h http.Header, now time.Time) time.Duration {
 	return 0
 }
 
-// discard drains and closes a response body box is not going to read, so the
-// connection goes back to the pool instead of being torn down.
+// discard drains and closes a body box will not read, so the connection is
+// reused rather than torn down.
 func discard(body io.ReadCloser) {
 	if body == nil {
 		return
