@@ -9,15 +9,10 @@ import (
 	"strings"
 )
 
-// jsonFile is a JSON document with the position of every value in it, so a
-// rewrite can replace one value and write every other byte back as it was.
-//
-// settings.json is the app's own file and the operator has seen it: Seerr
-// rewrites it with two-space indentation on every settings save
-// (server/lib/settings/index.ts at v3.5.1, write()), and round-tripping it
-// through a decoder would reorder every key and reformat the whole document,
-// which would show in a diff as if migrate had changed settings it never looked
-// at.
+// jsonFile is a JSON document with the position of every value, so a rewrite
+// replaces one value and writes every other byte back as it was. A decoder round
+// trip would reorder keys and reformat the settings file Seerr rewrites with
+// two-space indentation (server/lib/settings/index.ts at v3.5.1, write()).
 type jsonFile struct {
 	data  []byte
 	nodes []*jsonNode
@@ -219,8 +214,7 @@ func (p *parser) literal(path []string) error {
 	return fmt.Errorf("unexpected %q at byte %d", p.data[p.pos], p.pos)
 }
 
-// find is the value at a JSON pointer ("/sonarr/0/hostname"), unescaped the
-// way JSON pointer defines.
+// find is the value at a JSON pointer ("/sonarr/0/hostname").
 func (f *jsonFile) find(pointer string) (*jsonNode, bool) {
 	want := pointerSegments(pointer)
 	for _, n := range f.nodes {
@@ -274,8 +268,7 @@ func (f *jsonFile) setRaw(n *jsonNode, raw, what string) edit {
 		where: "/" + strings.Join(n.path, "/"), what: what}
 }
 
-// addMember inserts a member into an object that does not have it, in the
-// object's own indentation.
+// addMember inserts a member into an object lacking it, in its own indentation.
 func (f *jsonFile) addMember(obj *jsonNode, key, value, what string) (edit, bool) {
 	if obj == nil || obj.kind != 'o' {
 		return edit{}, false
@@ -286,8 +279,7 @@ func (f *jsonFile) addMember(obj *jsonNode, key, value, what string) (edit, bool
 		return edit{start: obj.lastEnd, end: obj.lastEnd, text: string(enc) + ": " + value,
 			where: where, what: what}, true
 	}
-	// Insert after the last member, before the closing brace, so the brace
-	// keeps its own line.
+	// After the last member, before the closing brace, which keeps its line.
 	gap := string(f.data[obj.lastEnd:obj.end])
 	if !strings.Contains(gap, "\n") {
 		return edit{start: obj.lastEnd, end: obj.lastEnd,
@@ -315,8 +307,7 @@ func bytesLastIndexByte(b []byte, c byte) int {
 	return -1
 }
 
-// apply writes the edits into the document, in order, so an edit's span is
-// replaced where it was found and everything between edits is copied byte for
+// apply writes the edits in order, copying everything between them byte for
 // byte.
 func (f *jsonFile) apply(edits []edit) []byte {
 	sorted := append([]edit(nil), edits...)
@@ -325,8 +316,7 @@ func (f *jsonFile) apply(edits []edit) []byte {
 	last := 0
 	for _, e := range sorted {
 		if e.start < last {
-			// Two edits cannot overlap: each is a value's own span, or an
-			// insertion right after one.
+			// Two edits cannot overlap: a value's span, or an insertion after one.
 			continue
 		}
 		out.Write(f.data[last:e.start])

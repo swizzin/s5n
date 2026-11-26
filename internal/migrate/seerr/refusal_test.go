@@ -10,10 +10,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// An Arr entry's activeDirectory is a root folder in the Arr's own filesystem:
-// Seerr never opens it, it hands it to the Arr as rootFolderPath
-// (server/api/servarr/radarr.ts:166,234). So it moves by the Arr's path rules,
-// and Seerr's own table, which only ever covers Seerr's mounts, is not asked.
+// activeDirectory is a path in the Arr's filesystem, handed over as rootFolderPath
+// (radarr.ts:166,234), so it moves by the Arr's rules, never Seerr's.
 const arrPathsPlan = `
 version: 2
 apps:
@@ -70,8 +68,7 @@ func TestArrRootFolderMovesByTheArrsRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	in.Plan = p
-	// The database's two root folders are the Arrs' too, so they move by the
-	// same rule the settings' folders do.
+	// The database's folders are the Arrs' too: the same rule moves them.
 	exec(t, in.Dir, `UPDATE override_rule SET rootFolder = '/library/media/Movies'`)
 	exec(t, in.Dir, `UPDATE media_request SET rootFolder = '/library/media/Old Requests'`)
 
@@ -96,8 +93,7 @@ func TestArrRootFolderMovesByTheArrsRules(t *testing.T) {
 			t.Errorf("%s = %q, want %q", ptr, n.str, want)
 		}
 	}
-	// The override rule names radarr #0 and the request went to radarr #0, so
-	// both move through Radarr's table.
+	// Both name radarr #0, so both move through Radarr's table.
 	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/data/media/Movies" {
 		t.Errorf("override_rule.rootFolder = %q, want the folder in Radarr's tree", got)
 	}
@@ -119,10 +115,8 @@ func readSettings(t *testing.T, dir string) *jsonFile {
 	return f
 }
 
-// TestArrRootFolderFollowsTheLibrarysCategory: a migrated library directory is
-// renamed onto the Arr's category, so the folder Seerr hands the Arr as
-// rootFolderPath is the one the Arr will actually have -- /data/media/movies,
-// not the source's Movies.
+// TestArrRootFolderFollowsTheLibrarysCategory: the folder handed over as
+// rootFolderPath is the renamed one, /data/media/movies, not the source's Movies.
 func TestArrRootFolderFollowsTheLibrarysCategory(t *testing.T) {
 	ctx := context.Background()
 	settings := strings.NewReplacer(
