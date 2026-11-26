@@ -1,18 +1,11 @@
 // Package qbtconf seeds qBittorrent's WebUI section into qBittorrent.conf
-// before the app's first start: the credentials it is given, the data
-// contract's save paths, and the private ranges its login skips.
+// before the app's first start: credentials, the data contract's save paths and
+// the private ranges its login skips.
 //
-// qBittorrent 5 stores the WebUI password as a QSettings QByteArray:
-//
-//	[WebUI]
-//	Username=admin
-//	Password_PBKDF2="@ByteArray(<salt-b64>:<hash-b64>)"
-//
-// where hash = PBKDF2-HMAC-SHA512(password, salt, 100000 iterations, 64 bytes),
-// salt is 16 random bytes, and Qt's INI writer wraps non-trivial QByteArray values
-// in @ByteArray(...) with double quotes. The layout is verified against
-// src/base/utils/password.cpp and src/base/preferences.cpp upstream; the formatting
-// is verified against a live qBittorrent container (see hack/e2e-kind.sh).
+// qBittorrent 5 stores the password as a QSettings QByteArray holding
+// PBKDF2-HMAC-SHA512(password, 16-byte salt, 100000 iterations, 64 bytes):
+// `Password_PBKDF2="@ByteArray(<salt-b64>:<hash-b64>)"`. The layout is verified
+// against src/base/utils/password.cpp and src/base/preferences.cpp upstream.
 package qbtconf
 
 import (
@@ -28,9 +21,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// saveRoot is where qBittorrent puts torrents that carry no category. The
-// chart mounts the release's data claim at /data; see PLAN.md's data
-// contract. internal/apps.SaveRoot is the one place this path is defined.
+// saveRoot is where uncategorised torrents go; internal/apps.SaveRoot is the
+// one place the path is defined.
 const saveRoot = apps.SaveRoot
 
 const (
@@ -41,15 +33,10 @@ const (
 	SaltLength = 16
 )
 
-// AuthBypassSubnets is the private address space qBittorrent's WebUI admits
-// without a login. qBittorrent cannot switch its login off, so it skips it for
-// these ranges (and for loopback, below) instead; what arrives is then either
-// Envoy, which forwards only what the edge's login already admitted — the
-// chart's Authelia rules give qBittorrent's paths no bypass, unlike an Arr's
-// /api — or a pod the release's NetworkPolicy lets in. That is the same
-// boundary the Arrs sit behind with External authentication, and it is why no
-// caller has to hold a credential. It is the same list the release's egress
-// policy already treats as internal.
+// AuthBypassSubnets is the private space qBittorrent's WebUI admits without a
+// login: it cannot switch its login off, so what reaches it is Envoy (after the
+// edge's login, which gives qBittorrent's paths no bypass) or a pod the
+// release's NetworkPolicy lets in. That is the boundary the Arrs sit behind.
 var authBypassSubnets = []string{
 	"10.0.0.0/8",
 	"172.16.0.0/12",
@@ -58,12 +45,10 @@ var authBypassSubnets = []string{
 	"fc00::/7",
 }
 
-// subnetListValue renders authBypassSubnets the way QSettings writes a
-// QStringList to an INI file: the elements joined with ", ", unquoted, because
-// Qt only quotes an element containing ';', ',', '=' or a leading/trailing
-// space (qsettings.cpp, iniEscapedStringList/iniEscapedString). Quoting the
-// whole value here would make QSettings read it back as one string, and
-// qBittorrent would then hold a single bogus subnet.
+// subnetListValue renders authBypassSubnets as QSettings writes a QStringList:
+// joined with ", ", unquoted, because Qt quotes only an element containing ';',
+// ',' or '=' (qsettings.cpp, iniEscapedStringList). Quoting it whole would read
+// back as one bogus subnet.
 func subnetListValue() string {
 	return strings.Join(authBypassSubnets, ", ")
 }
@@ -78,8 +63,7 @@ func Hash(password string) (string, error) {
 	return HashWithSalt(password, salt)
 }
 
-// HashWithSalt is Hash with a caller-supplied salt, for tests and for re-deriving
-// a hash to check whether the stored credential already matches.
+// HashWithSalt is Hash with a caller-supplied salt.
 func HashWithSalt(password string, salt []byte) (string, error) {
 	key, err := pbkdf2.Key(sha512.New, password, salt, Iterations, KeyLength)
 	if err != nil {
@@ -120,11 +104,9 @@ func quote(v string) string {
 	return `"` + r.Replace(v) + `"`
 }
 
-// Unquote reads a QSettings INI value as the app wrote it: Qt quotes only
-// what it has to, and inside the quotes it escapes a backslash, a quote and a
-// control character. Every reader of a qBittorrent.conf value that is a path
-// or a list goes through this one function, so discovery and the rewriter
-// cannot disagree about what a stored path is.
+// Unquote reads a QSettings INI value as the app wrote it: Qt quotes only what
+// it has to. Every reader of a stored path or list goes through it, so
+// discovery and the rewriter cannot disagree.
 func Unquote(raw string) string {
 	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return raw
@@ -151,14 +133,14 @@ func Unquote(raw string) string {
 	return b.String()
 }
 
-// PasswordValue is the exact text to place after "Password_PBKDF2=" so that
+// PasswordValue is the exact text after "Password_PBKDF2=" so that
 // qBittorrent reads the hash back as a QByteArray.
 func PasswordValue(hash string) string {
 	return quote("@ByteArray(" + hash + ")")
 }
 
 // ParsePasswordValue extracts the hash from a stored Password_PBKDF2 value,
-// accepting both the quoted @ByteArray form and a bare hash.
+// accepting the quoted @ByteArray form and a bare hash.
 func ParsePasswordValue(value string) (string, error) {
 	v := Unquote(strings.TrimSpace(value))
 	if strings.HasPrefix(v, "@ByteArray(") {
@@ -179,16 +161,16 @@ type section struct {
 	lines []string
 }
 
-// Document is a minimal line-preserving INI document. Everything the caller did
-// not ask to change is written back byte for byte, so comments, ordering and
-// keys written by qBittorrent itself survive.
+// Document is a line-preserving INI document: everything the caller did not
+// change is written back byte for byte, so comments, ordering and keys written
+// by qBittorrent itself survive.
 type Document struct {
 	prefix []string // lines before the first section header
 	secs   []section
 }
 
-// Parse reads an INI document. Invalid lines are kept as-is rather than rejected:
-// the file belongs to qBittorrent, and this tool only edits two keys.
+// Parse reads an INI document. Invalid lines are kept as-is: the file belongs
+// to qBittorrent, and this tool only edits a few keys.
 func Parse(data []byte) *Document {
 	doc := &Document{}
 	var cur *section
@@ -209,8 +191,6 @@ func Parse(data []byte) *Document {
 		}
 		key, _, ok := strings.Cut(trimmed, "=")
 		if ok && strings.TrimSpace(key) != "" {
-			// A key: it belongs to the current section (or to the implicit global
-			// section, which qBittorrent never writes).
 			if cur == nil {
 				doc.secs = append(doc.secs, section{})
 				cur = &doc.secs[len(doc.secs)-1]
@@ -224,9 +204,8 @@ func Parse(data []byte) *Document {
 		}
 		cur.lines = append(cur.lines, line)
 	}
-	// Blank lines around section boundaries are render's business: trim them at
-	// the edges of every section so Render can re-emit exactly one separator.
-	// Interior blank lines (deliberate grouping) are preserved.
+	// Blank lines at section edges are trimmed so Render can emit one separator;
+	// interior ones are kept.
 	for i := range doc.secs {
 		lines := doc.secs[i].lines
 		for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
@@ -285,8 +264,8 @@ func (d *Document) Set(sectionName, key, value string) {
 	s.lines = append(s.lines, key+"="+value)
 }
 
-// Render serialises the document. Sections are separated by a blank line and the
-// file ends with a newline, matching what qBittorrent writes itself.
+// Render serialises the document with one blank line between sections and a
+// final newline, matching what qBittorrent writes itself.
 func (d *Document) Render() []byte {
 	var b strings.Builder
 	for _, line := range d.prefix {
@@ -311,14 +290,11 @@ func (d *Document) Render() []byte {
 	return []byte(b.String())
 }
 
-// Seal writes the WebUI section qBittorrent should run with. The app's image only
-// generates its config file when none exists, so the init container is the
-// authority here: seeding the file first would otherwise leave the section with
-// nothing but credentials and hand the rest to whatever defaults this build ships.
-//
-// It returns the new contents plus whether anything actually changed. Existing
-// credentials for the same password are reused, so running it on every start is
-// cheap and does not rewrite the file.
+// Seal writes the WebUI section qBittorrent should run with. The image only
+// generates its config when none exists, so the init container is the authority:
+// a file seeded with nothing but credentials would leave the rest to the build's
+// defaults. A stored credential for the same password is reused, so a start
+// rewrites nothing.
 func Seal(existing []byte, username, password string, port int) (out []byte, changed bool, err error) {
 	doc := Parse(existing)
 
@@ -331,31 +307,27 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 
 	desired := []struct{ section, key, value string }{
 		{"WebUI", "Username", quote(username)},
-		// The data contract in one setting each. qBittorrent defaults its save path
-		// to a directory on the config volume, and ignores a category's path unless
-		// automatic torrent management is on — so a download from an Arr would land
-		// outside /data and could never be hardlinked into the library.
-		// qBittorrent 5 nests these under [Preferences] with QSettings-escaped keys,
-		// not in a [Session] section of their own.
+		// The data contract in one setting each: qBittorrent defaults its save
+		// path onto the config volume and ignores a category's path unless
+		// manual-mode category paths are on, so a download would never be
+		// hardlinkable. qBittorrent 5 nests these under [Preferences].
 		{"Preferences", `Session\DefaultSavePath`, saveRoot},
 		{"Preferences", `Session\TempPath`, saveRoot + "/temp"},
 		{"Preferences", `Session\UseCategoryPathsInManualMode`, "true"},
 		{"WebUI", "Address", "*"},
 		{"WebUI", "Port", strconv.Itoa(port)},
 		{"WebUI", "ServerDomains", "*"},
-		// The WebUI answers Envoy, which forwards the request's own Host (the
-		// box's domain), and ServerDomains is "*"; validating the Host here
-		// would only reject a caller the subnet whitelist already admits.
+		// The WebUI answers Envoy, which forwards the request's own Host; host
+		// validation here would reject a caller the subnet whitelist admits.
 		{"WebUI", "HostHeaderValidation", "false"},
 		// qBittorrent can't switch its login off, so it skips it instead: for
-		// loopback (`kubectl port-forward`) and for the private ranges every
-		// pod and the Gateway sit in. See authBypassSubnets for why that is the
-		// release's boundary and not a second door.
+		// loopback (port-forward) and for the private ranges pods and the Gateway
+		// sit in. See authBypassSubnets.
 		{"WebUI", "LocalHostAuth", "false"},
 		{"WebUI", "AuthSubnetWhitelistEnabled", "true"},
 		{"WebUI", "AuthSubnetWhitelist", subnetListValue()},
-		// The API is cookie-authenticated; CSRF protection only breaks non-browser
-		// clients, and nothing here is served to a browser we do not control.
+		// The API is cookie-authenticated; CSRF protection only breaks
+		// non-browser clients.
 		{"WebUI", "CSRFProtection", "false"},
 		{"LegalNotice", "Accepted", "true"},
 	}
