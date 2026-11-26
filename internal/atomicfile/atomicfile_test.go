@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// A write replaces the file, ends at the mode the caller asked for, and leaves
-// nothing of the temporary file behind.
+// The write ends at the caller's mode and leaves no temporary file behind.
 func TestWriteReplacesTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "values.yaml")
 	if err := os.WriteFile(path, []byte("wiring:\n  timeout: 30\n"), 0o644); err != nil {
@@ -36,8 +35,7 @@ func TestWriteReplacesTheFile(t *testing.T) {
 	assertNoLeftovers(t, path)
 }
 
-// A new file gets the caller's mode too: the record is 0600 and the app configs
-// are 0600, and neither may be world-readable by the umask's accident.
+// A new file gets the caller's mode, never the umask's.
 func TestWriteCreatesAMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seedbox.yaml")
 	if err := Write(path, []byte("kubeconfig: /etc/rancher/k0s/k0s.yaml\n"), 0o600); err != nil {
@@ -52,8 +50,8 @@ func TestWriteCreatesAMissingFile(t *testing.T) {
 	}
 }
 
-// A failed rename is the case this package exists for: the target still holds
-// exactly its old bytes, and the temporary file is not left beside it.
+// A failed rename is the case this package exists for: the target keeps its old
+// bytes and no temporary file is left beside it.
 func TestFailedRenameLeavesTheTargetWhole(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "grant.yaml")
 	before := []byte("namespace: testbox\napps: [sonarr]\n")
@@ -81,8 +79,6 @@ func TestFailedRenameLeavesTheTargetWhole(t *testing.T) {
 	assertNoLeftovers(t, path)
 }
 
-// A missing parent directory is refused rather than silently written somewhere
-// else: the callers that need one create it with their own mode.
 func TestWriteRefusesAMissingDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "values.yaml")
 	if err := Write(path, []byte("x: 1\n"), 0o600); err == nil {
@@ -90,9 +86,6 @@ func TestWriteRefusesAMissingDirectory(t *testing.T) {
 	}
 }
 
-// Copy is Write for a stream, and has to behave the same way: the content
-// arrives, the file ends at the caller's mode, and a reader that fails partway
-// leaves the target whole rather than truncated.
 func TestCopyStreamsTheContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sonarr.db")
@@ -142,8 +135,7 @@ func TestFailedCopyLeavesTheTargetWhole(t *testing.T) {
 	assertNoLeftovers(t, path)
 }
 
-// failingReader hands out a few bytes and then fails, which is the shape of a
-// snapshot file disappearing under a restore.
+// failingReader is a snapshot file disappearing under a restore.
 type failingReader struct {
 	after int
 	sent  int
@@ -158,8 +150,6 @@ func (r *failingReader) Read(p []byte) (int, error) {
 	return 1, nil
 }
 
-// assertNoLeftovers is the temporary-file check every failure path needs: a
-// refused write leaves nothing of the file it was making.
 func assertNoLeftovers(t *testing.T, path string) {
 	t.Helper()
 	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*"))
@@ -171,7 +161,7 @@ func assertNoLeftovers(t *testing.T, path string) {
 	}
 }
 
-// openRoot opens dir as the tree WriteIn writes inside, closed with the test.
+// openRoot opens dir as the tree WriteIn writes inside.
 func openRoot(t *testing.T, dir string) *os.Root {
 	t.Helper()
 	root, err := os.OpenRoot(dir)
@@ -182,8 +172,6 @@ func openRoot(t *testing.T, dir string) *os.Root {
 	return root
 }
 
-// WriteIn is Write for a target inside a tree, and writes exactly what Write
-// writes: the new bytes, the caller's mode, and no temporary file left behind.
 func TestWriteInReplacesTheFileInTheTree(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".box", "holds.json")
@@ -215,8 +203,6 @@ func TestWriteInReplacesTheFileInTheTree(t *testing.T) {
 	assertNoLeftovers(t, path)
 }
 
-// A missing directory is refused rather than created: the callers that need one
-// create it with their own mode, exactly as they do for Write.
 func TestWriteInRefusesAMissingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	root := openRoot(t, dir)
@@ -228,10 +214,8 @@ func TestWriteInRefusesAMissingDirectory(t *testing.T) {
 	}
 }
 
-// A link where the target goes is replaced, never followed: the write lands on
-// the name inside the tree, and the file the link pointed at is not touched.
-// (Following it would put a snapshot restore's bytes, or a hold, in whichever
-// file the seedbox's user chose.)
+// A link where the target goes is replaced, never followed: following it would
+// write into whichever file the seedbox's user chose.
 func TestWriteInReplacesALinkRatherThanFollowingIt(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()
@@ -264,9 +248,8 @@ func TestWriteInReplacesALinkRatherThanFollowingIt(t *testing.T) {
 	assertNoLeftovers(t, filepath.Join(dir, "holds.json"))
 }
 
-// A directory that a link points out of the tree is a refusal, and nothing is
-// created on either side: the root names the file it was given, and neither the
-// temporary file nor the target exists afterwards.
+// A directory link out of the tree is refused, and nothing is created on either
+// side.
 func TestWriteInRefusesADirectoryThatLeavesTheTree(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()
@@ -291,9 +274,6 @@ func TestWriteInRefusesADirectoryThatLeavesTheTree(t *testing.T) {
 	}
 }
 
-// CopyIn is the stream form, and behaves the same way: the content arrives, the
-// file ends at the caller's mode, and a reader that fails partway leaves the
-// target whole rather than truncated.
 func TestCopyInStreamsTheContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sonarr.db")
@@ -322,7 +302,7 @@ func TestCopyInStreamsTheContent(t *testing.T) {
 }
 
 // The failure that matters on a restore: a reader that dies mid-copy leaves the
-// file it was replacing exactly as it was, and nothing of the copy behind.
+// file it was replacing whole.
 func TestFailedCopyInLeavesTheTargetWhole(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sonarr.db")
@@ -348,8 +328,6 @@ func TestFailedCopyInLeavesTheTargetWhole(t *testing.T) {
 	assertNoLeftovers(t, path)
 }
 
-// Create is the write for content the caller produces in pieces: nothing appears
-// at the path until Commit, and then the whole file does.
 func TestCreateCommitsAWholeFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snapshot.tar.gz")
