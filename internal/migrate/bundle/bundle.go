@@ -1,16 +1,9 @@
-// Package bundle is box's migrate snapshot on disk: one archive holding what
-// discovery read (plan.yaml, report.txt, source/) and the config trees apply
-// rewrites (config/<instance>/), written into one directory and opened into a
-// private one (docs/box.md, "migrate").
-//
-// internal/archive is the file format -- the tar, the gzip, the manifest with a
-// sha256 per entry, the 0600 -- and this package is only the shape inside it:
-// which files a snapshot has, what its name says, and which one a run with no
-// file named should pick up. Nothing here duplicates the format, and nothing
-// here reads a config: a snapshot is bytes in, bytes out.
-//
-// It holds secrets, and it is the only thing that carries them off a host, so
-// the directory it lives in is 0700 and every file it writes is 0600.
+// Package bundle is box's migrate snapshot on disk: discovery's plan, report and
+// manifests plus the config trees apply rewrites, in the archive internal/archive
+// defines (docs/box.md, "migrate"). This package is only the shape inside it:
+// which files a snapshot has, what its name says, which one a run picks. It holds
+// secrets and is what carries them off a host, so its directory is 0700 and every
+// file 0600.
 package bundle
 
 import (
@@ -28,51 +21,37 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/space"
 )
 
-// Dir is where box keeps a host's snapshots: the default location
-// `box migrate discover` writes to and the one `box migrate apply` with no file
-// reads. It is not on a k0s reset's path, so a cutover's snapshot survives the
-// reset that follows it.
+// Dir is where box keeps snapshots: what discover writes and apply with no file
+// reads. A k0s reset does not touch it, so a cutover's snapshot survives.
 const Dir = "/var/lib/s5n/migrate"
 
-// prefix is the name every snapshot starts with, which is what makes a
-// directory listing read as a history and what Newest looks for.
+// prefix is what makes a listing read as a history and what Newest looks for.
 const prefix = "migrate-"
 
-// stamp is the time in a snapshot's name: UTC, to the second, no punctuation a
-// shell would have to quote.
+// stamp is the time in a snapshot's name: UTC, to the second, shell-safe.
 const stamp = "20060102T150405Z"
 
-// FileName is what a snapshot taken at one time in one mode is called:
-// migrate-<UTC yyyymmddThhmmssZ>-<mode>.tar.gz.
-//
-// The time is the snapshot's, not the file's: two hosts that copy a snapshot
-// around keep the name that says when the source was read, and a name sorts the
-// way the snapshots were taken.
+// FileName is migrate-<UTC yyyymmddThhmmssZ>-<mode>.tar.gz. The time is when the
+// source was read, so a copied snapshot keeps it and names sort by that time.
 func FileName(mode archive.Mode, at time.Time) string {
 	return prefix + at.UTC().Format(stamp) + "-" + string(mode) + ".tar.gz"
 }
 
 // Config is one planned app's config directory, as it sits on the source host.
 type Config struct {
-	// Instance is box's name for the app, which is the directory name it gets
-	// inside the snapshot (config/<instance>/).
+	// Instance is box's name for the app and its directory in the snapshot.
 	Instance string
-	// Dir is the source's own directory, read and never written.
+	// Dir is the source's directory, read and never written.
 	Dir string
-	// Sub is the directory inside Dir that the app's own data is in, in slash
-	// form, when a snapshot carries that and not the whole of Dir: Plex's home
-	// is Library/Application Support/Plex Media Server, and whatever else the
-	// source's config mount holds is not Plex's. Empty means Dir itself.
+	// Sub is the directory inside Dir holding the app's own data, in slash form,
+	// when the whole of Dir is not the app's (Plex's home). Empty means Dir.
 	Sub string
-	// Files are the files a snapshot carries out of Sub, with the directories
-	// above them. Empty means all of Sub: an app whose config is its state as a
-	// whole takes its whole tree, and one that keeps a library's worth of
-	// covers beside the state it needs (Plex) names the state.
+	// Files are the files carried out of Sub with their directories; empty means
+	// all of Sub. An app that keeps a library beside its state (Plex) names the
+	// state instead.
 	Files []File
-	// Skip are the directories a snapshot leaves out of Sub's whole tree, with
-	// everything under them, in slash form relative to Sub. Only an app whose
-	// config is as much a library as a state has them (Plex's caches), and the
-	// whole tree travels otherwise. Files and Skip are never both set.
+	// Skip are directories left out of Sub's whole tree, relative to Sub; only an
+	// app whose config is partly a library has them. Never set with Files.
 	Skip []string
 }
 
@@ -80,36 +59,29 @@ type Config struct {
 type File struct {
 	// Path is the file, relative to Config.Dir, in slash form.
 	Path string
-	// Required says a snapshot without this file is refused: the app cannot
-	// start on the state it was given without it. The companion files a
-	// database writes beside itself (-wal, -shm) are not required, because
-	// they are there only while something has the database open.
+	// Required refuses a snapshot without this file: the app cannot start without
+	// it. A database's -wal and -shm are not required, since they exist only while
+	// it is open.
 	Required bool
 }
 
-// Snapshot is what one run writes: the plan, the report, the manifests
-// discovery read, and the config trees a rehearsal or a final snapshot carries.
+// Snapshot is what one run writes: plan, report, manifests and config trees.
 type Snapshot struct {
-	// Mode is what the source was when the snapshot was taken. A survey holds
-	// no configs, a rehearsal's came from a running source, and a final
-	// snapshot's from a stopped one.
+	// Mode says what the source was: a survey holds no configs, a rehearsal's came
+	// from a running source, a final one's from a stopped source.
 	Mode archive.Mode
-	// Plan is plan.yaml, byte for byte as discovery wrote it: apply's plan id
-	// is a digest of these bytes.
+	// Plan is plan.yaml as discovery wrote it; apply's plan id is its digest.
 	Plan []byte
 	// Report is report.txt, what discovery would not migrate.
 	Report []byte
-	// Source is the manifests discovery read, keyed by the name archive.Source
-	// gives them. They are the record of what the plan was built from.
+	// Source is the manifests discovery read, keyed as archive.Source names them.
 	Source map[string][]byte
 	// Configs are the apps whose config trees travel in the snapshot, in
 	// config/<instance>/.
 	Configs []Config
-	// Box is the version that wrote the snapshot, so an archive from another
-	// box is recognisable before it is applied.
+	// Box is the version that wrote it, recognisable before applying.
 	Box string
-	// Now is the clock the manifest's created and the caller's name come from.
-	// Empty means time.Now.
+	// Now is the clock; empty means time.Now.
 	Now func() time.Time
 }
 
@@ -119,16 +91,13 @@ type Written struct {
 	Path string
 	// Mode is the mode its manifest carries.
 	Mode archive.Mode
-	// Skipped are the links the config trees carried that the archive left
-	// out, with the reason (internal/archive's rule: a link at the pod's
-	// stdout is not part of a config tree).
+	// Skipped are links the archive left out, with the reason (internal/archive's
+	// rule).
 	Skipped []archive.Skipped
 }
 
-// Write writes one snapshot at path, creating its directory 0700 if it is not
-// there. The file appears whole or not at all (internal/archive commits on
-// Close), so a run that stops halfway leaves nothing a later run could mistake
-// for a snapshot.
+// Write writes one snapshot at path, making its directory 0700. The file appears
+// whole or not at all (archive commits on Close), so a half run leaves nothing.
 func Write(path string, s Snapshot) (Written, error) {
 	var res Written
 	if len(s.Plan) == 0 {
@@ -149,8 +118,8 @@ func Write(path string, s Snapshot) (Written, error) {
 		return res, fmt.Errorf("write %s: %w", path, err)
 	}
 	dir := filepath.Dir(path)
-	// The directory is box's to make and to set the mode of; one the operator
-	// named with --out is theirs, and its mode is not box's business.
+	// Box makes and modes its own directory; one named with --out is the
+	// operator's.
 	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return res, fmt.Errorf("create %s: %w", dir, err)
@@ -199,8 +168,7 @@ func Write(path string, s Snapshot) (Written, error) {
 			res.Skipped = append(res.Skipped, skipped...)
 			continue
 		}
-		// A config the snapshot carries a part of: the state the app cannot
-		// rebuild, and the directories above it, and nothing else.
+		// Only the state the app cannot rebuild, with the directories above it.
 		names := make([]string, len(c.Files))
 		for i, f := range c.Files {
 			names[i] = f.Path
@@ -227,9 +195,7 @@ func Write(path string, s Snapshot) (Written, error) {
 	return res, nil
 }
 
-// writableMode refuses a mode this box does not write a migration snapshot in.
-// A backup's mode is its own kind's (internal/archive refuses the pair), and a
-// snapshot of nothing is not a mode at all.
+// writableMode refuses a mode this box does not write a migrate snapshot in.
 func writableMode(mode archive.Mode) error {
 	switch mode {
 	case archive.ModeSurvey, archive.ModeRehearsal, archive.ModeFinal:
@@ -239,11 +205,8 @@ func writableMode(mode archive.Mode) error {
 		mode, archive.ModeSurvey, archive.ModeRehearsal, archive.ModeFinal)
 }
 
-// checkConfigs refuses a config list a snapshot cannot be built from: a name
-// that is not one directory under config/, the same instance twice, a directory
-// that is not there, a file name that is not a path inside it, or the same file
-// twice. All of them are named before the archive is created, so a refusal
-// leaves no file.
+// checkConfigs refuses what a snapshot cannot be built from, before the archive is
+// created, so a refusal leaves no file.
 func checkConfigs(configs []Config) error {
 	seen := make(map[string]bool, len(configs))
 	for _, c := range configs {
@@ -291,8 +254,7 @@ func checkConfigs(configs []Config) error {
 	return nil
 }
 
-// filePath reports whether name is one file inside a config directory, in slash
-// form: the thing an archive path may carry under config/<instance>/.
+// filePath reports whether name may be carried under config/<instance>/.
 func filePath(name string) bool {
 	if name == "" || name == "." || path.IsAbs(name) || strings.Contains(name, "\\") {
 		return false
@@ -308,8 +270,7 @@ func filePath(name string) bool {
 	return true
 }
 
-// has reports whether a list holds a value, in one place so a refusal reads the
-// same as the miss it is about.
+// has reports whether a list holds a value.
 func has(list []string, value string) bool {
 	for _, v := range list {
 		if v == value {
@@ -319,8 +280,7 @@ func has(list []string, value string) bool {
 	return false
 }
 
-// instanceName reports whether name is one directory name: the thing an archive
-// path may carry as config/<name>/.
+// instanceName reports whether name may be carried as config/<name>/.
 func instanceName(name string) bool {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
 		return false
@@ -328,68 +288,50 @@ func instanceName(name string) bool {
 	return path.Clean(name) == name
 }
 
-// Opened is a snapshot extracted into a private directory: what apply reads,
-// with the paths it finds each part at.
+// Opened is a snapshot extracted into a private directory, with each part's path.
 type Opened struct {
 	// Path is the file it was opened from.
 	Path string
-	// Dir is the private directory the whole snapshot was extracted into.
+	// Dir is the private directory it was extracted into.
 	Dir string
 	// Mode is what the source was when the snapshot was taken.
 	Mode archive.Mode
-	// Taken is when the snapshot was written, as its manifest says: the time
-	// the source was read, which is what a person decides about.
+	// Taken is the manifest's time: when the source was read.
 	Taken time.Time
-	// Box is the box that wrote it, so a run can say what read the source.
+	// Box is the box that wrote it.
 	Box string
 	// Plan is plan.yaml's bytes, which apply's plan id is computed over.
 	Plan []byte
 	// Report is report.txt, empty when the snapshot carries none.
 	Report []byte
-	// Source is the manifests discovery read, keyed as the snapshot names
-	// them.
+	// Source is the manifests, keyed as the snapshot names them.
 	Source map[string][]byte
-	// Configs is each planned app's config directory inside Dir, keyed by
-	// box's instance name. Empty in a survey.
+	// Configs is each app's config directory inside Dir, by instance name; empty
+	// in a survey.
 	Configs map[string]string
-	// Contents is what the snapshot holds of each planned app's config, counted
-	// by the pass that verified it: the numbers a copy of it writes, whether that
-	// copy is the extraction under Configs or the tree Stage writes.
+	// Contents is what the snapshot holds of each app's config, counted while
+	// verifying.
 	Contents map[string]Contents
-	// manifest is the verified list of everything the archive holds, which Stage
-	// writes a part of from.
+	// manifest is the verified entry list, which Stage writes from.
 	manifest *archive.Manifest
 }
 
-// Contents is what a snapshot holds of one planned app's config: the copy a run
-// writes into the config root.
+// Contents is what a snapshot holds of one app's config.
 type Contents struct {
-	// Files and Bytes are what a copy of it writes: the regular files and their
-	// bytes, which is what a tree's own copy reports.
+	// Files and Bytes are what a copy writes.
 	Files, Bytes int64
-	// Tree says the snapshot holds more of it than the extraction kept: the app's
-	// whole data, for the one app whose config is a library as well as its state.
-	// A run stages it once, straight into the config root (Stage).
+	// Tree says the snapshot holds more than the extraction kept -- a config that
+	// is a library as well as state -- which Stage writes once.
 	Tree bool
 }
 
 // Open verifies a snapshot and extracts it into dir, which must not exist yet and
-// belongs to the caller afterwards (apply removes it when it is done).
-//
-// A snapshot with no plan is refused: apply runs one, and a survey from a box
-// that could not read the source is not something to hand it.
-//
-// keep decides what is extracted now, and nil extracts everything. The one thing
-// a run leaves for later is the bulk of an app whose config is a library as well
-// as its state -- Plex's artwork and thumbnails, tens of gigabytes that no check
-// reads -- and the state alone is extracted in its place, so the checks, the
-// pre-install pass and the staging that follows them read it. Stage writes the
-// rest, once, at the config root.
-//
-// disk is where the room that extraction needs is asked about; nil asks the
-// host's own filesystems. The extraction is refused before its first write when
-// there is not room for it beside the snapshot, and the numbers it needs are the
-// manifest's, not a walk of a tree that is not on the host.
+// belongs to the caller afterwards. A snapshot with no plan is refused. keep
+// decides what is extracted now, nil extracting everything: a run leaves the bulk
+// of a config that is also a library (Plex's artwork) for Stage, extracting the
+// state alone so the checks read it. disk is where room is asked about, nil
+// meaning the host's own, and the extraction is refused before its first write
+// when the manifest's bytes do not fit.
 func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, error) {
 	m, held, err := verify(file, keep)
 	if err != nil {
@@ -420,12 +362,10 @@ func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, erro
 	return o, nil
 }
 
-// verify checks the archive whole before any of it is extracted -- a run writes
-// part of it after the box is installed, so a damaged copy has to stop the run now
-// rather than halfway through the last thing it does -- and counts what it holds
-// of each app's config in the same pass: it is the only one that knows a directory
-// from a file without walking a tree, and a tree is not on the host until Stage
-// writes it.
+// verify checks the whole archive before any extraction -- part is written after
+// the box is installed, so damage must stop the run now -- and counts each app's
+// config in the same pass, the only one that knows a directory from a file without
+// a tree on the host.
 func verify(file string, keep archive.Filter) (*archive.Manifest, map[string]Contents, error) {
 	held := map[string]Contents{}
 	m, err := archive.Verify(file, func(s archive.Seen) {
@@ -449,9 +389,8 @@ func verify(file string, keep archive.Filter) (*archive.Manifest, map[string]Con
 	return m, held, nil
 }
 
-// parts finds the source's manifests and each app's config directory in what the
-// extraction wrote: the paths are the manifest's own, so an entry that is not the
-// directory it has to be is a refusal naming it.
+// parts finds the manifests and each app's config directory; an entry that is not
+// the directory it must be is a refusal naming it.
 func (o *Opened) parts() error {
 	for _, name := range sortedKeys(o.manifest.Entries) {
 		switch {
@@ -488,14 +427,10 @@ func (o *Opened) parts() error {
 	return nil
 }
 
-// Stage writes one instance's config out of the snapshot into dst, which must not
-// exist, owned by uid:gid, and reports what it wrote.
-//
-// It is the other half of Open's filter: the tree a full carry holds, written
-// once -- straight from the archive into the staging tree that becomes the
-// instance's config directory -- so the bulk is never a second copy on the host,
-// and never beside the checks. The bytes are checked against the manifest again
-// as they are written.
+// Stage writes one instance's whole tree out of the snapshot into dst, owned by
+// uid:gid: the other half of Open's filter, straight from the archive, so the bulk
+// is never a second copy on the host. Bytes are checked against the manifest
+// again.
 func (o *Opened) Stage(instance, dst string, uid, gid int) (Contents, error) {
 	prefix := archive.ConfigPrefix + "/" + instance
 	if err := archive.ExtractTree(o.Path, dst, prefix, o.manifest, &archive.Owner{UID: uid, GID: gid}); err != nil {
@@ -504,9 +439,8 @@ func (o *Opened) Stage(instance, dst string, uid, gid int) (Contents, error) {
 	return o.Contents[instance], nil
 }
 
-// configInstance is the app one path inside an archive belongs to, when it is one:
-// config/<instance>/... is that instance's config, and the manifest's paths are
-// the only place the name comes from.
+// configInstance is the app a path belongs to: config/<instance>/..., the only
+// place the name comes from.
 func configInstance(name string) (string, bool) {
 	rest, ok := strings.CutPrefix(name, archive.ConfigPrefix+"/")
 	if !ok {
@@ -519,14 +453,10 @@ func configInstance(name string) (string, bool) {
 	return instance, true
 }
 
-// roomFor refuses a snapshot whose extraction will not fit beside it, before
-// anything is written: the plan, the report, the sources and the state of every
-// app, summed from the manifest.
-//
-// It is the extraction's own room and nothing more -- the bytes it writes, with
-// no margin -- because that is all it needs: a margin here would refuse a
-// migration for a disk that has room for everything it must write. The margin is
-// the carry's (carry.go), where a tree is written and space is left beside it.
+// roomFor refuses a snapshot whose extraction will not fit beside it, summed from
+// the manifest: only the bytes it writes, with no margin, because a margin here
+// would refuse a disk that has room for everything. The margin belongs to the
+// carry (carry.go).
 func roomFor(dir string, m *archive.Manifest, keep archive.Filter, disk space.Disk) error {
 	var need int64
 	for name, e := range m.Entries {
@@ -552,9 +482,7 @@ func roomFor(dir string, m *archive.Manifest, keep archive.Filter, disk space.Di
 	return nil
 }
 
-// readPart reads one file of an extracted snapshot. A file the manifest named
-// but the extraction did not leave is a refusal: archive.Open promises both
-// halves are there.
+// readPart reads one file of an extracted snapshot.
 func readPart(dir, name string) ([]byte, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
 	if err != nil {
@@ -566,14 +494,9 @@ func readPart(dir, name string) ([]byte, error) {
 	return raw, nil
 }
 
-// Newest is the snapshot `box migrate apply` runs when no file was named: the
-// newest migration snapshot in dir that is not a survey. A survey is a read of
-// a source with no configs in it, so it is never the answer; a rehearsal is,
-// and apply refuses it by name because the lock it applies under lands next.
-//
-// The newest is by name, which is the time the source was read, so a copy that
-// arrives with an older name does not become "the newest" by being copied
-// second.
+// Newest is what apply runs with no file named: the newest non-survey snapshot. A
+// survey holds no configs, so it is never the answer; a rehearsal is, and apply
+// refuses it by name. Newest is by name, the time the source was read.
 func Newest(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -594,9 +517,8 @@ func Newest(dir string) (string, error) {
 		path := filepath.Join(dir, name)
 		m, err := archive.Read(path)
 		if err != nil {
-			// One unreadable file is not the directory's answer: the operator
-			// gets the newest snapshot that reads, and the broken one stays
-			// where it is for them to look at.
+			// An unreadable file is skipped, not the answer: a broken copy stays
+			// for the operator.
 			continue
 		}
 		if m.Mode == archive.ModeSurvey {
@@ -607,9 +529,8 @@ func Newest(dir string) (string, error) {
 	return "", noSnapshot(dir, nil)
 }
 
-// noSnapshot is the refusal when a directory holds nothing apply can run. It
-// names the two commands that write one, because "apply" with no file is the
-// documented way to finish a cutover.
+// noSnapshot names the two commands that write one, since apply with no file is
+// how a cutover is finished.
 func noSnapshot(dir string, cause error) error {
 	msg := fmt.Sprintf("no snapshot in %s to apply: `box migrate cutover` writes the one a real run applies, and `box migrate apply <file>` takes one from another host", dir)
 	if cause != nil {
@@ -625,9 +546,7 @@ func isSnapshotName(name string) bool {
 	return ok
 }
 
-// nameStamp is the time a snapshot's name carries: when the source was read.
-// isSnapshotName is this, so a name that parses here is a snapshot's and one that
-// does not is left alone.
+// nameStamp is the time a snapshot's name carries.
 func nameStamp(name string) (time.Time, bool) {
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tar.gz") {
 		return time.Time{}, false
@@ -644,8 +563,7 @@ func nameStamp(name string) (time.Time, bool) {
 	return at, true
 }
 
-// sortedKeys is a map's keys, so a snapshot's entries are added the same way
-// twice and two snapshots of one source compare by their bytes' names.
+// sortedKeys is a map's keys, so entries are added the same way twice.
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

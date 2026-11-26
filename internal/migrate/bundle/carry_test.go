@@ -1,13 +1,8 @@
 package bundle
 
-// carry_test.go proves the split a full carry takes through a snapshot: the
-// archive holds Plex's whole data, the extraction keeps the state the checks read
-// and nothing else, the numbers a summary prints come from the pass that verified
-// the archive, and the tree is written once -- at the config root -- by Stage.
-//
-// It also proves the two refusals that make the split safe: a damaged snapshot is
-// refused before anything is extracted, and a snapshot whose state does not fit
-// beside it is refused with the numbers, before its first write.
+// carry_test.go proves the split a full carry takes: the archive holds Plex's whole
+// data, the extraction keeps the state the checks read, Stage writes the tree once,
+// and damage or a short disk is refused before any write.
 
 import (
 	"archive/tar"
@@ -25,8 +20,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plex"
 )
 
-// plexSnapshot writes one final snapshot of a source that ran Plex with its whole
-// data, and returns its path and the tree it was taken from.
+// plexSnapshot writes one final snapshot of a Plex source and returns its path and
+// tree.
 func plexSnapshot(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -46,9 +41,7 @@ func plexSnapshot(t *testing.T) (string, string) {
 	return path, tree
 }
 
-// homeTree is the config directory a real Plex keeps: everything -- the state,
-// the Metadata tree of covers and the cache it rebuilds -- under the one
-// directory the image names, which is the subtree a snapshot of Plex carries.
+// homeTree is a real Plex config under the one directory the image names.
 func homeTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -72,8 +65,8 @@ func homeTree(t *testing.T) string {
 	return dir
 }
 
-// stateOnly is what an apply's extraction keeps of a full carry: Plex's
-// Preferences.xml, its databases, and the directories above them.
+// stateOnly is what an apply's extraction keeps: preferences, databases and their
+// directories.
 func stateOnly(name string) bool {
 	rest, ok := strings.CutPrefix(name, archive.ConfigPrefix+"/plex/")
 	if !ok {
@@ -82,10 +75,6 @@ func stateOnly(name string) bool {
 	return plex.State(rest)
 }
 
-// TestTheExtractionKeepsPlexsStateAndTheArchiveKeepsItsTree: the checks and the
-// pre-install pass read a Plex config directory for its state, and the tree is
-// tens of gigabytes they never open -- so it stays in the snapshot, and the
-// numbers that describe it come from the pass that verified the archive.
 func TestTheExtractionKeepsPlexsStateAndItsTreeIsStagedOnce(t *testing.T) {
 	path, tree := plexSnapshot(t)
 	out := filepath.Join(t.TempDir(), "extract")
@@ -114,16 +103,15 @@ func TestTheExtractionKeepsPlexsStateAndItsTreeIsStagedOnce(t *testing.T) {
 	if c.Files == 0 || c.Bytes == 0 {
 		t.Errorf("the snapshot holds %d files and %d bytes of Plex's config, want the tree's numbers", c.Files, c.Bytes)
 	}
-	// The numbers are the whole instance's: what Stage writes -- the tree the
-	// snapshot carried, which is the source's less the caches it left out.
+	// The numbers are Stage's: the tree, less the caches the snapshot left out.
 	want := tallyOf(t, tree, plex.Snapshot(true).Skip)
 	if c.Files != want.Files || c.Bytes != want.Bytes {
 		t.Errorf("the snapshot holds %d files and %d bytes, want %d and %d (the tree minus its caches)",
 			c.Files, c.Bytes, want.Files, want.Bytes)
 	}
 
-	// The tree is written once, at the config root, out of the snapshot: the same
-	// bytes the source had, with the caches the snapshot left out absent.
+	// The tree is written once from the snapshot: the source's bytes, caches
+	// absent.
 	dst := filepath.Join(t.TempDir(), "plex")
 	staged, err := opened.Stage("plex", dst, os.Geteuid(), os.Getegid())
 	if err != nil {
@@ -150,8 +138,7 @@ func TestTheExtractionKeepsPlexsStateAndItsTreeIsStagedOnce(t *testing.T) {
 	}
 }
 
-// tallyOf is what a copy of a tree writes: its regular files and their bytes,
-// which is the rule the extraction counts by.
+// tallyOf is a copy's regular files and their bytes.
 func tallyOf(t *testing.T, tree string, skip []string) Contents {
 	t.Helper()
 	home := filepath.Join(tree, "Library", "Application Support", "Plex Media Server")
@@ -180,8 +167,6 @@ func tallyOf(t *testing.T, tree string, skip []string) Contents {
 	return c
 }
 
-// TestASnapshotThatKeepsEverythingSaysSo: a snapshot whose configs are all
-// extracted holds no tree, and its numbers are the files it holds.
 func TestASnapshotThatKeepsEverythingSaysSo(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
@@ -203,10 +188,6 @@ func TestASnapshotThatKeepsEverythingSaysSo(t *testing.T) {
 	}
 }
 
-// TestADamagedSnapshotIsRefusedBeforeItsExtraction: one byte of one file is not
-// the manifest's, and the run stops with nothing extracted -- the snapshot's tree
-// is written after the install, so a copy that lost a byte has to stop the run
-// now.
 func TestADamagedSnapshotIsRefusedBeforeItsExtraction(t *testing.T) {
 	path, _ := plexSnapshot(t)
 	tamper(t, path, archive.ConfigPrefix+"/plex/Library/Application Support/Plex Media Server/Preferences.xml")
@@ -221,8 +202,7 @@ func TestADamagedSnapshotIsRefusedBeforeItsExtraction(t *testing.T) {
 	}
 }
 
-// tamper rewrites one member's bytes and leaves its size alone, so the manifest's
-// digest is what catches it rather than its length.
+// tamper rewrites a member's bytes at the same size, so the digest catches it.
 func tamper(t *testing.T, path, name string) {
 	t.Helper()
 	f, err := os.Open(path)
@@ -294,9 +274,6 @@ func (d fixedDisk) Free(string) (int64, error) { return d.free, nil }
 
 func (d fixedDisk) Same(string, string) (bool, error) { return true, nil }
 
-// TestTheExtractionsRoomIsTheManifestsNumbers: the room a snapshot's state needs
-// is the manifest's, asked before anything is written, and a filesystem that
-// cannot hold it is a refusal that names the two numbers and the directory.
 func TestTheExtractionsRoomIsTheManifestsNumbers(t *testing.T) {
 	path, _ := plexSnapshot(t)
 	m, err := archive.Read(path)
@@ -326,8 +303,7 @@ func TestTheExtractionsRoomIsTheManifestsNumbers(t *testing.T) {
 	if _, err := os.Lstat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a refused extraction left %s behind", out)
 	}
-	// One byte more than it needs, and the run goes ahead: the check is the
-	// extraction's own room and nothing else.
+	// One byte more than it needs, and the run goes ahead.
 	if _, err := Open(path, out, stateOnly, fixedDisk{free: need}); err != nil {
 		t.Fatalf("Open with exactly the room it needs: %v", err)
 	}
