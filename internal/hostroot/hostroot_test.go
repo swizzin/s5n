@@ -26,11 +26,6 @@ func staleFixture(files ...string) disk {
 	return d
 }
 
-// TestLookRefusesAFreshRootWithOldFiles: the move is the whole upgrade. A host
-// that still has the old files and nothing at the new root must be refused
-// before a command reads "no record" and decides to install over an existing
-// box, and the refusal names the mv to double-check -- naming only the files
-// that are actually there.
 func TestLookRefusesAFreshRootWithOldFiles(t *testing.T) {
 	s, err := Look(RecordPath, SeedboxDir+"/root.yaml", staleFixture("cluster.yaml", "box.yaml", "seedboxes").stat)
 	if err != nil {
@@ -60,9 +55,8 @@ func TestLookRefusesAFreshRootWithOldFiles(t *testing.T) {
 	}
 }
 
-// TestLookNamesOnlyTheFilesItFound: a host that ran bootstrap but never init
-// has a record and no grant, and the move must not name a directory that does
-// not exist (mv would fail halfway through the operator's command).
+// A bootstrap-only host has a record and no grant, and the move must not name a
+// directory that does not exist: mv would fail halfway.
 func TestLookNamesOnlyTheFilesItFound(t *testing.T) {
 	s, err := Look(RecordPath, SeedboxDir+"/root.yaml", staleFixture("cluster.yaml").stat)
 	if err != nil {
@@ -76,10 +70,9 @@ func TestLookNamesOnlyTheFilesItFound(t *testing.T) {
 	}
 }
 
-// TestLookWarnsWhenBothRootsHaveTheFile: after the move the new root wins and
-// the run proceeds -- refusing there would lock out a box that did the right
-// thing -- but the old copy is named once, because it is the file someone
-// would go on editing.
+// After the move the new root wins and the run proceeds; refusing there would
+// lock out a box that did the right thing. The old copy is named once, because
+// it is the file someone would go on editing.
 func TestLookWarnsWhenBothRootsHaveTheFile(t *testing.T) {
 	d := staleFixture("cluster.yaml", "box.yaml", "seedboxes")
 	d[RecordPath] = true
@@ -105,8 +98,6 @@ func TestLookWarnsWhenBothRootsHaveTheFile(t *testing.T) {
 	}
 }
 
-// TestLookOnAFreshHostIsSilent: no files anywhere is a host box installs on,
-// and nothing about it is worth a line.
 func TestLookOnAFreshHostIsSilent(t *testing.T) {
 	s, err := Look(RecordPath, SeedboxDir+"/root.yaml", disk{}.stat)
 	if err != nil {
@@ -117,10 +108,9 @@ func TestLookOnAFreshHostIsSilent(t *testing.T) {
 	}
 }
 
-// TestLookIgnoresARecordSomewhereElse: --record names a file box reads instead
-// of the default, so the default root's old files are not what this run would
-// have read. `box bootstrap --record /srv/e2e/cluster.yaml` must not refuse
-// because the machine happens to have a 0.4 box on it.
+// --record names a file box reads instead of the default, so the default root's
+// old files are not this run's: `box bootstrap --record /srv/e2e/cluster.yaml`
+// must not refuse because the machine has an old box on it.
 func TestLookIgnoresARecordSomewhereElse(t *testing.T) {
 	s, err := Look("/srv/e2e/cluster.yaml", "/srv/e2e/root.yaml", staleFixture("cluster.yaml", "box.yaml", "seedboxes").stat)
 	if err != nil {
@@ -131,18 +121,16 @@ func TestLookIgnoresARecordSomewhereElse(t *testing.T) {
 	}
 }
 
-// TestLookDoesNotReadThroughASymlink: box never follows a symlink when it walks
-// a seedbox's files, so a link standing in for one of its own files is not that
-// file -- and statting through it would make a link in the old root look like a
-// record box could move.
+// box never follows a symlink when it walks a seedbox's files, so a link standing
+// in for one of its own is not that file: statting through it would make a link
+// in the old root look like a record box could move.
 func TestLookDoesNotReadThroughASymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "elsewhere.yaml")
 	if err := os.WriteFile(target, []byte("decided: install\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Stat is given the link's own path; it answers for the link, not the
-	// target, because Look never resolves it.
+	// Stat is given the link's own path; it answers for the link, not the target.
 	if err := os.Symlink(target, filepath.Join(dir, "cluster.yaml")); err != nil {
 		t.Fatal(err)
 	}
@@ -155,9 +143,8 @@ func TestLookDoesNotReadThroughASymlink(t *testing.T) {
 	}
 }
 
-// TestLookReportsAStatThatFailed: a directory box cannot look into is not "the
-// old files are gone". Deciding either way from a failed read is how a
-// refusal becomes an install over a live box.
+// A directory box cannot look into is not "the old files are gone": deciding
+// either way from a failed read turns a refusal into an install over a live box.
 func TestLookReportsAStatThatFailed(t *testing.T) {
 	failed := errors.New("permission denied")
 	stat := func(path string) (bool, error) { return false, failed }
@@ -170,8 +157,7 @@ func TestLookReportsAStatThatFailed(t *testing.T) {
 	}
 }
 
-// TestPathsAreOneSet: the three paths are the same directory with one name
-// each. A second spelling is the bug this package exists to prevent.
+// A second spelling of a path is the bug this package exists to prevent.
 func TestPathsAreOneSet(t *testing.T) {
 	if RecordPath != Dir+"/"+RecordName || SeedboxDir != Dir+"/"+SeedboxName {
 		t.Fatalf("paths drifted: %q %q %q", RecordPath, SeedboxDir, Dir)
