@@ -18,14 +18,10 @@ import (
 	"testing"
 )
 
-// The tests drive a release page of their own: an httptest server that answers
-// /releases/latest with the redirect GitHub's release page answers with, and
-// serves the three assets of one release. Everything a real update fetches is
-// fetched here, so a refusal is proved by what the server was asked for, not by
-// what the code says it would ask for.
+// The tests serve a release page of their own, so a refusal is proved by what
+// the server was asked for, not by what the code says it would ask.
 
-// testKey generates a signing pair and puts its public half where the package
-// reads the compiled-in key, so a release the test signs is one box trusts.
+// testKey puts a generated public key where the package reads its own.
 func testKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -43,19 +39,16 @@ type fakeRelease struct {
 	version string
 	binary  []byte
 	sums    []byte
-	// signature is what the release serves as sha256sums.txt.sig. Empty means
-	// "sign sums with the test's key", which is the good release.
+	// signature is sha256sums.txt.sig; empty means the test key's good one.
 	signature []byte
-	// tag overrides the release the latest redirect points at, for a page that
-	// names a tag from the other family. Empty means this release's own.
+	// tag overrides the latest redirect's tag; empty means this release's.
 	tag string
-	// asked is every path the server answered, in order. A refusal that
-	// downloads nothing is proved by this being only the release page.
+	// asked is every path answered, in order: a refusal that fetches nothing
+	// shows only the release page.
 	asked []string
 }
 
-// releaseOf builds the release box 0.5.0 would publish: a binary for this
-// architecture, and the checksums over it signed by seed.
+// releaseOf builds a release for this architecture, signed by seed.
 func releaseOf(t *testing.T, seed ed25519.PrivateKey, version string) *fakeRelease {
 	t.Helper()
 	binary := []byte("#!/bin/sh\necho box " + version + "\n")
@@ -68,7 +61,7 @@ func releaseOf(t *testing.T, seed ed25519.PrivateKey, version string) *fakeRelea
 	}
 }
 
-// sumsLine is one sha256sum line, the way `sha256sum` writes it.
+// sumsLine is one line the way `sha256sum` writes it.
 func sumsLine(data []byte, name string) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x  %s\n", sum, name)
@@ -102,8 +95,7 @@ func (f *fakeRelease) serve(t *testing.T) *httptest.Server {
 	return server
 }
 
-// installDir makes a directory holding a box binary, the way a host has one,
-// and returns the binary's path.
+// installDir makes a host-like directory holding a box binary.
 func installDir(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -114,8 +106,7 @@ func installDir(t *testing.T, content string) string {
 	return path
 }
 
-// options is root's update against one test release, replacing the binary at
-// path.
+// options is root's update against one test release.
 func options(server *httptest.Server, path string) Options {
 	return Options{
 		Version:        "0.4.0",
@@ -125,8 +116,7 @@ func options(server *httptest.Server, path string) Options {
 	}
 }
 
-// assertDir is what an update left behind, exactly: a failure that leaves a
-// temporary file beside a binary is how a retry meets a half-written one.
+// assertDir pins the directory exactly: a leftover temporary file is a hazard.
 func assertDir(t *testing.T, path string, want ...string) {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Dir(path))
@@ -200,8 +190,7 @@ func TestUpdateRefusesABadSignature(t *testing.T) {
 	assertDir(t, path, "box")
 }
 
-// testKeyFor generates a pair without touching the compiled-in key: a second
-// key, used to sign something the box must not trust.
+// testKeyFor generates a second key without touching the compiled-in one.
 func testKeyFor(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
@@ -212,11 +201,8 @@ func testKeyFor(t *testing.T) ed25519.PrivateKey {
 }
 
 func TestUpdateRefusesAnOlderReleasesSignature(t *testing.T) {
-	// The replay the tag in the signed message exists to stop: an older
-	// release's checksums, signature and binary are all genuine -- they were
-	// signed by the release key -- and serving them under this release's tag
-	// is a downgrade to an older box. The sums are the older release's, so the
-	// signature over them verifies; what it does not cover is this tag.
+	// An older release's sums, signature and binary are all genuine and verify;
+	// only the tag in the signed message refuses this downgrade.
 	seed := testKey(t)
 	older := releaseOf(t, seed, "0.4.1")
 	release := releaseOf(t, seed, "0.5.0")
@@ -241,8 +227,7 @@ func TestUpdateRefusesAnOlderReleasesSignature(t *testing.T) {
 func TestUpdateRefusesABinaryItsChecksumsDontName(t *testing.T) {
 	seed := testKey(t)
 	release := releaseOf(t, seed, "0.5.0")
-	// Correctly signed checksums for a binary that is not the one served: the
-	// signature is good, and the binary is still not what the release names.
+	// The signature is good, but the served binary is not what it names.
 	wrong := []byte("some other binary")
 	release.sums = []byte(sumsLine(wrong, binaryAsset()))
 	release.signature = SignSums(seed, release.version, release.sums)
@@ -295,8 +280,7 @@ func TestUpdateRefusesABoxWithNoSigningKey(t *testing.T) {
 		!strings.Contains(err.Error(), "replace it by hand") {
 		t.Fatalf("Update refused with %q, want the missing-key refusal", err)
 	}
-	// Not a single request: a box that cannot verify a release does not fetch
-	// one to look at.
+	// A box that cannot verify a release fetches none.
 	if len(release.asked) != 0 {
 		t.Fatalf("a box with no key asked for %v, want nothing", release.asked)
 	}
@@ -384,8 +368,7 @@ func TestUpdateHoldsTheRelease(t *testing.T) {
 	if !result.Held || result.Changed || result.To != "0.5.0" || result.From != "0.4.0" {
 		t.Fatalf("Update returned %+v, want the held release named and nothing changed", result)
 	}
-	// The version question was asked and the release itself was not: holding
-	// is a decision about a version, not a download that got thrown away.
+	// Holding asks the version question and fetches no release.
 	if want := []string{"/releases/latest"}; !slices.Equal(release.asked, want) {
 		t.Fatalf("a held update asked for %v, want %v", release.asked, want)
 	}
@@ -535,7 +518,7 @@ func TestCheckReportsTheNewestRelease(t *testing.T) {
 	server := release.serve(t)
 	opts := Options{Version: "0.4.0", BaseURL: server.URL}
 
-	// No euid and no executable: Check writes nothing, so a user's box can ask.
+	// No euid and no executable: Check writes nothing.
 	found, err := Check(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -562,9 +545,8 @@ func TestCheckRefusesADevBuild(t *testing.T) {
 }
 
 func TestReexecutedReportsTheMark(t *testing.T) {
-	// The mark is what stops a re-executed box updating itself again. A caller
-	// asks before it offers an update at all, so the answer has to be right for
-	// the versions that can carry a mark and for the ones that cannot.
+	// A caller asks before offering an update, so the mark must be read
+	// correctly for versions that can carry one and for those that cannot.
 	for _, tc := range []struct {
 		version string
 		mark    string
@@ -588,9 +570,8 @@ func TestReexecutedReportsTheMark(t *testing.T) {
 }
 
 func TestExecutablePathResolvesASymlink(t *testing.T) {
-	// A packaging script may link the command into a bin directory; the file
-	// the link names is the one an update replaces, or the rename would land on
-	// the link and leave the old binary running.
+	// Replacing the link rather than the file it names leaves the old binary
+	// running.
 	real := installDir(t, "old box")
 	link := filepath.Join(t.TempDir(), "box")
 	if err := os.Symlink(real, link); err != nil {
@@ -607,7 +588,7 @@ func TestExecutablePathResolvesASymlink(t *testing.T) {
 	if resolved != real {
 		t.Fatalf("executablePath returned %s, want the file it resolves to, %s", resolved, real)
 	}
-	// The override is the path itself: a test has no binary of its own to find.
+	// The override is used as given.
 	if got, err := executablePath(Options{ExecutablePath: "/opt/box/box"}); err != nil || got != "/opt/box/box" {
 		t.Fatalf("executablePath with an override returned %q, %v", got, err)
 	}
@@ -664,12 +645,11 @@ func TestSignSumsRoundTripsThroughVerifySums(t *testing.T) {
 	if err := VerifySums(public, "0.5.0", sums, signature); err != nil {
 		t.Fatalf("VerifySums on a signature SignSums made: %v", err)
 	}
-	// The message is the release's tag, then the checksums: domain separation
-	// and the version, in the bytes a signature covers.
+	// The message is the tag, then the checksums.
 	if want := "s5n box release box-v0.5.0\n" + string(sums); string(signedMessage("0.5.0", sums)) != want {
 		t.Fatalf("the signed message is %q, want %q", signedMessage("0.5.0", sums), want)
 	}
-	// The asset is one line: a trailing newline and nothing else.
+	// The asset is one line.
 	if lines := strings.Split(strings.TrimSuffix(string(signature), "\n"), "\n"); len(lines) != 1 {
 		t.Fatalf("the signature asset is %d lines, want 1", len(lines))
 	}
@@ -681,9 +661,7 @@ func TestSignSumsRoundTripsThroughVerifySums(t *testing.T) {
 	if err := VerifySums(public, "0.5.0", tampered, signature); err == nil {
 		t.Fatal("VerifySums accepted a signature over different checksums")
 	}
-	// The same checksums under another tag are another release too. Two box
-	// releases can publish the same binaries, so nothing in the sums tells
-	// them apart: only the tag in the signed message does.
+	// Two releases can publish the same binaries; only the tag separates them.
 	for _, other := range []string{"0.4.9", "0.5.1", "0.5.0+rebuilt", ""} {
 		if err := VerifySums(public, other, sums, signature); err == nil {
 			t.Fatalf("VerifySums accepted this release's signature as box-v%s's", other)
@@ -698,7 +676,7 @@ func TestSignSumsRoundTripsThroughVerifySums(t *testing.T) {
 	if err := VerifySums(nil, "0.5.0", sums, signature); err == nil || !strings.Contains(err.Error(), "built without a signing key") {
 		t.Fatalf("VerifySums with no key returned %v, want the missing-key refusal", err)
 	}
-	// A CR from a proxy that rewrote the line is not a different signature.
+	// A proxy's CR does not change the signature.
 	if err := VerifySums(public, "0.5.0", sums, []byte(strings.TrimSpace(string(signature))+"\r\n")); err != nil {
 		t.Fatalf("VerifySums on a CRLF signature: %v", err)
 	}
@@ -717,8 +695,7 @@ func TestParsePublicKey(t *testing.T) {
 	if !got.Equal(public) {
 		t.Fatal("ParsePublicKey returned another key")
 	}
-	// The seed and the key are both 32 bytes and both base64: the seed must not
-	// be usable as a public key by accident, and the pairing is what proves it.
+	// Both are 32 base64 bytes, so the pair proves the seed rebuilt the key.
 	seed, err := ParseSeed(base64.StdEncoding.EncodeToString(private.Seed()))
 	if err != nil {
 		t.Fatalf("ParseSeed: %v", err)

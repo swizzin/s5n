@@ -19,8 +19,7 @@ func TestRollbackPutsThePreviousBinaryBack(t *testing.T) {
 		t.Fatalf("Rollback: %v", err)
 	}
 	assertContent(t, path, []byte("old box"))
-	// One step back only: the binary that was replaced is gone, and there is
-	// nothing left to go back to.
+	// One step back only: the previous binary is consumed.
 	assertDir(t, path, "box")
 	err := Rollback(path)
 	if err == nil {
@@ -54,8 +53,7 @@ func TestReexecMarksTheNewVersion(t *testing.T) {
 	}
 	t.Cleanup(func() { execProcess = previous })
 
-	// The old mark is the version this process was re-executed with; the new
-	// one has to replace it, not sit beside it.
+	// The new mark replaces the old one rather than sitting beside it.
 	supplied := []string{"PATH=/usr/bin", ReexecEnv + "=0.4.0", "HOME=/root"}
 	if err := Reexec("/usr/local/bin/box", []string{"update", "--yes"}, supplied, "0.5.0"); err != nil {
 		t.Fatalf("Reexec: %v", err)
@@ -69,7 +67,7 @@ func TestReexecMarksTheNewVersion(t *testing.T) {
 	if want := []string{"PATH=/usr/bin", "HOME=/root", ReexecEnv + "=0.5.0"}; !slices.Equal(env, want) {
 		t.Fatalf("Reexec exec'd with env %v, want %v", env, want)
 	}
-	// The argument the caller was given is not modified in place.
+	// The caller's environment is not modified in place.
 	if want := []string{"PATH=/usr/bin", ReexecEnv + "=0.4.0", "HOME=/root"}; !slices.Equal(supplied, want) {
 		t.Fatalf("Reexec changed the caller's environment to %v", supplied)
 	}

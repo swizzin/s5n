@@ -19,90 +19,68 @@ import (
 )
 
 const (
-	// ReexecEnv carries the version of the binary a re-executed update is now
-	// running. Update refuses when it equals the running version: the release
-	// page still naming something newer after box has just installed it is a
-	// release's problem, and updating again would loop instead of fixing it.
+	// ReexecEnv carries the version a re-executed update now runs. Update
+	// refuses when it equals the running version: updating again would loop.
 	ReexecEnv = "S5N_BOX_REEXEC"
 
-	// DefaultBaseURL is where box's releases are published. A release's assets
-	// and its latest-release redirect both live under it; Options.BaseURL
-	// replaces it so a test can serve a release of its own.
+	// DefaultBaseURL is where box's releases are published; tests replace it.
 	DefaultBaseURL = "https://github.com/swizzin/s5n"
 
-	// tagPrefix is the tag family box releases live in. releases/latest points
-	// at one of these, because a box release is the only kind marked latest
+	// tagPrefix is the tag family box releases live in; only one is latest
 	// (docs/box.md, "Where a release lives").
 	tagPrefix = "box-v"
 
-	// The three assets a box release carries for an update: the checksums, the
-	// signature over them, and one binary per architecture.
+	// sumsAsset, sigAsset and one binary per architecture are the release.
 	sumsAsset = "sha256sums.txt"
 	sigAsset  = "sha256sums.txt.sig"
 
-	// defaultMaxBinaryBytes caps the download. box's binary is tens of
-	// megabytes; a body ten times that is not a box release, and reading it to
-	// find out is how a disk fills. Options.MaxBinaryBytes makes the cap
-	// something a test can reach without writing 256 MiB.
+	// defaultMaxBinaryBytes caps the download: a body ten times a box binary
+	// is not a release, and reading it to find out fills a disk.
 	defaultMaxBinaryBytes int64 = 256 << 20
-	// defaultMaxMetadataBytes caps the checksums and the signature: two short
-	// files, and 64 KiB is already far past either.
+	// defaultMaxMetadataBytes caps the checksums and the signature.
 	defaultMaxMetadataBytes int64 = 64 << 10
 )
 
-// Options is what one check or update needs to know. The zero value is a
-// release box on a host whose release page is GitHub's; a test fills in a
-// BaseURL, a Version and an ExecutablePath.
+// Options is what one check or update needs to know.
 type Options struct {
-	// Version is the box version now running, as -X main.version set it. It is
-	// read and never written; Update replaces the binary, not the version
-	// compiled into it.
+	// Version is the box version now running, as -X main.version set it.
 	Version string
 
-	// BaseURL is the repository the releases live in. Empty means
-	// DefaultBaseURL.
+	// BaseURL is the repository the releases live in; empty is DefaultBaseURL.
 	BaseURL string
 
-	// ExecutablePath is the binary to replace. Empty means box's own: whatever
-	// os.Executable names, with symlinks resolved, so a binary installed
-	// behind a link is replaced rather than the link. Tests set it.
+	// ExecutablePath is the binary to replace; empty means box's own with
+	// symlinks resolved, so an installed link is not replaced.
 	ExecutablePath string
 
-	// Packaged names the package manager that installed box, when one did. A
-	// packaged box never overwrites itself: the package manager owns the file,
-	// and would undo the update on its next run. Naming it is the whole point
-	// of the refusal, so the zero value means "not packaged".
+	// Packaged names the package manager that installed box. A packaged box
+	// never overwrites itself: the manager owns the file and would undo it.
 	Packaged string
 
-	// Hold is the operator's decision not to take this update. The release is
-	// named and nothing else about it is fetched.
+	// Hold is the operator's decision not to take this update.
 	Hold bool
 
-	// HTTPClient is the client the fetches use. Empty means one whose transport
-	// retries a transient failure (internal/fetch) — GitHub being briefly
-	// unwell is not something an operator can fix. A test supplies its own.
+	// HTTPClient is the client the fetches use; empty retries transient
+	// failures (internal/fetch). A test supplies its own.
 	HTTPClient *http.Client
 
-	// Geteuid reports the effective user id; nil means os.Geteuid. Update has
-	// to run as root, so a test substitutes a uid rather than privileges.
+	// Geteuid reports the effective user id; nil means os.Geteuid.
 	Geteuid func() int
 
-	// MaxBinaryBytes and MaxMetadataBytes cap one download. Zero means
-	// defaultMaxBinaryBytes and defaultMaxMetadataBytes.
+	// MaxBinaryBytes and MaxMetadataBytes cap one download; zero means the
+	// defaults.
 	MaxBinaryBytes   int64
 	MaxMetadataBytes int64
 }
 
-// Available is what Check found: the release the page names, and whether it is
-// newer than this box.
+// Available is what Check found: the newest release, and whether it is newer.
 type Available struct {
-	// Current is the running version, as Options.Version gave it.
+	// Current is the running version.
 	Current string
 	// Latest is the version the newest release carries.
 	Latest string
-	// Newer reports that Latest is greater than Current in semver order. An
-	// older release (a tag published after a newer one) is named but never
-	// installed.
+	// Newer reports that Latest is greater than Current in semver order; an
+	// older release is named but never installed.
 	Newer bool
 	// Held reports that the caller asked to hold the self-update.
 	Held bool
@@ -112,8 +90,7 @@ type Available struct {
 type Result struct {
 	// From is the version this run started on.
 	From string
-	// To is the version now in place. When Held is set it is instead the newer
-	// release that was not taken, and nothing was written.
+	// To is the version now in place, or the held release that was not taken.
 	To string
 	// Path is the binary Update would have replaced, or did.
 	Path string
@@ -125,14 +102,9 @@ type Result struct {
 	Held bool
 }
 
-// Check reports the newest box release and whether it is newer than this one.
-// It writes nothing and downloads only the release page's redirect, so it is
-// safe for a user's box: a user cannot replace the binary, and this is how
-// their box learns root's next update has something to bring.
-//
-// It refuses a development build: without a version there is nothing to
-// compare a release against. Hold is passed through in the answer; whether to
-// take the release is Update's question.
+// Check reports the newest box release and whether it is newer. It writes
+// nothing and downloads only the release page's redirect, so a user's box may
+// call it; it refuses a development build, which has no version to compare.
 func Check(ctx context.Context, o Options) (Available, error) {
 	if err := checkVersion(o.Version); err != nil {
 		return Available{}, err
@@ -140,24 +112,15 @@ func Check(ctx context.Context, o Options) (Available, error) {
 	return available(ctx, o)
 }
 
-// Update replaces box's binary with the newest release it can verify.
+// Update replaces box's binary with the newest release it can verify. It
+// refuses before fetching anything when this build has no version, this process
+// is already a re-executed update, it is not root, or box came from a package;
+// a box with no signing key refuses too and never skips verification.
 //
-// It refuses in this order, each before anything is fetched or written: this
-// build has no version to compare (a development build), this process is
-// already the new version re-executed, this is not root, box came from a
-// package manager. A box with no signing key compiled in refuses too, and never
-// skips verification to get past it.
-//
-// A release that is not newer, or one the caller holds, is reported and not
-// taken. Otherwise the checksums and their signature are fetched, the
-// signature verified, the binary for this architecture downloaded and checked
-// against the checksum, and the swap made: box.previous beside the binary, the
-// new binary renamed over it, the directory fsynced. A failure at any point
-// leaves the running binary in place and no temporary file behind.
-//
-// Re-executing into the new binary is the caller's step (Reexec): Update
-// returns, and the update that asked for it carries on under the version it
-// just installed.
+// A release that is not newer, or is held, is reported and not taken. Otherwise
+// the signature, the checksums and the binary are verified in that order and
+// swapped in atomically; a failure leaves the running binary in place, and
+// Reexec is the caller's next step.
 func Update(ctx context.Context, o Options) (Result, error) {
 	if err := checkVersion(o.Version); err != nil {
 		return Result{}, err
@@ -205,8 +168,7 @@ func Update(ctx context.Context, o Options) (Result, error) {
 	}, nil
 }
 
-// available is the version question both entry points ask: what the newest
-// release is, and whether it is newer than this box.
+// available answers what the newest release is, and whether it is newer.
 func available(ctx context.Context, o Options) (Available, error) {
 	latest, err := latestVersion(ctx, o)
 	if err != nil {
@@ -228,9 +190,7 @@ func available(ctx context.Context, o Options) (Available, error) {
 	}, nil
 }
 
-// checkVersion refuses a build that cannot be compared with a release. A
-// development build says so instead of pretending it is up to date: it is the
-// version the release page would be compared against, and there isn't one.
+// checkVersion refuses a build with no version to compare a release against.
 func checkVersion(version string) error {
 	if release.IsDevVersion(version) {
 		return fmt.Errorf("this is a development build of box (version %q), so there is no released version to compare it with: self-update needs a release build, made with -X main.version", version)
@@ -241,10 +201,8 @@ func checkVersion(version string) error {
 	return nil
 }
 
-// checkLoop refuses the second update of one run. Update installs a binary and
-// the caller re-execs it with the same arguments; if that process still found
-// something newer than itself, updating again would replace the binary it is
-// running and re-exec forever.
+// checkLoop refuses the second update of one run: the re-executed process would
+// otherwise replace the binary it is running and loop forever.
 func checkLoop(o Options) error {
 	if !Reexecuted(o.Version) {
 		return nil
@@ -254,13 +212,7 @@ func checkLoop(o Options) error {
 }
 
 // Reexecuted reports whether this process is already the version an update
-// installed and re-executed: the mark Reexec leaves in the environment. A caller
-// asks before it offers to update at all, because "the update has already run in
-// this run" is a fact about the run and not a failure to report.
-//
-// A development build never re-executes -- it has no version to compare a
-// release with, so it has none to be marked with -- and an empty or "dev"
-// version is never a re-execution.
+// installed and re-executed. A development build never re-executes.
 func Reexecuted(version string) bool {
 	if release.IsDevVersion(version) {
 		return false
@@ -268,9 +220,8 @@ func Reexecuted(version string) bool {
 	return strings.TrimSpace(os.Getenv(ReexecEnv)) == strings.TrimSpace(version)
 }
 
-// checkRoot refuses the replacement a user's box cannot make. The binary is
-// root-owned, so this is not a policy box could relax: naming root's update is
-// the only way forward, and it is the sentence a user reads.
+// checkRoot refuses the replacement a user's box cannot make: the binary is
+// root-owned.
 func checkRoot(o Options) error {
 	if euid(o) == 0 {
 		return nil
@@ -285,10 +236,8 @@ func euid(o Options) int {
 	return os.Geteuid()
 }
 
-// checkPackaged refuses to overwrite a binary the package manager owns, and
-// names what does own it: an update here would be undone by the package's next
-// upgrade, or would leave the package database describing a file that is not
-// there.
+// checkPackaged refuses a binary the package manager owns, whose next upgrade
+// would undo the update.
 func checkPackaged(o Options) error {
 	manager := strings.TrimSpace(o.Packaged)
 	if manager == "" {
@@ -297,10 +246,8 @@ func checkPackaged(o Options) error {
 	return fmt.Errorf("this box was installed by a package manager (%s), so the package owns the binary: upgrade it with %s, not with box", manager, manager)
 }
 
-// executablePath is the binary an update replaces. A packaging script may
-// install it behind a symlink (or a maintainer may), and replacing the link
-// would leave the file it points at running: the path resolved here is the
-// file, and the rename has to land on it.
+// executablePath is the binary an update replaces. A symlink is resolved:
+// replacing the link would leave the file it points at running.
 func executablePath(o Options) (string, error) {
 	if o.ExecutablePath != "" {
 		return o.ExecutablePath, nil
@@ -316,24 +263,17 @@ func executablePath(o Options) (string, error) {
 	return resolved, nil
 }
 
-// ownExecutable is os.Executable. It is a variable so a test can hand the
-// resolver a path of its own, since the test binary is not box.
+// ownExecutable is os.Executable, a variable because the test binary is not box.
 var ownExecutable = os.Executable
 
-// ExecutablePath is the binary an update replaces: box's own, with symlinks
-// resolved, unless Options.ExecutablePath names one.
-//
-// Rollback needs it -- it puts the previous binary back over the file that runs,
-// and the link a packaging script installed is not that file -- so it is
-// exported rather than resolved a second way by the caller.
+// ExecutablePath is the binary an update replaces. Rollback needs the resolved
+// file, not an installed link.
 func ExecutablePath(o Options) (string, error) {
 	return executablePath(o)
 }
 
-// latestVersion reads the newest release's tag from the release page's
-// redirect. GitHub answers /releases/latest with a 302 to the tag, so the tag
-// is in a header box already has: there is no API call, no token and no rate
-// limit, which matters when every host on a fleet checks on a timer.
+// latestVersion reads the newest tag from the release page's redirect: no API
+// call, token or rate limit, which matters when every host checks on a timer.
 func latestVersion(ctx context.Context, o Options) (string, error) {
 	page := o.baseURL() + "/releases/latest"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, page, nil)
@@ -355,8 +295,7 @@ func latestVersion(ctx context.Context, o Options) (string, error) {
 	if location == "" {
 		return "", fmt.Errorf("%s redirected without a Location, so box cannot tell which release is newest", page)
 	}
-	// Only the tag matters, not the host: a test's server and GitHub both put
-	// it in the path's last segment.
+	// Only the tag matters, not the host: it is the path's last segment.
 	target, err := url.Parse(location)
 	if err != nil {
 		return "", fmt.Errorf("%s redirected to %q, which is not a URL: %v", page, location, err)
@@ -369,9 +308,8 @@ func latestVersion(ctx context.Context, o Options) (string, error) {
 	return version, nil
 }
 
-// assetURL is where one asset of one release lives. The assets sit beside the
-// tag rather than under the latest-release redirect, so a version box has
-// already decided on is the version it downloads.
+// assetURL is where one asset of a decided release lives, rather than under
+// the latest-release redirect.
 func (o Options) assetURL(version, name string) string {
 	return fmt.Sprintf("%s/releases/download/%s%s/%s", o.baseURL(), tagPrefix, version, name)
 }
@@ -384,8 +322,7 @@ func (o Options) baseURL() string {
 	return base
 }
 
-// assetClient follows redirects: a release download is a 302 to storage, and
-// the bytes box verifies are what comes back from there.
+// assetClient follows redirects: a release download is a 302 to storage.
 func assetClient(o Options) *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
@@ -393,8 +330,7 @@ func assetClient(o Options) *http.Client {
 	return &http.Client{Transport: fetch.Transport{}}
 }
 
-// redirectClient does not follow: the tag box wants is in the redirect's
-// Location, and following it would throw away the only copy of the answer.
+// redirectClient does not follow: the wanted tag is in the Location header.
 func redirectClient(o Options) *http.Client {
 	client := *assetClient(o)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -403,19 +339,15 @@ func redirectClient(o Options) *http.Client {
 	return &client
 }
 
-// binaryAsset is the release's binary for the platform box is running on. The
-// releases carry linux binaries only, and an architecture or platform the
-// checksums do not name is refused there, by name: the alternative is a build
-// that installs a binary it cannot run over itself.
+// binaryAsset is the release's binary for this platform. An architecture the
+// checksums do not name is refused there, never installed unseen.
 func binaryAsset() string {
 	return "box-" + runtime.GOOS + "-" + runtime.GOARCH
 }
 
-// sumFor reads one file's sha256 from a release's checksums. The format is
-// sha256sum's: the hex digest, whitespace, and the file name (a `*` marks a
-// binary-mode line). A missing line is refused rather than skipped, because a
-// release that does not name this architecture's binary has nothing box can
-// install, and a duplicated one has no answer at all.
+// sumFor reads one file's sha256 from sha256sum output (a `*` marks binary
+// mode). A missing line is refused: there is nothing to install; a duplicate
+// has no answer.
 func sumFor(sums []byte, name string) (string, error) {
 	var found string
 	for _, line := range strings.Split(string(sums), "\n") {

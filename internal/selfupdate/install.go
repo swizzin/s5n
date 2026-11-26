@@ -13,12 +13,9 @@ import (
 )
 
 // install verifies one release and puts its binary where the running box is.
-//
-// The order is the safety: the signature over the checksums is checked before a
-// line of them is read as a checksum; the binary is checked against that
-// checksum before the old binary is copied aside; and both file writes are a
-// temporary name and a rename, so the running box's path never names a file
-// that is still being written.
+// The order is the safety: signature before any checksum is read, checksum
+// before the old binary is copied aside, and every write is a temporary name
+// renamed into place.
 func install(ctx context.Context, o Options, version, binary string, key ed25519.PublicKey) error {
 	sums, err := get(ctx, o, o.assetURL(version, sumsAsset), sumsAsset, o.maxMetadataBytes())
 	if err != nil {
@@ -43,13 +40,10 @@ func install(ctx context.Context, o Options, version, binary string, key ed25519
 	if err != nil {
 		return err
 	}
-	// Nothing to remove once the rename below succeeds, and a failure before it
-	// must not leave the partially written file behind.
+	// No-op after the rename; removes the staged file on any earlier failure.
 	defer os.Remove(staged)
 
-	// The digest is taken from the staged file, not from the bytes the download
-	// counted: the file on disk is what will run, so a second read is what
-	// proves the write landed intact.
+	// Hash the staged file, not the download count: the disk is what will run.
 	got, err := hashFile(staged)
 	if err != nil {
 		return err
@@ -58,25 +52,21 @@ func install(ctx context.Context, o Options, version, binary string, key ed25519
 		return fmt.Errorf("the release's %s is not the binary its %s names (sha256 %s, want %s): refusing to install it", name, sumsAsset, got, want)
 	}
 
-	// The old binary is kept before the new one lands, never renamed away:
-	// between the two steps the path has to keep naming a working box.
+	// Keep the old binary before the new one lands: the path must always name
+	// a working box.
 	if err := keepPrevious(binary); err != nil {
 		return err
 	}
 	if err := os.Rename(staged, binary); err != nil {
 		return fmt.Errorf("installing over %s: %w", binary, err)
 	}
-	// The rename is what installs the new box; the directory sync is what makes
-	// it survive a crash in the next few milliseconds. As in internal/atomicfile,
-	// a failure here is not reported as a failed update: the bytes are already
-	// in place under the new name.
+	// The rename installs the new box; the directory sync makes it survive a
+	// crash. A failed sync is not a failed update: the bytes are in place.
 	_ = syncDir(dir)
 	return nil
 }
 
-// get fetches one small asset whole and refuses one over the cap. The cap is
-// applied while reading, so a body that is not a release's two short files
-// cannot fill memory first.
+// get fetches one small asset whole, refusing one over the cap while reading.
 func get(ctx context.Context, o Options, url, name string, limit int64) ([]byte, error) {
 	body, err := open(ctx, o, url)
 	if err != nil {
@@ -93,10 +83,9 @@ func get(ctx context.Context, o Options, url, name string, limit int64) ([]byte,
 	return data, nil
 }
 
-// download writes one architecture's binary beside the binary it will replace
-// and returns the temporary path. It sits in the same directory on purpose: the
-// rename that installs it has to be a rename within one filesystem, and a full
-// /tmp must not be able to fail the update halfway through.
+// download writes the binary beside the one it will replace and returns the
+// temporary path: the rename must stay within one filesystem, and a full /tmp
+// must not fail the update halfway.
 func download(ctx context.Context, o Options, url, name, dir string, limit int64) (string, error) {
 	body, err := open(ctx, o, url)
 	if err != nil {
@@ -121,9 +110,7 @@ func download(ctx context.Context, o Options, url, name, dir string, limit int64
 	if n > limit {
 		return fail(fmt.Errorf("the release's %s is larger than %d bytes, which no box release's is: refusing it", name, limit))
 	}
-	// The bytes have to be durable before the name that makes them the running
-	// box is: an update that survives the rename but not a power cut is a box
-	// that could come back as a half-written file.
+	// The bytes must be durable before the rename makes them the running box.
 	if err := file.Sync(); err != nil {
 		return fail(fmt.Errorf("writing the new box beside %s: %w", dir, err))
 	}
@@ -137,9 +124,8 @@ func download(ctx context.Context, o Options, url, name, dir string, limit int64
 	return staged, nil
 }
 
-// open starts one asset download. internal/fetch's transport has already
-// retried a transient failure and named the URL in its own error, so an error
-// here is reported as it comes.
+// open starts one asset download; internal/fetch has already retried and named
+// the URL.
 func open(ctx context.Context, o Options, url string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -156,8 +142,7 @@ func open(ctx context.Context, o Options, url string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-// hashFile is the sha256 of a file on disk, hex, as a release's checksums spell
-// it.
+// hashFile is a file's sha256 in hex, as a release's checksums spell it.
 func hashFile(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -171,12 +156,9 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-// keepPrevious copies the running binary to box.previous, through a temporary
-// file and a rename so a failure leaves no half-written copy.
-//
-// It streams rather than going through internal/atomicfile, which takes the
-// bytes in memory: a box binary is tens of megabytes and there is no reason to
-// hold two copies of it to keep one.
+// keepPrevious copies the running binary to box.previous through a temporary
+// file and a rename. It streams rather than using internal/atomicfile, which
+// would hold two copies of a tens-of-megabytes binary in memory.
 func keepPrevious(binary string) error {
 	previous := previousPath(binary)
 	src, err := os.Open(binary)
@@ -217,8 +199,7 @@ func keepPrevious(binary string) error {
 	return nil
 }
 
-// syncDir makes a rename in dir durable: the bytes were fsynced, but the name
-// that points at them lives in the directory.
+// syncDir makes a rename durable: the name lives in the directory.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
@@ -231,9 +212,8 @@ func syncDir(dir string) error {
 	return nil
 }
 
-// discard drains and closes a body box is not going to read, so the connection
-// goes back to the pool instead of being torn down. (internal/fetch keeps its
-// own unexported copy for the same reason.)
+// discard drains and closes an unread body so the connection is reused.
+// internal/fetch keeps its own copy for the same reason.
 func discard(body io.ReadCloser) {
 	if body == nil {
 		return
