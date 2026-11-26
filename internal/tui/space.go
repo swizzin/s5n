@@ -5,19 +5,14 @@ import (
 	"sync"
 )
 
-// space is the one empty line between the output above a masthead box and the
-// box itself.
+// space is the one empty line between the output above a masthead box and the box.
+// A masthead opens with it -- a last line hugging "b o x s5n · platform" reads as
+// crowded -- except when nothing is above it, and except when the output above
+// already ended blank, since two empty lines read as a break in the run.
 //
-// A masthead opens with it -- the previous step's last line hugging "b o x s5n
-// · platform" reads as crowded -- except when there is nothing above it to be
-// separated from (the first thing a run prints), and except when the output
-// above already ended with a blank line, because two empty lines in a row read
-// as a break in the run rather than as air.
-//
-// One space is shared by both of box's writers: the reporter's phases and the
-// setup questions' mastheads are the same box in the same run, so the gap
-// between them is counted once. It tracks what the terminal was last told, so
-// callers say what they just printed rather than asking who printed it.
+// One space is shared by both of box's writers, the reporter's phases and the setup
+// questions' mastheads, so the gap between them is counted once. It tracks what the
+// terminal was last told, so callers say what they printed rather than asking.
 type space struct {
 	mu      sync.Mutex
 	started bool
@@ -35,8 +30,8 @@ func (s *space) outset() string {
 	return "\n"
 }
 
-// wrote records a block of output: box's blocks end with a newline, so a block
-// that ends with two of them has already left its blank line behind.
+// wrote records a block of output: box's blocks end with a newline, so one ending
+// with two has already left its blank line behind.
 func (s *space) wrote(text string) {
 	if text == "" {
 		return
@@ -47,8 +42,7 @@ func (s *space) wrote(text string) {
 	s.blank = strings.HasSuffix(text, "\n\n")
 }
 
-// separator records the blank line a finished field leaves above the next
-// question.
+// separator records the blank line a finished field leaves above the next question.
 func (s *space) separator() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -57,7 +51,7 @@ func (s *space) separator() {
 }
 
 // cleared records an erased spinner: the cursor sits on an empty line, so the
-// masthead still needs its own line above to keep that gap.
+// masthead still needs one above it.
 func (s *space) cleared() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

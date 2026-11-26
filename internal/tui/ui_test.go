@@ -13,9 +13,8 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// line drives one form the way huh's line-oriented mode does: a scripted reader
-// and a buffer for what a person would see. Every test here asks one question,
-// because each Prompter call is one form.
+// line drives one form as huh's line mode does: a scripted reader and a buffer for
+// what a person would see. Each Prompter call is one form.
 func line(input string) (*UI, *bytes.Buffer) {
 	var out bytes.Buffer
 	u := New(Options{In: strings.NewReader(input), Out: &out})
@@ -40,9 +39,8 @@ func TestInputTakesTheAnswerAndShowsTheChrome(t *testing.T) {
 		t.Fatalf("answer = %q, want the trimmed value", got)
 	}
 	text := stripANSI(out.String())
-	// The line mode huh falls back to prints titles but not descriptions, so a
-	// description is checked where it belongs: on the themed field in the
-	// screenshots, and through the masthead copy above.
+	// huh's line mode prints titles but not descriptions, so a description is
+	// checked on the themed field, not here.
 	for _, want := range []string{"b o x", "1/3", "what domain will this box answer on?", "domain"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the output is missing %q:\n%s", want, text)
@@ -50,9 +48,8 @@ func TestInputTakesTheAnswerAndShowsTheChrome(t *testing.T) {
 	}
 }
 
-// TestAnsweredFieldsLeaveTheirAnswerInTheScrollback: huh clears its drawing
-// when a form ends, so each finished question leaves one compact record —
-// what was asked, then the answer as a person would say it.
+// huh clears its drawing when a form ends, so each finished question leaves one
+// compact record: what was asked, then the answer as a person would say it.
 func TestAnsweredFieldsLeaveTheirAnswerInTheScrollback(t *testing.T) {
 	u, out := line("\n")
 	if _, err := u.Input(setup.Input{Key: "gateway.host", Prompt: "domain", Default: "box.example.com"}); err != nil {
@@ -103,8 +100,7 @@ func TestAnsweredFieldsLeaveTheirAnswerInTheScrollback(t *testing.T) {
 	}
 }
 
-// TestAnsweredRecordNeverShowsASecret: the value is not even an argument to
-// the function Secret uses, so there is no path that prints it.
+// The value is not an argument to the function Secret uses, so no path prints it.
 func TestAnsweredRecordNeverShowsASecret(t *testing.T) {
 	var out bytes.Buffer
 	u := New(Options{Out: &out})
@@ -156,10 +152,8 @@ func TestConfirmUsesTheDefaultAndTheFlowLabels(t *testing.T) {
 		t.Fatal("an empty answer took the unsafe choice")
 	}
 	text := stripANSI(out.String())
-	// Buttons are huh's normal mode; the line mode asks y/n with the default
-	// marked, and an empty answer still has to take the safe choice.
-	// The `?` is the question's mark in the gutter, as on the plain path:
-	// without it a prompt is a bare sentence in the middle of a run (rule 1).
+	// The line mode asks y/n with the default marked, and an empty answer takes
+	// the safe choice. The `?` is the question's mark in the gutter (rule 1).
 	for _, want := range []string{"? create /srv/s5n/data on that filesystem? [y/N]", "✓ create /srv/s5n/data on that filesystem?  stop here"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the confirm is missing %q:\n%s", want, text)
@@ -172,8 +166,8 @@ func TestConfirmUsesTheDefaultAndTheFlowLabels(t *testing.T) {
 	}
 }
 
-// A question whose flow chose yes as the default starts on yes and takes it from
-// a bare enter: the live form draws the same [Y/n] the plain prompt writes.
+// A yes default is taken by a bare enter, and the form draws the [Y/n] the plain
+// prompt writes.
 func TestConfirmStartsOnTheDefaultTheFlowChose(t *testing.T) {
 	u, out := line("\n")
 	got, err := u.Confirm(setup.Confirm{
@@ -240,8 +234,7 @@ func TestMultiSelectStartsFromTheSelectedOptions(t *testing.T) {
 	if strings.Join(got, ",") != "qbittorrent,radarr" {
 		t.Fatalf("answer = %v, want the preselected pair in catalog order", got)
 	}
-	// The hint is the field's description, which the line mode drops; the
-	// checked marks are what it does show.
+	// The hint is the description, which the line mode drops; the marks it shows.
 	if !strings.Contains(stripANSI(out.String()), "✓ qbittorrent") {
 		t.Fatalf("the preselected option is not marked:\n%s", stripANSI(out.String()))
 	}
@@ -279,9 +272,8 @@ func TestTooFewNamesTheMinimum(t *testing.T) {
 	}
 }
 
-// TestValidationErrorIsIndentedWithTheField: huh draws a field's error in the
-// group's footer, outside the field's indent, so the theme has to add it. Both
-// modes keep the same alignment; only the colour differs.
+// huh draws a field's error in the group's footer, outside the field's indent, so
+// the theme adds it; both modes keep the same alignment.
 func TestValidationErrorIsIndentedWithTheField(t *testing.T) {
 	for _, plain := range []bool{false, true} {
 		if got := huhTheme(plain).Focused.ErrorMessage.GetPaddingLeft(); got != 2 {
@@ -327,8 +319,7 @@ func TestStepMovesTheMasthead(t *testing.T) {
 
 func TestPathCheckIsTheTranscriptsTable(t *testing.T) {
 	var out bytes.Buffer
-	// Wide enough for every line to stay whole: this test is about what the
-	// block says, and the 80-column wrapping has its own tests below.
+	// Wide enough to keep every line whole: this is about what the block says.
 	u := New(Options{Out: &out, Width: 100})
 	u.Step(2, 4, "where should your data and settings live?")
 	err := u.ShowPathCheck(setup.PathCheck{
@@ -357,8 +348,7 @@ func TestPathCheckIsTheTranscriptsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stripANSI(out.String())
-	// One row per path, the columns the transcript prints: the path, whether
-	// it is there, the device, the filesystem and the room left (rule 13).
+	// One row per path, the columns the transcript prints (rule 13).
 	for _, want := range []string{
 		"2/4",
 		"where things live",
@@ -399,9 +389,8 @@ func TestPathCheckSharesTheRootDeviceWarns(t *testing.T) {
 	}
 }
 
-// pathCheckOverEighty is a report whose footer and ownership note both run
-// past 80 columns: the exact lines an 80-column terminal used to break at the
-// margin.
+// pathCheckOverEighty is a report whose footer and ownership note both run past
+// 80 columns.
 func pathCheckOverEighty() setup.PathCheck {
 	return setup.PathCheck{
 		Reports: []setup.PathReport{{
@@ -417,9 +406,8 @@ func pathCheckOverEighty() setup.PathCheck {
 	}
 }
 
-// TestPathCheckWrapsAtEightyColumns: the footer and the ownership note are
-// box-drawn lines, so they wrap to the terminal and their continuation keeps
-// the indent instead of starting at column 0.
+// The footer and the ownership note are box-drawn lines, so they wrap to the
+// terminal and their continuation keeps the indent.
 func TestPathCheckWrapsAtEightyColumns(t *testing.T) {
 	var out bytes.Buffer
 	u := New(Options{Out: &out, Width: 80})
@@ -441,8 +429,7 @@ func TestPathCheckWrapsAtEightyColumns(t *testing.T) {
 	}
 }
 
-// TestPathCheckUsesWiderTerminals: at 100 columns the same lines fit, and
-// nothing is wrapped that did not have to be.
+// At 100 columns the same lines fit, and nothing wraps that need not.
 func TestPathCheckUsesWiderTerminals(t *testing.T) {
 	var out bytes.Buffer
 	u := New(Options{Out: &out, Width: 100})
@@ -506,10 +493,8 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// TestMultiSelectRecordsNothingIsAnswered: an empty box is an answer the
-// scrollback has to carry. A record line with no value is one the transcript
-// drops, so the picker says the word instead -- "apps  none", the same way the
-// statically drawn screens say it.
+// An empty box is an answer the scrollback must carry, and the transcript drops a
+// record line with no value, so the picker says "apps  none".
 func TestMultiSelectRecordsNothingIsAnswered(t *testing.T) {
 	u, out := line("\n")
 	got, err := u.MultiSelect(setup.MultiSelect{
@@ -528,10 +513,8 @@ func TestMultiSelectRecordsNothingIsAnswered(t *testing.T) {
 	}
 }
 
-// TestInputRecordsTheFlowsNote: two answers can both look right on their own and
-// mean different things -- the login page's account and the account that owns
-// the files -- so the flow hands the record a note and the transcript keeps it:
-// "login name  liara  (web login)".
+// Two answers can look right and mean different things -- the login page's account
+// and the account that owns the files -- so the flow hands the record a note.
 func TestInputRecordsTheFlowsNote(t *testing.T) {
 	u, out := line("liara\n")
 	if _, err := u.Input(setup.Input{Key: "login", Prompt: "login name", Record: "web login"}); err != nil {
@@ -542,10 +525,8 @@ func TestInputRecordsTheFlowsNote(t *testing.T) {
 	}
 }
 
-// TestPathCheckIsTheSameTableAsTheTranscript: the live report and the transcript
-// are one table, so a person reading a pasted init run sees the columns the
-// terminal drew. Nothing in the row changes but the two-column indent the form
-// draws everything at.
+// The live report and the transcript are one table: nothing in a row changes but
+// the two-column indent the form draws everything at.
 func TestPathCheckIsTheSameTableAsTheTranscript(t *testing.T) {
 	check := setup.PathCheck{Reports: []setup.PathReport{
 		{
@@ -578,8 +559,8 @@ func TestPathCheckIsTheSameTableAsTheTranscript(t *testing.T) {
 			got = append(got, strings.TrimPrefix(line, "  "))
 		}
 	}
-	// The transcript's rows are two columns in of the heading it prints flush
-	// left; both renderers put every row at the same offset.
+	// The transcript's rows are two columns in of its flush-left heading; both
+	// renderers put every row at the same offset.
 	want := strings.Split(check.Text(), "\n")
 	for i, line := range want {
 		if strings.HasPrefix(line, "  ") {

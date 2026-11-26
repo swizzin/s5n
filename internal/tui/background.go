@@ -11,38 +11,27 @@ import (
 	"golang.org/x/term"
 )
 
-// box's own terminal-background query.
+// box's own terminal-background query: one bit at startup, whether the ground is
+// dark. lipgloss asks for OSC 11 and waits two seconds per stream, and PuTTY,
+// KiTTY, GNU screen and mosh never answer at all, so those runs paid four seconds
+// before drawing anything. This is the same question fenced as
+// terminal-colorsaurus asks it: the colour request immediately followed by a
+// primary device attributes request (DA1), which every terminal answers, so an
+// OSC 11 reply first is the colour and a DA1 first means dark at once.
 //
-// box needs one bit from the terminal at startup: is the ground it is drawing
-// on dark or light. lipgloss answers it by asking for OSC 11 and waiting two
-// seconds per stream -- and trying both streams, so four seconds on a terminal
-// that never answers -- with a goroutine that cancels the read. PuTTY, KiTTY,
-// GNU screen and mosh never answer OSC 11 at all, so on those every run paid the
-// whole wait before it drew anything.
-//
-// This is the same question, fenced the way terminal-colorsaurus asks it: the
-// colour request is written immediately followed by a primary device attributes
-// request (DA1), which every terminal answers. An OSC 11 reply that arrives
-// before the DA1 reply is the colour; a DA1 reply first means "this terminal
-// does not answer OSC 11", and the answer is dark at once. The fence is what
-// turns "no answer" from a timeout into a reply.
-//
-// A terminal that answers neither is the one case left, and it is capped at one
-// second for the whole query -- not per stream, and not per read. The cap is a
-// poll on the descriptor with the time left: the read is only ever issued when
-// the poll says there are bytes, so no read outlives the cap, and the query runs
-// on the calling goroutine, so there is no reader left behind either. The
-// terminal's mode and the descriptor's flags are restored on every path.
+// A terminal that answers neither is capped at one second for the whole query, by
+// polling the descriptor with the time left: a read is issued only when the poll
+// sees bytes, so none outlives the cap, and the query runs on the calling
+// goroutine, leaving no reader behind. Mode and flags are restored on every path.
 const (
 	// oscBackgroundQuery is OSC 11 with an ST terminator: "what is your background
 	// colour?".
 	oscBackgroundQuery = "\x1b]11;?\x1b\\"
-	// da1Query is the fence. It is written in the same write as the colour
-	// request, so the two replies are ordered by the terminal's own queue and a
-	// DA1 that arrives first cannot be a reply to something box sent later.
+	// da1Query is the fence, written in the same write as the colour request, so
+	// the two replies are ordered by the terminal's own queue.
 	da1Query = "\x1b[c"
-	// backgroundTimeout is the whole query's budget: one second for a terminal
-	// that answers neither request.
+	// backgroundTimeout is the whole query's budget for a terminal that answers
+	// neither request.
 	backgroundTimeout = time.Second
 )
 
@@ -59,13 +48,9 @@ type backgroundReply struct {
 	r, g, b uint8
 }
 
-// dark is the one bit box wanted. A terminal that did not answer is dark: light
-// text on a light ground is unreadable, while a dark palette on a light terminal
-// is only not what was asked for.
-//
-// The threshold is HSL's lightness, (max+min)/2, below half -- the same rule
-// lipgloss applied to the same colour, so a terminal that answers gets the
-// variant it always did.
+// dark is the one bit box wanted. No answer is dark: light text on a light ground
+// is unreadable, while a dark palette on a light terminal is only not what was
+// asked for. The threshold is HSL's lightness, (max+min)/2, below half.
 func (b backgroundReply) dark() bool {
 	if !b.colour {
 		return true
@@ -74,13 +59,12 @@ func (b backgroundReply) dark() bool {
 	return int(hi)+int(lo) < 255
 }
 
-// queryBackground writes the fenced query and reads the answer. It reports dark
-// for everything it cannot learn: not a terminal, raw mode refused, a write that
-// failed, a reply that does not parse.
+// queryBackground writes the fenced query and reads the answer, reporting dark for
+// everything it cannot learn: not a terminal, raw mode refused, a failed write, an
+// unparseable reply.
 func queryBackground(in, out *os.File) bool {
 	fd := int(in.Fd())
-	// A pipe or a file has no mode to change and nothing that answers: the
-	// question is only worth asking of a terminal.
+	// A pipe or file has no mode to change and nothing that answers.
 	if !term.IsTerminal(fd) || !term.IsTerminal(int(out.Fd())) {
 		return true
 	}
@@ -90,9 +74,9 @@ func queryBackground(in, out *os.File) bool {
 	}
 	defer func() { _ = term.Restore(fd, state) }()
 
-	// Non-blocking reads, restored afterwards: with them a read cannot block
-	// even if the terminal hangs up between the poll and the read, which is
-	// what makes the cap one second rather than "one second, usually".
+	// Non-blocking reads, restored afterwards: a read cannot block even if the
+	// terminal hangs up between the poll and the read, which makes the cap one
+	// second rather than "one second, usually".
 	flags, err := unix.FcntlInt(in.Fd(), unix.F_GETFL, 0)
 	if err != nil {
 		return true
@@ -108,9 +92,8 @@ func queryBackground(in, out *os.File) bool {
 	return readBackground(fd).dark()
 }
 
-// readBackground reads until the DA1 fence closes or the cap fires. A colour
-// that arrived stays in the answer when a terminal sends the colour but never
-// the fence.
+// readBackground reads until the DA1 fence closes or the cap fires; a colour that
+// arrived stays in the answer when the fence never comes.
 func readBackground(fd int) backgroundReply {
 	var (
 		reply backgroundReply
@@ -150,8 +133,8 @@ func readBackground(fd int) backgroundReply {
 	}
 }
 
-// The reply scanner's states. It reads byte by byte, so a reply split across
-// reads is still one reply.
+// The reply scanner's states: it reads byte by byte, so a reply split across reads
+// is still one reply.
 const (
 	stGround = iota
 	stEsc
@@ -161,8 +144,8 @@ const (
 	stCSIQ
 )
 
-// replyScanner finds the two replies box asked for in whatever the terminal
-// sends, ignoring anything else (a keystroke typed during startup).
+// replyScanner finds the two replies box asked for in whatever the terminal sends,
+// ignoring anything else (a keystroke typed during startup).
 type replyScanner struct {
 	state int
 	osc   []byte
@@ -183,8 +166,7 @@ func (s *replyScanner) feed(p []byte, reply *backgroundReply) bool {
 			case '[':
 				s.state = stCSI
 			case esc:
-				// A run of escapes: stay ready for the one that starts a
-				// sequence box understands.
+				// A run of escapes: stay ready for the one box understands.
 			default:
 				s.state = stGround
 			}
@@ -200,7 +182,7 @@ func (s *replyScanner) feed(p []byte, reply *backgroundReply) bool {
 			}
 		case stOscEsc:
 			if c == '\\' {
-				// ST: the other terminator Authelia's terminals use for OSC.
+				// ST: the other OSC terminator.
 				s.finishOSC(reply)
 				s.state = stGround
 				continue
@@ -228,7 +210,7 @@ func (s *replyScanner) feed(p []byte, reply *backgroundReply) bool {
 }
 
 // finishOSC reads a completed OSC payload: "11;rgb:..." is a background reply,
-// and anything else is a sequence box did not ask for.
+// anything else is a sequence box did not ask for.
 func (s *replyScanner) finishOSC(reply *backgroundReply) {
 	payload := string(s.osc)
 	s.osc = s.osc[:0]
@@ -243,13 +225,12 @@ func (s *replyScanner) finishOSC(reply *backgroundReply) {
 	reply.colour, reply.r, reply.g, reply.b = true, r, g, b
 }
 
-// parseBackgroundColor reads one OSC 11 value. It takes rgb:RRRR/GGGG/BBBB, the
-// short forms (rgb:f/f/f), rgba: with an alpha box ignores, and #rrggbb.
+// parseBackgroundColor reads one OSC 11 value: rgb:RRRR/GGGG/BBBB, the short forms
+// ("rgb:f/f/f"), rgba: with an alpha box ignores, and #rrggbb.
 //
-// X11 lets each component be one to four hex digits and scales it to the full
-// range, so "f" and "ffff" are both white. Shifting instead of scaling would
-// read xterm's own short form "rgb:f/f/f" as near-black, which is the difference
-// between the light variant and the unreadable one.
+// X11 scales one to four hex digits to the full range, so "f" and "ffff" are both
+// white; shifting instead would read xterm's "rgb:f/f/f" as near-black, which is
+// the difference between the light variant and the unreadable one.
 func parseBackgroundColor(v string) (r, g, b uint8, ok bool) {
 	v = strings.TrimSpace(v)
 	switch {

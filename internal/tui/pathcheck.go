@@ -9,12 +9,10 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// ShowPathCheck draws the path report: the same columns table the plain
-// transcript prints (setup.PathCheck.Text), with the two facts that carry
-// meaning coloured -- whether the path is there, and the line that says writing
-// to it can sink the host. Rule 13 is why it is a table and not a seven-row
-// tree: the device, the filesystem and the room left are values a person
-// compares down a column, not labels on a list.
+// ShowPathCheck draws the path report: the columns table the transcript prints
+// (setup.PathCheck.Text), with the two facts that carry meaning coloured. Rule 13
+// is why it is a table and not a tree: the device, filesystem and room left are
+// values a person compares down a column.
 func (u *UI) ShowPathCheck(check setup.PathCheck) error {
 	if u.themeErr != nil {
 		return u.themeErr
@@ -38,9 +36,8 @@ func (u *UI) ShowPathCheck(check setup.PathCheck) error {
 	return nil
 }
 
-// pathRow is one path's line: the columns Text prints, wrapped where the
-// terminal runs out, then the notes under the kind column so they read as
-// belonging to this path.
+// pathRow is one path's line: the columns Text prints, wrapped where the terminal
+// runs out, then the notes under the kind column.
 func (u *UI) pathRow(row setup.PathRow, warns []string, kindWidth, pathWidth int) {
 	cols := []string{
 		fmt.Sprintf("%-*s", kindWidth, row.Kind),
@@ -71,8 +68,7 @@ func (u *UI) pathRow(row setup.PathRow, warns []string, kindWidth, pathWidth int
 		}
 	}
 	for _, note := range row.Notes {
-		// A note the transcript marks with `!` is the same warning this draws
-		// with the ⚠ above it: one fact, one line, in each renderer's own words.
+		// A `!` note is the warning drawn with ⚠ above it: one fact, one line.
 		if strings.HasPrefix(note, "!") {
 			continue
 		}
@@ -82,21 +78,20 @@ func (u *UI) pathRow(row setup.PathRow, warns []string, kindWidth, pathWidth int
 	}
 }
 
-// block prints a paragraph at one indent, wrapped to the terminal. The
-// continuation lines keep the indent, which is the whole point of wrapping
-// here rather than letting the terminal do it.
+// block prints a paragraph at one indent, wrapped to the terminal: the
+// continuation lines keep the indent, which is the point of wrapping here.
 func (u *UI) block(indent, text string, style lipgloss.Style) {
 	for _, line := range wrapText(text, u.width-lipgloss.Width(indent)) {
 		fmt.Fprintf(u.out, "%s%s\n", indent, u.chrome.paint(line, style.Render(line)))
 	}
 }
 
-// deviceName is what the disk is called. The source is the device node when the
-// mount table has one; a container or a network mount may only have numbers.
+// deviceName is what the disk is called: the device node when the mount table has
+// one, else the numbers a container or network mount offers.
 func deviceName(r setup.PathReport) string {
 	if src := r.Mount.Source; src != "" {
-		// mountinfo names a btrfs subvolume as /dev/sda1[/@srv]; the disk is
-		// what matters here, not the subvolume it was cut from.
+		// mountinfo names a btrfs subvolume as /dev/sda1[/@srv]: the disk matters,
+		// not the subvolume.
 		if i := strings.Index(src, "["); i > 0 {
 			src = src[:i]
 		}
@@ -111,11 +106,10 @@ func deviceName(r setup.PathReport) string {
 // unknown is what a row says when the host could not report the fact.
 const unknown = "unknown"
 
-// warnings are the red lines under a path's row: the two ways a path can sink
-// the host, both of which are about the disk rather than the directory. Only a
-// path that is not there is warned about -- an existing one has whatever the
-// operator gave it -- and the same-device case is the terminal's alone: the
-// line prompt's own report is older than this and stays as it was.
+// warnings are the red lines under a path's row: the two ways a path can sink the
+// host, both about the disk rather than the directory. Only a missing path is
+// warned about, since an existing one has whatever the operator gave it, and the
+// same-device case is this renderer's alone.
 func warnings(r setup.PathReport) []string {
 	if r.Exists {
 		return nil

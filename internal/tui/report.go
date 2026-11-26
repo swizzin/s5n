@@ -18,53 +18,46 @@ import (
 	"github.com/swizzin/s5n/internal/theme"
 )
 
-// ReporterOptions is one live reporter: the terminal, whether colour is
-// allowed, and the answer --yes already gave.
+// ReporterOptions is one live reporter: the terminal, whether colour is allowed,
+// and the answer --yes already gave.
 type ReporterOptions struct {
 	In  io.Reader
 	Out io.Writer
 	Err io.Writer
-	// Width is the terminal's columns, as cmd/box measured it. Zero is the
-	// narrowest width box supports.
+	// Width is the terminal's columns; zero is the narrowest box supports.
 	Width int
 	// NoColor keeps the layout and drops the colours (NO_COLOR).
 	NoColor bool
-	// Theme names the palette this run draws with; empty is s5n. The name is
-	// cmd/box's to read -- the values' `theme:` key -- and theme.Parse is what
-	// decides whether it is one. A name that does not resolve is reported by
-	// Err and by the first question asked.
+	// Theme names the palette, empty being s5n. cmd/box reads it from the values'
+	// `theme:` key and theme.Parse decides; a name that does not resolve is
+	// reported by Err and by the first question asked.
 	Theme string
-	// Background paints the terminal's background with that palette's, for the
-	// whole run. Off by default; see Options.Background.
+	// Background paints the terminal's background for the whole run; see
+	// Options.Background.
 	Background bool
-	// Yes answers every confirm without a form, and leaves the same ✓ record
-	// line an answered form would.
+	// Yes answers every confirm without a form, leaving the same ✓ record line.
 	Yes bool
-	// Log is the run log: the same finished lines as the screen, plus the
-	// Detail lines, with a timestamp each. The writer behind it does the
-	// timestamping and the redaction; nil is a run with no log.
+	// Log is the run log: the screen's finished lines plus Detail, timestamped and
+	// redacted by the writer behind it; nil is a run with no log.
 	Log io.Writer
 	// LogPath is that file, for the one line a failed run ends with.
 	LogPath string
-	// Now is the clock a step's duration is measured with, and Sample how
-	// often a waiting step's source is read. Zero is time.Now and a second.
+	// Now is the clock a step is measured with, and Sample how often a waiting
+	// step's source is read; zero is time.Now and a second.
 	Now    func() time.Time
 	Sample time.Duration
 }
 
-// indent is where every line the reporter prints under a phase frame starts.
-// It is the same two columns huh's fields and the setup record lines use, so a
-// whole run reads as one block; the frames themselves stay at column 0, like
-// the masthead.
+// indent is where every line under a phase frame starts: the two columns huh's
+// fields and the setup record lines use, so a whole run reads as one block. The
+// frames stay at column 0, like the masthead.
 const indent = "  "
 
-// Reporter is say.Reporter in box's own dress: the masthead frame for a phase,
-// a spinner for the one step that is running, a ✓ line left in scrollback for
-// each finished step, plans with coloured marks, and the same huh confirm init
-// asks with.
-//
-// Exactly one line animates. Everything finished is written once and stays in
-// scrollback, so a long bootstrap is still reviewable by scrolling back.
+// Reporter is say.Reporter in box's own dress: the masthead frame for a phase, a
+// spinner for the one running step, a ✓ line left in scrollback per finished
+// step, plans with coloured marks, and init's huh confirm. Exactly one line
+// animates; everything finished is written once, so a long bootstrap stays
+// reviewable by scrolling back.
 type Reporter struct {
 	out    io.Writer
 	errOut io.Writer
@@ -74,21 +67,21 @@ type Reporter struct {
 	ui     *UI
 	// yes answers every confirm without a form (--yes).
 	yes bool
-	// space is the empty line before every masthead. It is the UI's, because
-	// the sections this reporter draws and the questions that UI asks are one
-	// run and must not stack two gaps between them.
+	// space is the empty line before every masthead. It is the UI's: the sections
+	// this reporter draws and the questions the UI asks are one run, and must not
+	// stack two gaps between them.
 	space *space
 
 	// log is the run log, nil for a run that does not keep one.
 	log     io.Writer
 	logPath string
-	// now and sample are the clock and the sampling interval; the zero values
-	// mean time.Now and a second.
+	// now and sample are the clock and the sampling interval; zero means time.Now
+	// and a second.
 	now    func() time.Time
 	sample time.Duration
 
-	// pending is the wiring receipt's rows that wait on a person. They are
-	// printed after the success card, because they are what to do next.
+	// pending is the wiring receipt's rows that wait on a person, printed after
+	// the success card because they are what to do next.
 	pending []say.ReceiptRow
 
 	mu     sync.Mutex
@@ -99,9 +92,9 @@ type Reporter struct {
 	sigDone chan struct{}
 }
 
-// NewReporter builds the live reporter. In and Out default to the process's
-// own terminal, which is also the only case where it installs the Ctrl-C
-// handler: a reporter drawn on a buffer has no cursor to clean up.
+// NewReporter builds the live reporter. In and Out default to the process's own
+// terminal, which is also the only case where it installs the Ctrl-C handler: a
+// reporter drawn on a buffer has no cursor to clean up.
 func NewReporter(o ReporterOptions) *Reporter {
 	in, out, errOut := o.In, o.Out, o.Err
 	if out == nil {
@@ -134,9 +127,8 @@ func NewReporter(o ReporterOptions) *Reporter {
 	return r
 }
 
-// watchInterrupt stops the spinner and leaves the cursor on a fresh line when
-// the operator presses Ctrl-C. box has written nothing from the reporter, so
-// there is nothing to roll back here; the commands' own defer Close does the
+// watchInterrupt stops the spinner and leaves the cursor on a fresh line on
+// Ctrl-C. There is nothing to roll back: the commands' own defer Close does the
 // same on every normal error path.
 func (r *Reporter) watchInterrupt() {
 	r.sig = make(chan os.Signal, 1)
@@ -151,14 +143,13 @@ func (r *Reporter) watchInterrupt() {
 	}()
 }
 
-// exit is os.Exit, replaced in tests: the interrupt path has to put the
-// terminal back before it goes, and nothing else can run after it.
+// exit is os.Exit, replaced in tests: the interrupt path must put the terminal
+// back before it goes, and nothing else can run after it.
 var exit = os.Exit
 
-// interrupted is the Ctrl-C and SIGTERM path: stop the spinner, leave the
-// cursor on a fresh line, put the terminal's background back and exit. A
-// deferred Close does not run through os.Exit, so the paint is undone by hand
-// here; the deferred one still covers a return, an error and a panic.
+// interrupted is the Ctrl-C and SIGTERM path: stop the spinner, leave the cursor
+// on a fresh line, put the background back and exit. A deferred Close does not run
+// through os.Exit, so the paint is undone by hand here.
 func (r *Reporter) interrupted() {
 	r.mu.Lock()
 	if r.active != nil {
@@ -201,9 +192,8 @@ func (r *Reporter) Detail(text string) {
 	_, _ = io.WriteString(r.log, text+"\n")
 }
 
-// logged copies a finished block to the run log. The live line is never copied:
-// it is redrawn many times a second, and the log keeps what the screen left in
-// scrollback.
+// logged copies a finished block to the run log. The live line is never copied: it
+// is redrawn many times a second, and the log keeps what the screen left.
 func (r *Reporter) logged(text string) {
 	if r.log == nil || text == "" {
 		return
@@ -211,21 +201,18 @@ func (r *Reporter) logged(text string) {
 	_, _ = io.WriteString(r.log, text)
 }
 
-// SetYes makes every confirm answer itself, which is what --yes means on a
-// terminal. It is set after the flags are parsed.
+// SetYes makes every confirm answer itself, which is --yes on a terminal.
 func (r *Reporter) SetYes(v bool) { r.yes = v }
 
 // SetPhase names the section a following confirm belongs to without drawing a
-// header. The setup questions' own masthead is their header, so cmd/box never
-// draws a separate one for it.
+// header: the setup questions' own masthead is their header.
 func (r *Reporter) SetPhase(name string) {
 	r.chrome.phase = name
 	r.ui.chrome.phase = name
 }
 
-// Phase draws the masthead for a section. The same frame as init's step
-// header, with the section name where "seedbox setup" would be, and the empty
-// line above it that every masthead opens with.
+// Phase draws the masthead for a section: init's step frame, the section name
+// where "seedbox setup" would be, and the empty line every masthead opens with.
 func (r *Reporter) Phase(name string) {
 	r.chrome.phase = name
 	r.ui.chrome.phase = name
@@ -233,8 +220,8 @@ func (r *Reporter) Phase(name string) {
 	r.emit(r.space.outset() + r.chrome.phaseHead(name) + "\n\n")
 }
 
-// Fact is one key and its value: a muted column and an ink value, wrapped
-// under itself so a long kubeconfig path never runs off the edge.
+// Fact is one key and its value: a muted column and an ink value, wrapped so a
+// long kubeconfig path never runs off the edge.
 func (r *Reporter) Fact(key, value string) {
 	const kw = 14
 	k := fmt.Sprintf("%-*s", kw, key)
@@ -250,8 +237,8 @@ func (r *Reporter) Fact(key, value string) {
 	r.emit(b.String())
 }
 
-// List is a muted title and plain rows, indented and wrapped. An empty title
-// keeps the indent: it is a detail block, not a heading.
+// List is a muted title and plain rows, indented and wrapped; an empty title
+// keeps the indent, since it is a detail block, not a heading.
 func (r *Reporter) List(title string, rows []string) {
 	var b strings.Builder
 	if title != "" {
@@ -265,24 +252,21 @@ func (r *Reporter) List(title string, rows []string) {
 	r.emit(b.String())
 }
 
-// Plan is the list box already prints before a confirm, with its marks
-// coloured: + installs, ~ changes, ? depends on an answer, ! is a warning,
-// = verifies and - removes. A component's sub-steps are drawn under it, two
-// columns past its text, with marks of their own.
+// Plan is the list box prints before a confirm, marks coloured: + installs, ~
+// changes, ? depends on an answer, ! warns, = verifies, - removes. A component's
+// sub-steps are drawn under it with marks of their own.
 func (r *Reporter) Plan(title string, items []say.Item) {
 	r.plan(title, items)
 }
 
-// Diff is a values diff: the same marks and the same indent. The plain
-// transcript has always printed these flush left, and still does; a live
-// renderer keeps its one block at box's two columns.
+// Diff is a values diff: the same marks and indent. The plain transcript prints
+// these flush left; a live renderer keeps its one block at box's two columns.
 func (r *Reporter) Diff(items []say.Item) { r.plan("", items) }
 
-// Table is a titled block of rows in two columns: the glyph in its status
-// colour, the name in ink, and the facts joined with a middle dot and wrapped
-// under themselves. The name column is as wide as the longest name that fits,
-// so a block reads as a table and a host name that would push everything off
-// the edge takes its own line.
+// Table is a titled block of rows: the glyph in its status colour, the name in
+// ink, the facts joined with a middle dot and wrapped. The name column is as wide
+// as the longest name that fits, so a host name that would push everything off the
+// edge takes its own line.
 func (r *Reporter) Table(title string, rows []say.TableRow) {
 	if len(rows) == 0 {
 		return
@@ -328,29 +312,25 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 	r.emit(b.String())
 }
 
-// Rows is a block of status lines: the mark in the gutter, the name in the
-// fixed column, and the facts after it, wrapped under the row's own text column
-// so the gutter and the columns stay columns. It sits flush left, like the
-// masthead: a status block is the run's frame, not its content.
+// Rows is a block of status lines, wrapped under each row's own text column so the
+// gutter and the columns stay columns. It sits flush left like the masthead: a
+// status block is the run's frame, not its content.
 func (r *Reporter) Rows(rows []say.Row) {
 	if len(rows) == 0 {
 		return
 	}
 	var b strings.Builder
-	// One block, one name column: a long name widens the block rather than
-	// pushing its own facts two columns off everyone else's.
+	// One block, one name column: a long name widens the block, not its own facts.
 	for _, row := range say.Block(rows) {
 		b.WriteString(r.rowBlock(row))
 	}
 	r.emit(b.String())
 }
 
-// Group is a titled table whose facts read down columns: the column headings
-// over the data they name, one row per thing, and the last column as the one
-// that carries the words, wrapped under itself. The whole block shares one name
-// column, as wide as its longest name, so the facts start in one column down
-// the block. A group with no headings is a list: the same marks, with each
-// row's facts joined into the one sentence they are.
+// Group is a titled table read down columns: the headings over the data, one row
+// per thing, the last column carrying the words. The block shares one name column,
+// so the facts start in one column down it. With no headings it is a list of
+// one-sentence rows.
 func (r *Reporter) Group(g say.Group) {
 	if len(g.Rows) == 0 {
 		return
@@ -395,8 +375,8 @@ func (r *Reporter) Group(g say.Group) {
 	r.emit(b.String())
 }
 
-// groupHead is a block's heading line: the title in the name column and each
-// column heading over the facts it names.
+// groupHead is a block's heading line: the title in the name column, each column
+// heading over its facts.
 func groupHead(g say.Group, nameWidth int, cols []int) string {
 	if g.Title == "" && len(g.Columns) == 0 {
 		return ""
@@ -408,9 +388,8 @@ func groupHead(g say.Group, nameWidth int, cols []int) string {
 	return strings.TrimRight(head, " ")
 }
 
-// groupColumns splits one row's facts into the columns before the last, already
-// padded, and the last one, which is the text that wraps. A block with no
-// headings joins every fact into that one sentence.
+// groupColumns splits a row's facts into the padded leading columns and the last
+// one, which wraps; with no headings it joins every fact into one sentence.
 func groupColumns(row say.TableRow, cols []int) (lead, last string) {
 	if len(cols) == 0 {
 		return "", strings.Join(row.Facts, " · ")
@@ -429,7 +408,7 @@ func groupColumns(row say.TableRow, cols []int) (lead, last string) {
 	return b.String(), last
 }
 
-// blockNameWidth is a block's name column: as wide as its longest name.
+// blockNameWidth is a block's name column, as wide as its longest name.
 func blockNameWidth(rows []say.TableRow) int {
 	w := 0
 	for _, row := range rows {
@@ -440,8 +419,7 @@ func blockNameWidth(rows []say.TableRow) int {
 	return w
 }
 
-// groupColumnWidths are the widths of a block's leading columns: as wide as the
-// widest fact in each, so the headings sit over the data they name.
+// groupColumnWidths are a block's leading columns, as wide as each's widest fact.
 func groupColumnWidths(g say.Group) []int {
 	cols := make([]int, len(g.Columns))
 	for _, row := range g.Rows {
@@ -457,10 +435,9 @@ func groupColumnWidths(g say.Group) []int {
 	return cols
 }
 
-// ToFinish is the block a run ends with when it leaves something for a person:
-// the label with the one `!` mark, then each row two columns in with the
-// command that clears it under it. The rows carry no mark of their own: the
-// label is what says the block needs them.
+// ToFinish is the block a run ends with when it leaves something for a person: one
+// `!` label, then each row two columns in with the command that clears it. The
+// rows carry no mark of their own: the label says the block needs them.
 func (r *Reporter) ToFinish(rows []say.Row) {
 	if len(rows) == 0 {
 		return
@@ -505,8 +482,8 @@ func (r *Reporter) ToFinish(rows []say.Row) {
 	r.emit(b.String())
 }
 
-// Note is a line of prose under a block: two columns in, so it belongs to the
-// block above it, wrapped with its continuation hanging under the text.
+// Note is a line of prose under a block: two columns in, its continuation
+// hanging under the text.
 func (r *Reporter) Note(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -515,9 +492,9 @@ func (r *Reporter) Note(text string) {
 	r.block(text, "", mutedStyle, mutedStyle)
 }
 
-// rowBlock draws one row: the mark and the columns, then the facts wrapped under
-// them, then the why and the command at the same column. A command is broken the
-// way a shell would break it, never inside a token.
+// rowBlock draws one row: the mark and columns, the facts wrapped under them, then
+// the why and the command at the same column. A command breaks as a shell would,
+// never inside a token.
 func (r *Reporter) rowBlock(row say.Row) string {
 	mark := row.Mark
 	if mark == "" {
@@ -532,7 +509,7 @@ func (r *Reporter) rowBlock(row say.Row) string {
 	paintedMark := r.chrome.paint(mark, glyphStyle(mark).Render(mark))
 	head := paintedMark + prefix[len(mark):]
 	var b strings.Builder
-	// A command breaks the way a shell breaks one; nothing else does.
+	// A command breaks as a shell breaks one; nothing else does.
 	lines := wrapText(row.Text(), avail)
 	cont := col
 	if mark == say.MarkCommand {
@@ -581,17 +558,17 @@ func (r *Reporter) plan(title string, items []say.Item) {
 	for _, it := range items {
 		r.planItem(&b, indent, it)
 		for _, child := range it.Children {
-			// A child's mark sits past the item's own text: its mark and a
-			// space, then the two columns the indent is.
+			// A child's mark sits past the item's text: its mark and a space, then
+			// the indent's two columns.
 			r.planItem(&b, indent+"    ", child)
 		}
 	}
 	r.emit(b.String())
 }
 
-// planItem draws one row of a plan at level: its mark coloured by what it does,
-// its text wrapped under itself. level is where the mark goes, so a child sits
-// two columns past the text of the row above it.
+// planItem draws one plan row at level: its mark coloured by what it does, its
+// text wrapped under itself. level is where the mark goes, so a child sits two
+// columns past the text above it.
 func (r *Reporter) planItem(b *strings.Builder, level string, it say.Item) {
 	mark := string(it.Mark)
 	if mark == "" {
@@ -624,10 +601,9 @@ func (r *Reporter) planStyle(m say.Mark) lipgloss.Style {
 	return inkStyle
 }
 
-// glyphStyle is the one rule for a status glyph: ✓ is accent, ✗ and ! are bad,
-// ◌ waits on a person and is accent too, · is a skip and muted. Every place a
-// glyph is drawn goes through here, so one run never shows a check in two
-// colours.
+// glyphStyle is the one rule for a status glyph: ✓ is accent, ✗ and ! bad, ◌ waits
+// on a person and is accent too, · is a skip and muted. Every glyph drawn goes
+// through here, so one run never shows a check in two colours.
 func glyphStyle(g string) lipgloss.Style {
 	switch g {
 	case "✓", "◌", "◐":
@@ -646,8 +622,8 @@ func (r *Reporter) Line(text string) { r.block(text, "", inkStyle, inkStyle) }
 // Muted is explanation.
 func (r *Reporter) Muted(text string) { r.block(text, "", mutedStyle, mutedStyle) }
 
-// Warn is a line that needs a person: the `!` mark in the gutter, painted bad
-// and wrapped under itself. A line that is only worth knowing is a note.
+// Warn is a line that needs a person: the `!` mark painted bad, wrapped under
+// itself. A line only worth knowing is a note.
 func (r *Reporter) Warn(text string) { r.block(text, "! ", badStyle, badStyle) }
 
 // Success is something that finished well: one accent ✓, then the words.
@@ -671,8 +647,8 @@ func (r *Reporter) block(text, mark string, markStyle, textStyle lipgloss.Style)
 	r.emit(b.String())
 }
 
-// Chart names the release box pulled. The reference is the muted detail; the
-// name and version are what a person needs.
+// Chart names the release box pulled: the reference is the muted detail, the name
+// and version what a person needs.
 func (r *Reporter) Chart(name, version, ref string) {
 	mark := r.chrome.paint("✓", glyphStyle("✓").Render("✓"))
 	head := indent + mark + " chart " + name + " " + version
@@ -689,9 +665,8 @@ func (r *Reporter) Chart(name, version, ref string) {
 	r.emit(b.String())
 }
 
-// Created reports the directories init made. A live renderer says how many,
-// under which root, and lists the names muted below, wrapped between names and
-// never inside one.
+// Created reports the directories init made: how many, under which root, and the
+// names muted below, wrapped between names and never inside one.
 func (r *Reporter) Created(paths []string) {
 	if len(paths) == 0 {
 		return
@@ -754,10 +729,10 @@ func commonDir(paths []string) string {
 	return out
 }
 
-// Receipt draws the wiring receipt: one status glyph per step, the name in ink
-// and any reason muted under it. A row that is pending waits on a person, so
-// it is held back for the card and printed as the "to finish" list: it is what
-// to do next, not something that happened in the middle of the run.
+// Receipt draws the wiring receipt: a status glyph per step, the name in ink and
+// any reason muted under it. A pending row waits on a person, so it is held back
+// for the card and printed as the "to finish" list: what to do next, not something
+// that happened mid-run.
 func (r *Reporter) Receipt(status string, rows []say.ReceiptRow) {
 	mark := "✓"
 	if status != "ok" {
@@ -785,8 +760,8 @@ func (r *Reporter) Receipt(status string, rows []say.ReceiptRow) {
 	}
 }
 
-// row is one status line: a glyph in its status colour, a name, and a detail
-// muted beside it or wrapped under it. Nothing is ever flush left.
+// row is one status line: a glyph in its status colour, a name, and a detail muted
+// beside or under it. Nothing is ever flush left.
 func (r *Reporter) row(mark, name, detail string, nameStyle lipgloss.Style) string {
 	prefix := indent + mark + " "
 	cont := strings.Repeat(" ", lipgloss.Width(prefix))
@@ -822,9 +797,8 @@ func (r *Reporter) row(mark, name, detail string, nameStyle lipgloss.Style) stri
 	return b.String()
 }
 
-// flushPending prints the rows the receipt held back, under a short heading.
-// The card is drawn first: these are the next things to do, so they belong
-// after it and not wedged into the receipt.
+// flushPending prints the rows the receipt held back, under a short heading:
+// they are the next things to do, so they belong after the card.
 func (r *Reporter) flushPending() {
 	if len(r.pending) == 0 {
 		return
@@ -839,7 +813,7 @@ func (r *Reporter) flushPending() {
 	r.emit(b.String())
 }
 
-// Start begins a step. The previous one, if any, is cleared: box runs one
+// Start begins a step: the previous one is cleared, because box runs one
 // operation at a time and a second spinner would fight the first for the line.
 func (r *Reporter) Start(op say.Op) say.Handle {
 	r.stopActive()
@@ -864,8 +838,8 @@ func (r *Reporter) animate(l *live) {
 		case <-l.done:
 			return
 		case <-ticker.C:
-			// The source is read about once a second, not once a frame:
-			// it is somebody's log, and the line only has to keep up.
+			// The source is read about once a second, not once a frame: it is
+			// somebody's log, and the line only has to keep up.
 			l.mu.Lock()
 			due := l.watch.Source != nil && !r.clock().Before(next)
 			var tail string
@@ -894,9 +868,9 @@ func (r *Reporter) animate(l *live) {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// drawLocked paints the active line in place. The caller holds r.mu. The line
-// is what a wait is never silent about: what is happening, how long it has
-// taken against its limit, and the newest line of the thing being waited on.
+// drawLocked paints the active line in place; the caller holds r.mu. The line says
+// what is happening, how long it has taken against its limit, and the newest line
+// of what is waited on.
 func (r *Reporter) drawLocked() {
 	l := r.active
 	if l == nil {
@@ -917,8 +891,8 @@ func (r *Reporter) drawLocked() {
 	}
 	tailWidth := 0
 	if tail != "" {
-		// The newest line of the wait is the detail: give it half of
-		// what the label does not need, so neither one is squeezed out.
+		// The newest line is the detail: give it half of what the label does not
+		// need, so neither is squeezed out.
 		tailWidth = room / 2
 		room = room - tailWidth - 2
 		if room < 8 {
@@ -945,7 +919,7 @@ func (r *Reporter) clearLocked() {
 	}
 }
 
-// stopActive finishes the live line silently. Nothing finished is erased: the
+// stopActive finishes the live line silently: nothing finished is erased, and the
 // caller writes the ✓ record immediately after.
 func (r *Reporter) stopActive() {
 	r.mu.Lock()
@@ -984,8 +958,7 @@ type live struct {
 	start  time.Time
 	frame  int
 	detail string
-	// tail is the newest line of what this step waits on, as the live line
-	// shows it.
+	// tail is the newest line of what this step waits on.
 	tail  string
 	watch say.Watcher
 	done  chan struct{}
@@ -1022,8 +995,7 @@ func (h *liveHandle) Done(text string) {
 func (h *liveHandle) DoneAs(_, pretty string) { h.Done(pretty) }
 
 func (h *liveHandle) Failed(err error) {
-	// The error itself is rendered once by the command; the step line says
-	// which step died.
+	// The command renders the error once; the step line says which step died.
 	if h.op.Name == "" {
 		h.finish("✗", h.l.label, "")
 		return
@@ -1031,8 +1003,7 @@ func (h *liveHandle) Failed(err error) {
 	h.finishRow("✗", say.Row{Name: h.op.Name})
 }
 
-// finishRow ends a named step as the row it is: a mark in the gutter, the
-// step's name, and its facts.
+// finishRow ends a named step as its row: a mark, the name, and the facts.
 func (h *liveHandle) finishRow(mark string, row say.Row) {
 	r := h.r
 	r.mu.Lock()
@@ -1102,9 +1073,9 @@ func (noHandle) Done(string)           {}
 func (noHandle) DoneAs(string, string) {}
 func (noHandle) Failed(error)          {}
 
-// Confirm asks with the same huh confirm init uses, on the default the flow
-// chose for this question, and leaves the same ✓ record line a setup question
-// does. --yes answers without a form and records the answer the same way.
+// Confirm asks with init's huh confirm, on the default the flow chose, and leaves
+// the same ✓ record line a setup question does. --yes answers without a form and
+// records the answer the same way.
 func (r *Reporter) Confirm(question string, def bool) (bool, error) {
 	r.stopActive()
 	r.ui.chrome.phase = r.chrome.phase
@@ -1118,13 +1089,12 @@ func (r *Reporter) Confirm(question string, def bool) (bool, error) {
 	return r.ui.Confirm(setup.Confirm{Prompt: question, Default: def})
 }
 
-// Ask is release.Confirmer and platform.Confirmer: the same question, the same
-// huh form, the same record line, and the default the flow chose for it.
+// Ask is release.Confirmer and platform.Confirmer: the same question, form and
+// record line.
 func (r *Reporter) Ask(question string, def bool) (bool, error) { return r.Confirm(question, def) }
 
-// Error is the end of a failed run: one ✗ row, its reason hanging under it, and
-// the run log's path last. A failure is a row like any other -- there is no
-// frame around it, and the reason is what the command can say, not a paragraph.
+// Error is the end of a failed run: one ✗ row, its reason under it, and the run
+// log's path last. A failure is a row like any other, no frame around it.
 func (r *Reporter) Error(err error) {
 	r.stopActive()
 	if err == nil {
@@ -1180,8 +1150,8 @@ func lineRoom(mark string, width int) int {
 	return w
 }
 
-// wrapKeepingBlanks is wrapText that keeps a blank line a blank line: an
-// error's empty line is a break between two facts, not a word to skip.
+// wrapKeepingBlanks is wrapText that keeps a blank line: an error's empty line is
+// a break between two facts, not a word to skip.
 func wrapKeepingBlanks(s string, width int) []string {
 	if strings.TrimSpace(s) == "" {
 		return []string{""}

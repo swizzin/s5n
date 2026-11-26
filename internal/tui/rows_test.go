@@ -12,9 +12,8 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// The live renderer draws the same block the transcript does, at the same
-// columns and flush left, and a fact too long for the terminal hangs under its
-// own column: the name column stays a column.
+// A fact too long for the terminal hangs under its own column, so the name column
+// stays a column.
 func TestReporterRowsWrapUnderTheText(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 60, NoColor: true, Yes: true})
@@ -36,8 +35,7 @@ func TestReporterRowsWrapUnderTheText(t *testing.T) {
 			t.Fatalf("rows are missing %q:\n%s", want, strings.Join(lines, "\n"))
 		}
 	}
-	// A wide fact wraps, and every line after the first starts in the facts
-	// column rather than under the mark.
+	// Every line after the first starts in the facts column, not under the mark.
 	first := indexPrefix(lines, "! sonarr is held on 5.0.0.3041 until a release")
 	if first < 0 {
 		t.Fatalf("the note did not start at its mark:\n%s", strings.Join(lines, "\n"))
@@ -52,9 +50,8 @@ func TestReporterRowsWrapUnderTheText(t *testing.T) {
 	}
 }
 
-// A command is broken the way a shell breaks one: at spaces, with a backslash
-// ending each line but the last, and never inside a token -- a path split across
-// two lines is a path someone copies wrong.
+// A command breaks as a shell would: at spaces, a backslash ending each line but
+// the last, never inside a token.
 func TestReporterCommandContinuesLikeAShell(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 44, NoColor: true, Yes: true})
@@ -81,8 +78,7 @@ func TestReporterCommandContinuesLikeAShell(t *testing.T) {
 			t.Fatalf("command line %d does not continue with a backslash: %q", i, line)
 		}
 	}
-	// Every token survives whole: putting the lines back together gives the
-	// command the caller asked for.
+	// Putting the lines back together gives the command the caller asked for.
 	joined := strings.Join(command, " ")
 	joined = strings.ReplaceAll(joined, " \\ ", " ")
 	joined = strings.ReplaceAll(joined, "$ ", "")
@@ -93,9 +89,9 @@ func TestReporterCommandContinuesLikeAShell(t *testing.T) {
 	}
 }
 
-// A waiting step is one live line: what it is doing, how long against its limit,
-// and the newest line of what it waits on, trimmed to the terminal. Finished, it
-// is one ✓ row with its duration -- and the sampled lines went to the log.
+// A waiting step is one live line -- what it does, elapsed against its limit, the
+// newest source line trimmed -- and one ✓ row when finished. Sampled lines go to
+// the log.
 func TestReporterWaitShowsElapsedLimitAndSource(t *testing.T) {
 	var screen, log syncBuffer
 	r := NewReporter(ReporterOptions{
@@ -115,8 +111,8 @@ func TestReporterWaitShowsElapsedLimitAndSource(t *testing.T) {
 		i++
 		return line
 	}
-	// A clock that moves on every reading, so the line counts up and the
-	// sampler comes due without the test waiting a real second.
+	// A clock that moves on every reading, so the sampler comes due without a real
+	// second passing.
 	reads := 0
 	r.now = func() time.Time {
 		at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Add(time.Duration(reads) * time.Second)
@@ -152,8 +148,7 @@ func TestReporterWaitShowsElapsedLimitAndSource(t *testing.T) {
 	}
 }
 
-// A failure is one ✗ row -- no frame around it -- and the last line of a failed
-// run names the log.
+// A failure is one ✗ row with no frame, and the last line names the log.
 func TestReporterErrorIsOneRow(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true, LogPath: "/var/log/box/apply-20260101T000000Z.log"})
@@ -190,8 +185,7 @@ type fakeError struct{ text string }
 
 func (e *fakeError) Error() string { return e.text }
 
-// syncBuffer is a bytes.Buffer safe for the sampler's goroutine and the test's
-// reading of it.
+// syncBuffer is a bytes.Buffer safe for the sampler's goroutine and the test.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

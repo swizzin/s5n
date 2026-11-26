@@ -86,17 +86,15 @@ func TestMastheadTrimsALongBreadcrumb(t *testing.T) {
 			t.Fatalf("line %d is %d wide, want %d: %q", i, got, mastheadWidth, line)
 		}
 	}
-	// The deep paths are shortened rather than allowed to push the domain out;
-	// the elision is itself the visible sign that the line was trimmed.
+	// Deep paths are shortened rather than pushing the domain out; the elision is
+	// the visible sign the line was trimmed.
 	if !strings.Contains(shown, "…") {
 		t.Fatalf("nothing says the breadcrumb was trimmed:\n%s", shown)
 	}
 }
 
-// TestMastheadElidesPathsBeforeDroppingItems is the case the 80-column capture
-// caught: the two paths filled the line, and the breadcrumb answered by
-// eliding the domain to "…" while showing both paths in full. A path's middle
-// is what can go.
+// Two paths fill the line, so the breadcrumb elides them rather than the domain: a
+// path's middle is what can go.
 func TestMastheadElidesPathsBeforeDroppingItems(t *testing.T) {
 	c := &chrome{step: 3, total: 4, question: "which apps should run here?"}
 	c.answers = []answered{
@@ -123,9 +121,8 @@ func TestMastheadElidesPathsBeforeDroppingItems(t *testing.T) {
 	}
 }
 
-// TestBreadcrumbKeepsTheDomainWhenItMustDrop: with a domain too long to sit
-// beside both paths even elided, the domain stays and the oldest path is the
-// one that goes.
+// A domain too long to sit beside both elided paths stays, and the oldest path
+// goes instead.
 func TestBreadcrumbKeepsTheDomainWhenItMustDrop(t *testing.T) {
 	domain := "box.a-rather-long-name.example.com"
 	c := &chrome{step: 3, total: 4}

@@ -13,16 +13,13 @@ import (
 	"github.com/swizzin/s5n/internal/theme"
 )
 
-// painter paints the terminal's own background with the theme's, so box's
-// colours sit on the ground they were chosen for instead of on whatever the
-// terminal had.
+// painter paints the terminal's own background with the theme's, so box's colours
+// sit on the ground they were chosen for.
 //
-// It is off unless someone asks for it. Painting is a change to the terminal
-// that outlives the process: there is no way to undo it after kill -9, a
-// dropped SSH session or a terminal that stops reading, and the colour is left
-// behind until the operator's own reset. The terminal's background is also the
-// one thing box does not own, which is why the palettes come in pairs in the
-// first place.
+// Off unless someone asks. Painting outlives the process: nothing undoes it after
+// kill -9, a dropped SSH session or a terminal that stops reading, and the
+// terminal's background is the one thing box does not own, which is why the
+// palettes come in pairs.
 type painter struct {
 	mu   sync.Mutex
 	out  io.Writer
@@ -35,23 +32,18 @@ func newPainter(out io.Writer, p theme.Variant, on bool) *painter {
 	if !on || p.BG == "" {
 		return &painter{}
 	}
-	// Lowercase, like the hex Bubble Tea writes: the sequence is the same one
-	// its renderer emits, so a terminal cannot end up with two spellings of
-	// the same colour.
+	// Lowercase, like the hex Bubble Tea writes: the sequence is the one its
+	// renderer emits, so a terminal never gets two spellings of one colour.
 	return &painter{out: out, bg: strings.ToLower(p.BG)}
 }
 
 // enabled says whether this painter does anything.
 func (p *painter) enabled() bool { return p.bg != "" }
 
-// hook is huh's Form.WithViewHook. It is how Bubble Tea is told the background:
-// every frame a form draws is then painted by its own renderer, including the
-// ones drawn after a resize or a clear.
-//
-// The colour is the run's, resolved once; the hook itself has to be attached to
-// every form because huh runs one Bubble Tea program per form and a view hook
-// belongs to a program. That is not per-form painting: nothing here reads a
-// form, and the value never changes.
+// hook is huh's Form.WithViewHook: Bubble Tea is told the background, and every
+// frame a form draws is painted by its own renderer, including after a resize or a
+// clear. The colour is the run's, resolved once; the hook is attached to every
+// form because huh runs one Bubble Tea program per form.
 func (p *painter) hook(v tea.View) tea.View {
 	if !p.enabled() {
 		return v
@@ -60,9 +52,8 @@ func (p *painter) hook(v tea.View) tea.View {
 	return v
 }
 
-// begin paints the background once, before the run's first line. A run that
-// asks for painting asks for it for every line it prints, not only the ones
-// whose form happens to be on screen.
+// begin paints the background once, before the run's first line: a run that asks
+// for painting asks for every line it prints.
 func (p *painter) begin() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -72,20 +63,17 @@ func (p *painter) begin() {
 	p.paintLocked()
 }
 
-// again repaints after a form's program has exited.
-//
-// Bubble Tea resets every background it set when a program shuts down, and box
-// runs one program per form: the reset would land in the gap between a form and
-// the reporter's own lines, which is every transcript line a person scrolls
-// back through. Repainting there is invisible -- it is the same colour -- and
-// it is what keeps the run one ground from the first masthead to the last card.
+// again repaints after a form's program exits. Bubble Tea resets every background
+// it set when a program shuts down, and box runs one program per form, so the
+// reset would land in the gap before the reporter's own lines; repainting the same
+// colour keeps the run one ground from the first masthead to the last card.
 func (p *painter) again() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.paintLocked()
 }
 
-// paintLocked writes the background and remembers it. The caller holds p.mu.
+// paintLocked writes the background and remembers it; the caller holds p.mu.
 func (p *painter) paintLocked() {
 	if !p.enabled() {
 		return
@@ -94,8 +82,8 @@ func (p *painter) paintLocked() {
 	p.live = true
 }
 
-// reset puts the terminal's own background back. It is safe to call more than
-// once and does nothing when the painter never painted.
+// reset puts the terminal's own background back: safe to call more than once, and
+// doing nothing when the painter never painted.
 func (p *painter) reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

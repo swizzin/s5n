@@ -13,15 +13,13 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// The two sequences painting touches. They are the bytes Bubble Tea's own
-// renderer writes, spelled out here so a test fails if the TUI ever emits a
-// different one.
+// The two sequences painting touches, the bytes Bubble Tea's renderer writes, so a
+// test fails if the TUI emits a different one.
 func painted() string  { return ansi.SetBackgroundColor("#11161b") }
 func restored() string { return ansi.ResetBackgroundColor }
 
-// TestBackgroundIsOffByDefault: painting is a change to the terminal that
-// outlives the process, so a run that did not ask for it must not write a byte
-// of it -- not on a normal run, not on a failure.
+// A run that did not ask for painting writes no byte of it, on a normal run or a
+// failure: the change outlives the process.
 func TestBackgroundIsOffByDefault(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 90, Yes: true})
@@ -33,9 +31,8 @@ func TestBackgroundIsOffByDefault(t *testing.T) {
 	}
 }
 
-// TestBackgroundIsPaintedOnceForTheRun: one set, before the first line, and one
-// reset when the reporter closes. The whole run is one ground, and the terminal
-// is handed back as it was found.
+// One set before the first line and one reset on Close: the run is one ground, and
+// the terminal is handed back as found.
 func TestBackgroundIsPaintedOnceForTheRun(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 90, Yes: true, Background: true})
@@ -62,10 +59,8 @@ func TestBackgroundIsPaintedOnceForTheRun(t *testing.T) {
 	}
 }
 
-// TestBackgroundSurvivesTheGapBetweenForms: each form is its own Bubble Tea
-// program, and a program resets the background it set when it exits. The gap
-// between a form and the reporter's next line is where that reset would be
-// seen, so the paint is re-asserted there.
+// Each form is its own Bubble Tea program, which resets the background on exit, so
+// the paint is re-asserted in the gap before the reporter's next line.
 func TestBackgroundSurvivesTheGapBetweenForms(t *testing.T) {
 	var buf bytes.Buffer
 	u := New(Options{Out: &buf, In: strings.NewReader("x\n"), Background: true})
@@ -77,8 +72,8 @@ func TestBackgroundSurvivesTheGapBetweenForms(t *testing.T) {
 	if got := strings.Count(out, painted()); got < 2 {
 		t.Fatalf("the background was set %d times around one form, want the form and the gap after it:\n%q", got, out)
 	}
-	// The record huh leaves behind is printed after the form's program has
-	// gone, so the last paint has to come before it.
+	// The record is printed after the form's program has gone, so the last paint
+	// comes before it.
 	record := strings.Index(out, escapeFor(accentStyle)+"✓")
 	if paint := strings.LastIndex(out, painted()); record < 0 || paint > record {
 		t.Fatalf("the record was drawn after the repaint, not on it:\n%q", out)
@@ -89,9 +84,8 @@ func TestBackgroundSurvivesTheGapBetweenForms(t *testing.T) {
 	}
 }
 
-// TestBackgroundResetsWhenARunReturnsAnError: cmd/box defers Close, so an error
-// on the way out is not a terminal left painted. The error here is the theme
-// name's, which is one of the paths that returns before a single question.
+// cmd/box defers Close, so an error on the way out does not leave the terminal
+// painted; the theme name's error returns before a single question.
 func TestBackgroundResetsWhenARunReturnsAnError(t *testing.T) {
 	var buf bytes.Buffer
 	u := New(Options{Out: &buf, Background: true, Theme: "amber"})
@@ -107,10 +101,8 @@ func TestBackgroundResetsWhenARunReturnsAnError(t *testing.T) {
 	}
 }
 
-// TestBackgroundResetsOnACancelledContext: Ctrl-C and SIGTERM cancel the run
-// through the reporter's signal handler, which leaves through os.Exit -- no
-// deferred Close runs there -- so the handler restores the background itself
-// before it goes.
+// Ctrl-C and SIGTERM leave through os.Exit, where no deferred Close runs, so the
+// signal handler restores the background itself.
 func TestBackgroundResetsOnACancelledContext(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 90, Background: true})
@@ -127,15 +119,14 @@ func TestBackgroundResetsOnACancelledContext(t *testing.T) {
 	if !strings.HasSuffix(buf.String(), restored()) {
 		t.Fatalf("the interrupt path left the terminal painted:\n%q", buf.String())
 	}
-	// And the deferred Close after it writes nothing more.
+	// The deferred Close after it writes nothing more.
 	r.Close()
 	if got := strings.Count(buf.String(), restored()); got != 1 {
 		t.Fatalf("%d resets, want one", got)
 	}
 }
 
-// TestBackgroundIsNotPaintedUnderNoColor: NO_COLOR is the terminal asking for
-// no colour at all, and the background is a colour.
+// NO_COLOR asks for no colour at all, and the background is a colour.
 func TestBackgroundIsNotPaintedUnderNoColor(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 90, Yes: true, NoColor: true, Background: true})
@@ -146,9 +137,8 @@ func TestBackgroundIsNotPaintedUnderNoColor(t *testing.T) {
 	}
 }
 
-// TestBackgroundHookPaintsTheForm: the hook is how a form's own renderer is
-// told the colour, so every frame it draws -- including a redraw after a resize
-// -- is on the run's ground.
+// The hook tells a form's own renderer the colour, so every frame, including a
+// redraw after a resize, is on the run's ground.
 func TestBackgroundHookPaintsTheForm(t *testing.T) {
 	var buf bytes.Buffer
 	u := New(Options{Out: &buf, Background: true, Theme: "s5n"})
