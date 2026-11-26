@@ -10,8 +10,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// One cluster-wide LIST; every Service port with a nodePort comes back with its
-// Service, and ports without one (ClusterIP) are skipped.
+// One cluster-wide LIST; every port with a nodePort comes back, a ClusterIP one
+// is skipped.
 func TestNodePortsListsEveryNamespace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/services" {

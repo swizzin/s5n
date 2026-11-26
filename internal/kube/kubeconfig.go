@@ -7,24 +7,20 @@ import (
 	"path/filepath"
 )
 
-// Records is the one thing the resolver needs from `box bootstrap`'s cluster
-// record: the kubeconfig the decision wrote. bootstrap's store satisfies it, so
-// `release` no longer imports bootstrap for a string, and the next command that
-// resolves a cluster (root's `box adduser`) does not have to either.
+// Records is the one thing the resolver needs from bootstrap's cluster record:
+// the kubeconfig the decision wrote. bootstrap's store satisfies it, so release
+// does not import bootstrap for a string.
 type Records interface {
 	// RecordedKubeconfig returns the recorded kubeconfig path and whether a
 	// record exists at all.
 	RecordedKubeconfig() (path string, recorded bool, err error)
 }
 
-// ResolveKubeconfig picks the cluster a command writes to: --kubeconfig wins,
-// the first KUBECONFIG entry is next, and the recorded cluster is the fallback
-// only when neither was given. It never re-derives a cluster: bootstrap decided,
-// and box reuses the decision.
-//
-// An explicit path that does not exist is an error, not a reason to fall back.
-// Silently writing to a different cluster than the one named is the worst
-// failure these commands have.
+// ResolveKubeconfig picks the cluster a command writes to: --kubeconfig, then the
+// first KUBECONFIG entry, then the recorded cluster. It never re-derives a
+// cluster: bootstrap decided, and box reuses the decision. An explicit path that
+// does not exist is an error, not a reason to fall back -- silently writing to a
+// different cluster than the one named is the worst failure these commands have.
 func ResolveKubeconfig(flag, env string, records Records) (string, error) {
 	path := flag
 	if path == "" {

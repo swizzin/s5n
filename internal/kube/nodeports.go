@@ -16,9 +16,9 @@ type NodePort struct {
 	Service string
 }
 
-// NodePorts lists every nodePort the cluster's Services hold: one LIST of
-// Services in every namespace, which only a cluster-wide identity (root's) may
-// do. It is how box picks a peer port nothing else has.
+// NodePorts lists every nodePort the cluster's Services hold: one LIST in every
+// namespace, which only a cluster-wide identity (root's) may do. It is how box
+// picks a peer port nothing else has.
 func NodePorts(ctx context.Context, cfg *rest.Config) ([]NodePort, error) {
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
