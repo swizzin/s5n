@@ -54,7 +54,13 @@ its own. */}}
        changes is a row in the database), so a ConfigMap is the config, and the
        app owns no init container. It is mounted at the app's own config path so
        a migrated source's copy is what the mount hides, and the app never reads
-       two files. */}}
+       two files.
+
+       The one setting that cannot be in it is the OIDC client secret, which is
+       a Secret box wrote into this namespace: the app has no file spelling for
+       it, only FILEBROWSER_OIDC_CLIENT_SECRET in its environment, and the chart
+       hands it that the way PeerBanHelper gets its token. Everything else the
+       login needs is here, so one file says what this app's login is. */}}
 {{- if eq $inst.app "filebrowser" }}
 ---
 apiVersion: v1
@@ -68,16 +74,23 @@ data:
   config.yaml: |
     http:
       port: {{ $cfg.port }}
-      # The app mounts its routes and builds its own asset and API URLs from
-      # this prefix, so the route keeps the path (values.yaml, rewritePath).
+      # The app builds its routes and its own asset and API URLs from this
+      # prefix, so the route keeps the path (values.yaml, rewritePath).
       baseURL: {{ $urlBase | quote }}
-      # Through the Gateway the person's address arrives in X-Forwarded-For, and
-      # the app reads it for its logs and activity table only. A chart cannot
-      # know the proxy's address list, and trusting a header without one is a
-      # spoof anyone in the pod network could write; nothing here decides who a
-      # request is (auth.methods.noauth), so the cost of not trusting it is one
-      # startup warning.
-      trustProxyHeaders: false
+      # Through the Gateway the person's address arrives in X-Forwarded-For,
+      # and OIDC makes this load-bearing: the app builds its redirect_uri from
+      # the request it is given, and one built from the pod's own view of the
+      # connection would be http on the pod's address -- a URI Authelia refuses.
+      # So the Gateway's headers are trusted, which is also what the chart's
+      # NetworkPolicy already assumes: the Gateway is the only thing that
+      # reaches this port.
+      #
+      # No trustedProxies: the peer that connects is the proxy *pod*, and the
+      # only address a chart can name is the Gateway's Service, which is not
+      # what the socket sees. The cost is that the activity log and the auth
+      # rate limiter see the proxy's address, not the person's -- not identity,
+      # which is the login's.
+      trustProxyHeaders: true
       # WebDAV is a second protocol over the same tree, on with no login of its
       # own; the browser is the only client this box serves.
       disableWebDAV: true
@@ -117,9 +130,42 @@ data:
               delete: true
     auth:
       methods:
-        # Whoever reaches it is the one admin user, and the edge is the only
-        # login in front of it (catalog.yaml, login: portal).
+        {{- if $oidc }}
+        # The login's own provider, not a second password: the person signs in
+        # at the portal, and this app signs the same person in again by itself
+        # -- the round trip is silent, so the visit still looks like one login
+        # (catalog.yaml, `oidc: true`; docs/box.md, "Apps that speak OIDC sign
+        # in through the login").
+        #
+        # The client id is box's <namespace>-<app>, and the issuer is the URL
+        # the browser used. The redirect_uri is not here: the app builds it from
+        # the request (<baseURL>api/auth/oidc/callback), which is why
+        # trustProxyHeaders is on above and why box's client names exactly that
+        # path (internal/authelia, OIDCCallbackPath).
+        #
+        # No password method: it would be a form nobody's account can answer,
+        # because the app's user rows are made by the provider.
+        #
+        # No adminGroup. This app grants its own admin only through a group
+        # claim, and the login writes its account with no groups, so the person
+        # who signs in is a full-permission user of /data and the app's own
+        # settings stay the chart's -- which is the honest split while the chart
+        # owns the config file (docs/box.md, the open note on group claims).
+        password:
+          enabled: false
+        oidc:
+          enabled: true
+          clientId: {{ printf "%s-%s" $root.Release.Namespace $inst.app | quote }}
+          issuerUrl: {{ printf "https://%s/auth" $root.Values.gateway.host | quote }}
+        {{- else }}
+        # No provider on this release (a plain helm install, or a grant from
+        # before box wrote the Gateway's address): whoever reaches it is the one
+        # user, and the edge is the only login in front of it. The app then has
+        # no login at all, which is the same shape every other catalog app has
+        # on such a box. box records the address at init, so a seedbox's own
+        # release takes the branch above.
         noauth: true
+        {{- end }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -702,6 +748,28 @@ spec:
               value: "off"
             {{- end }}
             {{- if $oidc }}
+            {{- if eq $inst.app "filebrowser" }}
+            # The one setting its config.yaml cannot carry: the client secret.
+            # FileBrowser Quantum's only spelling for it that is not the file is
+            # this environment variable -- it has no _FILE variant, unlike qui
+            # and autobrr -- so the chart hands it the Secret through the
+            # environment, the way PeerBanHelper gets its token. Nothing else
+            # about the login is here: the issuer, the client id and the switch
+            # are the config.yaml above, which is where a reader looks for this
+            # app's configuration.
+            #
+            # It is also the app's startup dependency rather than a page-level
+            # one: at v2.1.0-stable a provider that will not answer at start is
+            # a fatal error (pkg/settings/config.go:568-571), so this pod is
+            # Ready only once the issuer is reachable with the box's own
+            # certificate -- which is why box's per-host step runs before the
+            # release moves.
+            - name: FILEBROWSER_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "s5n-oidc-%s" $inst.app }}
+                  key: client-secret
+            {{- else }}
             {{- $oidcPrefix := upper $inst.app }}
             # This app signs in through the login's own OIDC provider, so its
             # page offers a login after all -- one that resolves to the same
@@ -710,14 +778,14 @@ spec:
             # Authelia issued it.
             #
             # One account does live in the app: the automation account the
-            # chart owns (s5n.wiringAccount). Both apps hand an API key only to
-            # a signed-in session, so an unattended install needs an account it
-            # controls -- the init container creates it and re-sets it to the
-            # release Secret's password on every start, and the wiring Job signs
-            # in with it to register the app's connections. It is not offered in
-            # the UI and is not a second way in for a person: what bounds it is
-            # the edge's login in front and the NetworkPolicy, which admits only
-            # the Gateway and the wiring Job to this port.
+            # chart owns (s5n.wiringAccount). qui and autobrr hand an API key
+            # only to a signed-in session, so an unattended install needs an
+            # account it controls -- the init container creates it and re-sets
+            # it to the release Secret's password on every start, and the wiring
+            # Job signs in with it to register the app's connections. It is not
+            # offered in the UI and is not a second way in for a person: what
+            # bounds it is the edge's login in front and the NetworkPolicy,
+            # which admits only the Gateway and the wiring Job to this port.
             #
             # The names are the app's own, and both clients that speak OIDC read
             # them from their own name in caps: QUI__<NAME> at v1.35.0
@@ -734,6 +802,8 @@ spec:
             # qui's bindOrReadFromFile is what makes the _FILE spelling mean
             # that (config.go:1082-1102); autobrr's GetEnvStr looks for the _FILE
             # name before the plain one, for every setting (config.go:452-468).
+            # (FileBrowser Quantum has no _FILE spelling, which is why it is the
+            # one client that gets its secret through the environment.)
             #
             # OIDC is the login the app's page offers. Neither app stops routing
             # its own credential endpoints, and the account above is the only row
@@ -790,6 +860,7 @@ spec:
             {{- else }}
             - name: {{ $oidcPrefix }}__OIDC_DISABLE_BUILT_IN_LOGIN
               value: "true"
+            {{- end }}
             {{- end }}
             # The anchor, when the box's certificate is not publicly trusted:
             # the login's own root, which box copies into a ConfigMap in this
@@ -879,9 +950,11 @@ spec:
               mountPath: /cache
             {{- end }}
             {{- if $oidc }}
+            {{- if ne $inst.app "filebrowser" }}
             - name: oidc
               mountPath: /etc/s5n-oidc
               readOnly: true
+            {{- end }}
             - name: host-ca
               mountPath: /etc/s5n-host-ca
               readOnly: true
@@ -915,6 +988,7 @@ spec:
                 path: config.yaml
         {{- end }}
         {{- if $oidc }}
+        {{- if ne $inst.app "filebrowser" }}
         # The client secret box wrote into this namespace, created once and
         # never regenerated: the login holds only its digest.
         - name: oidc
@@ -924,6 +998,7 @@ spec:
             items:
               - key: client-secret
                 path: client-secret
+        {{- end }}
         # Root's anchor, when this box's certificate is not publicly trusted.
         # optional because a Let's Encrypt box has no ConfigMap and does not
         # need one; an empty directory is a valid SSL_CERT_DIR.

@@ -592,12 +592,16 @@ func TestRealChartManifestLoads(t *testing.T) {
 		}
 	}
 	// The apps that sign in through the login's provider, in manifest order:
-	// the clients box registers for a box with both installed. A new one is an
-	// entry here, and the chart wires it from the same flag.
-	if got := strings.Join(cat.OIDCApps([]string{"qui", "autobrr", "maintainerr", "sonarr"}), ","); got != "qui,autobrr" {
-		t.Fatalf("OIDC apps = %s, want qui,autobrr (only the catalog's flag makes a client)", got)
+	// the clients box registers for a box with all three installed. A new one is
+	// an entry here, and the chart wires it from the same flag -- which is what
+	// makes a box that already exists register the client when its next run
+	// takes a chart with the app enabled: the list is the catalog's answer, and
+	// the login half of every root apply (and every `box update` step) writes a
+	// client it does not find.
+	if got := strings.Join(cat.OIDCApps([]string{"qui", "autobrr", "filebrowser", "maintainerr", "sonarr"}), ","); got != "qui,autobrr,filebrowser" {
+		t.Fatalf("OIDC apps = %s, want qui,autobrr,filebrowser (only the catalog's flag makes a client)", got)
 	}
-	for _, name := range []string{"qui", "autobrr"} {
+	for _, name := range []string{"qui", "autobrr", "filebrowser"} {
 		app, _ := cat.App(name)
 		if !app.OIDC {
 			t.Fatalf("apps.%s is not an OIDC client", name)
@@ -610,7 +614,7 @@ func TestRealChartManifestLoads(t *testing.T) {
 	// The opt-in apps: off unless the operator says so, no instances, and
 	// nothing to ask at init. A box that installs the defaults must not get
 	// them, so `default: false` is the assertion that matters most here.
-	for _, name := range []string{"qui", "autobrr", "maintainerr"} {
+	for _, name := range []string{"qui", "autobrr", "filebrowser", "maintainerr"} {
 		app, ok := cat.App(name)
 		if !ok {
 			t.Fatalf("%s is not in the catalog", name)

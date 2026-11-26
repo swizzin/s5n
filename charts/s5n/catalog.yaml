@@ -351,15 +351,20 @@ apps:
   # download client already keep. A box does not need one to be useful, and it
   # is the whole data tree in a browser, so it is asked for.
   #
-  # It is behind the box's one login with its own auth off: auth.methods.noauth
-  # makes every request the one admin user, the same boundary Maintainerr and
-  # PeerBanHelper rely on (and it has no /api bypass to give it one). Its whole
-  # configuration is the chart's config.yaml; the database is state, not a
-  # setting anyone hands it, so there are no questions.
+  # It signs in through the login's own provider, like qui and autobrr: at
+  # v2.1.0-stable its only way to grant its admin is a group claim, and its own
+  # password method would be a form nobody's account can answer (its user rows
+  # are made by the provider). `login: portal` is unchanged: the edge's login is
+  # still in front of every request, and the app's round trip is the silent
+  # second half -- the app reaches the same person, so a visit still looks like
+  # one login. Its whole configuration is the chart's config.yaml; the database
+  # is state, and the only thing it needs from box is the client itself, which
+  # the flag below registers.
   filebrowser:
     description: a file manager for the downloads and the library, in a browser
     instances: false
     default: false
+    oidc: true
     login: portal
     # Its database, and the SQLite companions: the app opens it in WAL mode
     # whatever FILEBROWSER_SQL_WAL says -- that switch is the file index, which

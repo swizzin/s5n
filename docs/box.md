@@ -320,13 +320,16 @@ navigation and gets the 302, which is the one shape nothing at the edge can tell
 
 **Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
 provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
-(qui and autobrr) has its own login switched to it, so a user still signs in once.
+(qui, autobrr and FileBrowser Quantum) has its own login switched to it, so a user still
+signs in once.
 autobrr's sign-in page sends the browser to the provider itself (its own automatic OIDC
 login, new in 1.91); qui at v1.36.1 offers the provider as the one button its sign-in
-page has and has no automatic redirect, so that first visit is one click. Neither
-client refuses to start when the provider is unreachable -- qui since v1.36.0 discovers
-it per request rather than at start-up -- so a healthy pod proves nothing about the
-provider, and only a sign-in does. Each seedbox has its own client per
+page has and has no automatic redirect, so that first visit is one click. FileBrowser
+Quantum is told its whole login in the `config.yaml` the chart writes -- its client id and
+the issuer, with the secret in its environment because it has no file spelling for one --
+and it refuses to start when the provider will not answer, so its Ready is that proof as
+well; qui and autobrr only discover the provider when a page or a request asks, so for
+them only a sign-in does. Each seedbox has its own client per
 app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
 user. root's `init` writes the client secret once into a Secret in the seedbox's
 namespace and only its digest into the login, and so does root's `apply` when it enables
@@ -346,6 +349,16 @@ self-signed. Only the
 Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a grant from
 before the provider, has no recorded address, and the app keeps its own login switched
 off behind the edge's.
+
+**The login gives an account no group, so no app can make it its admin (open).** An app
+that grants its own admin by a group claim -- FileBrowser Quantum is the one in the
+catalog -- gets nothing to match, because box writes each login's row with a name and a
+digest and no `groups:`, and a client may not ask for the `groups` scope. Such an app is
+served to the provider's one account as a full-permission user of `/data`, and its own
+settings stay the chart's, which is the honest split while the chart owns its config file.
+Making the owner an app's admin is a login change -- a group on the row, `groups` in the
+client's scopes and a client's `adminGroup` -- and it raises `min-box`, because an older
+box would write neither.
 
 **An app that keeps its own user table has one account box owns (decided).** qui and autobrr hand out API keys only to a signed-in session, so the wiring Job
 can't be given a key up front. The chart generates a password for each in the release's

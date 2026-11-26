@@ -429,7 +429,8 @@ apps:
   # Arrs and the download client already manage, and a box with none of them
   # has nothing for it to show. Its whole configuration is a ConfigMap this
   # chart owns (config.yaml), so it carries no init container and no
-  # credentials: its own auth is off, and the edge is the only login.
+  # credentials: it signs in through the login's own provider, and the edge's
+  # login stands in front of it too.
   filebrowser:
     enabled: false
     image:

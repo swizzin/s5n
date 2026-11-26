@@ -239,23 +239,94 @@ fi
 echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
 
 # FileBrowser Quantum's whole configuration is one config.yaml the chart owns:
-# the prefix the route keeps, its own auth off, the data contract as its one
-# source read-write, the database on the config claim and the cache on the pod's
-# emptyDir (the file index and the previews are regenerable; the config claim is
-# every app's settings). The default render carries none of it.
+# the prefix the route keeps, its sign-in through the login's provider, the data
+# contract as its one source read-write, the database on the config claim and
+# the cache on the pod's emptyDir (the file index and the previews are
+# regenerable; the config claim is every app's settings). The default render
+# carries none of it.
+#
+# The app has no way to read a secret from a file, so the client secret is the
+# one setting the file cannot carry: it reaches the pod through the environment,
+# from the Secret box wrote. A chart that rendered it (or the digest) into the
+# ConfigMap would be a secret in a ConfigMap.
 fb=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
 for want in 'name: filebrowser-config' 'config.yaml: |' 'baseURL: "/filebrowser"' \
-            'noauth: true' 'disableWebDAV: true' 'path: /data' \
+            'trustProxyHeaders: true' 'disableWebDAV: true' 'path: /data' \
             'path: /config/database.sqlite' 'cacheDir: /cache' \
+            'enabled: true' 'clientId: "seedbox-filebrowser"' \
+            'issuerUrl: "https://box.example.com/auth"' \
+            'password:' 'enabled: false' \
+            '- name: FILEBROWSER_OIDC_CLIENT_SECRET' 'name: s5n-oidc-filebrowser' \
+            'key: client-secret' \
             '- name: FILEBROWSER_CONFIG' 'mountPath: /config/config.yaml' \
             'sizeLimit: 5Gi' 'path: /filebrowser/health'; do
   grep -qF -- "$want" <<<"$fb" || { echo "the filebrowser render has no ${want}"; exit 1; }
 done
+# ... and not the other login: this render carries the Gateway's address, so the
+# app is a client of the provider, and the release that has none keeps noauth.
+grep -qF 'noauth: true' <<<"$fb" &&
+  { echo "the filebrowser render has both a provider and noauth: an app that overrides every method has no login"; exit 1; }
+# The mounted file is the app's whole configuration, so it has to be YAML the
+# app can read: a bad indent in a ConfigMap's block scalar is a crash at start,
+# and kubeconform sees the block as one opaque string.
+fb_file=$(mktemp)
+awk '/^  config.yaml: \|$/{want=1; next}
+     want && /^[^ ]/{want=0}
+     want{ sub(/^    /, ""); print }' <<<"$fb" >"$fb_file"
+[ -s "$fb_file" ] || { echo "the filebrowser render has no config.yaml block"; rm -f "$fb_file"; exit 1; }
+fb_problems=$(python3 - "$fb_file" <<'PY'
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+problems = []
+http = c.get("http") or {}
+if http.get("baseURL") != "/filebrowser":
+    problems.append(f"http.baseURL = {http.get('baseURL')!r}")
+if http.get("trustProxyHeaders") is not True:
+    problems.append("http.trustProxyHeaders is off: the OIDC redirect_uri would be built from the pod's own http view")
+methods = ((c.get("auth") or {}).get("methods") or {})
+oidc = methods.get("oidc") or {}
+if methods.get("noauth"):
+    problems.append("auth.methods.noauth is set beside the provider")
+if oidc.get("enabled") is not True:
+    problems.append(f"auth.methods.oidc.enabled = {oidc.get('enabled')!r}")
+if oidc.get("clientId") != "seedbox-filebrowser":
+    problems.append(f"auth.methods.oidc.clientId = {oidc.get('clientId')!r}, want box's <namespace>-<app>")
+if oidc.get("issuerUrl") != "https://box.example.com/auth":
+    problems.append(f"auth.methods.oidc.issuerUrl = {oidc.get('issuerUrl')!r}")
+if "clientSecret" in oidc:
+    problems.append("auth.methods.oidc.clientSecret is in the ConfigMap: the secret belongs in the Secret the pod reads")
+if ((methods.get("password") or {}).get("enabled")) is not False:
+    problems.append("auth.methods.password is on: the form it shows has no account that can answer it")
+server = c.get("server") or {}
+if server.get("cacheDir") != "/cache":
+    problems.append(f"server.cacheDir = {server.get('cacheDir')!r}, want the emptyDir")
+sources = server.get("sources") or []
+if [s.get("path") for s in sources] != ["/data"]:
+    problems.append(f"server.sources = {[s.get('path') for s in sources]}, want the data contract's one source")
+if problems:
+    print("; ".join(problems))
+PY
+)
+if [ -n "$fb_problems" ]; then
+  rm -f "$fb_file"
+  echo "the filebrowser render's config.yaml is not the configuration this chart means: $fb_problems"
+  exit 1
+fi
+rm -f "$fb_file"
+# The other branch: a release with no Gateway address (a plain helm install, or
+# a grant from before box recorded one) is not an OIDC client at all, and the
+# edge's login is the only one -- the shape every other app has on such a box.
+fb_plain=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+  --set apps.filebrowser.enabled=true)
+grep -qF 'noauth: true' <<<"$fb_plain" ||
+  { echo "the filebrowser render with no provider address has no noauth: nobody could sign in to it"; exit 1; }
+grep -qF 'FILEBROWSER_OIDC_CLIENT_SECRET' <<<"$fb_plain" &&
+  { echo "the filebrowser render with no provider address mounts a client secret nobody wrote"; exit 1; }
 if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | grep -qi 'filebrowser'; then
   echo "the default render mentions filebrowser: an opt-in app must render nothing when it is off"
   exit 1
 fi
-echo "== filebrowser render: sealed config, noauth, the data source, database and cache; nothing when off"
+echo "== filebrowser render: sealed config, the provider as its login, no secret in it, noauth without one; nothing when off"
 
 # No app route keeps Envoy's 15s request timeout: an app behind the one login
 # is one person doing real work, and a long request (autobrr cleaning a large
