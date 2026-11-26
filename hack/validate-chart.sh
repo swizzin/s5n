@@ -11,10 +11,9 @@ CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{
 helm lint charts/s5n --set auth.edge=true --set gateway.host=box.example.com \
   --set apps.qbittorrent.torrent.port=30080
 
-# auth.edge is the operator's statement that a login sits in front of the
-# release. The chart ships no login, so a render with the key missing and a
-# render with it false must both fail with the message naming the key and the
-# fix: an open admin stack must never be the result of forgetting a value.
+# auth.edge is the operator's statement that a login sits in front of the release. Both a
+# missing key and a false one must fail naming the key and the fix: an open admin stack
+# must never be the result of forgetting a value.
 auth_message='auth.edge: set it to true to say a login is in front of this release; the chart ships no login, so false is refused too (box sets it)'
 for mode in missing false; do
   err=$(mktemp)
@@ -33,11 +32,9 @@ for mode in missing false; do
   echo "== auth.edge $mode: refused"
 done
 
-# The chart ships no peer port: a fixed one in the upper band of the NodePort
-# range is a port the API server can hand to another Service first, and the
-# peers Service is then refused for the rest of the install. box records one;
-# a helm install must set it, and a render without it says which key and what it
-# is for.
+# The chart ships no peer port: a fixed one in the upper band is a port the API server can
+# hand to another Service first, and the peers Service is then refused for the rest of the
+# install. box records one; a helm install must set it.
 port_message='apps.qbittorrent.torrent.port: set the peer port peers reach this box on'
 err=$(mktemp)
 if helm template t charts/s5n -n seedbox --set auth.edge=true \
@@ -53,11 +50,9 @@ fi
 rm -f "$err"
 echo "== peer port missing: refused, naming the key and the band box picks from"
 
-# Plex must never trust a network range by default. The public Gateway's Envoy
-# proxy connects to Plex from its own pod IP, which is inside the pod CIDR, so
-# PLEX_NO_AUTH_NETWORKS containing that range would make the whole internet look
-# like a "local" client: unauthenticated admin of the server. apps.plex.noAuthNetworks
-# is opt-in only, and the default render must not carry the env var at all.
+# Plex must never trust a network range by default: the Gateway's proxy dials from the pod
+# CIDR, so a PLEX_NO_AUTH_NETWORKS covering it makes the internet look local -- an
+# unauthenticated admin. The default render must not carry the env var at all.
 if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host=box.example.com \
      --set apps.qbittorrent.torrent.port=30080 | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
   echo "default render sets PLEX_NO_AUTH_NETWORKS: Plex would trust the pod network"
@@ -65,11 +60,9 @@ if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host
 fi
 echo "== default render: no PLEX_NO_AUTH_NETWORKS"
 
-# A rehearsal box keeps DNS and its own pods as its only egress: the
-# public-internet ipBlocks go, and the policies render even when the grant
-# switched networkPolicy.enabled off. Both halves are asserted, because a lock
-# that renders nothing is a box with no policy at all, and one that keeps the
-# internet rule is a rehearsal announcing to trackers.
+# A rehearsal box keeps DNS and its own pods as its only egress: the public-internet
+# ipBlocks go, and the policies render even when the grant switched networkPolicy.enabled
+# off. A lock that renders nothing is a box with no policy at all.
 plain=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
   --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32')
 grep -q 'cidr: 0.0.0.0/0' <<<"$plain" ||
@@ -80,8 +73,8 @@ grep -q 'cidr: 0.0.0.0/0' <<<"$locked" &&
   { echo "the rehearsal render keeps the public-internet egress rule: a copy would announce and query as the live box"; exit 1; }
 grep -q 'cidr: ::/0' <<<"$locked" &&
   { echo "the rehearsal render keeps the IPv6 internet egress rule"; exit 1; }
-# The lock is only a lock if the policy exists: this file sets
-# networkPolicy.enabled false and the render must still carry it.
+# The lock is only a lock if the policy exists: this file sets networkPolicy.enabled false
+# and the render must still carry it.
 for want in 'name: t-egress' 'name: t-default-deny' 'k8s-app: kube-dns' \
             'name: t-wiring-egress'; do
   grep -qF -- "$want" <<<"$locked" ||
@@ -89,10 +82,9 @@ for want in 'name: t-egress' 'name: t-default-deny' 'k8s-app: kube-dns' \
 done
 echo "== rehearsal render: no internet egress, DNS and in-namespace only, policies on"
 
-# Every app pod of a rehearsal box waits, first, until its own pod's egress is
-# closed: a CNI programs a new pod's policy a moment after it starts, and an app
-# that dials out in that moment reaches the internet. One gate per app pod, run
-# before anything else, and a lock with no gate address does not render at all.
+# Every app pod of a rehearsal box waits until its own egress is closed: a CNI programs a
+# new pod's policy a moment after it starts, and an app that dials out then reaches the
+# internet. A lock with no gate address does not render at all.
 apps=$(grep -c '^kind: StatefulSet' <<<"$locked")
 gates=$(grep -c -- '- name: rehearsal-gate' <<<"$locked")
 [ "$apps" -gt 0 ] && [ "$gates" = "$apps" ] ||
@@ -117,8 +109,8 @@ for values in charts/s5n/ci/*-values.yaml; do
   count=$(grep -c '^kind: ' "$out" || true)
   echo "== ${values##*/} on ${KUBE}: ${count} objects"
   [ "$count" -gt 0 ] || { echo "render produced no objects"; exit 1; }
-  # stdin, not the temp file: kubeconform skips paths without a .yaml extension
-  # and reports "0 resources" as success.
+  # stdin, not the temp file: kubeconform skips paths without a .yaml extension and reports
+  # "0 resources" as success.
   summary=$(kubeconform -strict -summary -kubernetes-version "$KUBE" \
     -schema-location default -schema-location "$CRDS" - <"$out")
   rm -f "$out"
@@ -127,16 +119,9 @@ for values in charts/s5n/ci/*-values.yaml; do
   [ "$valid" = "$count" ] || { echo "kubeconform validated ${valid:-0} of ${count} objects"; exit 1; }
 done
 
-# A catalog app that is switched off renders nothing at all: no workload, no
-# route, no egress or ingress peer derived from its entry, no Secret key and no
-# wiring config. The defaults are the render every plain install gets, so
-# "nothing" here is the difference between a box that was asked for the app and
-# one that was not.
-#
-# Secret values are random base64 (templates/secret.yaml), and 32 random
-# characters spell "pbh" about once in fifty renders, so they are blanked before
-# the grep. Their keys stay: a pbh key in the Secret is one of the leaks this
-# looks for.
+# A catalog app that is switched off renders nothing at all: no workload, route, peer, Secret
+# key or wiring config. Secret values are random base64 and 32 characters spell "pbh" about
+# once in fifty renders, so values are blanked before the grep while keys stay.
 redact_secret_values() {
   awk '/^---/ { secret = 0; data = 0 }
        /^kind: Secret$/ { secret = 1 }
@@ -151,10 +136,8 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== default render: no pbh"
 
-# The other half: with the opt-in app on, the difference against the same values
-# with it off is exactly the objects it adds. Every ci set is rendered twice, so
-# a change that leaks pbh into another app's objects (a shared listener, a secret
-# key, a peer list) fails here rather than in an operator's cluster.
+# With the opt-in app on, the difference against the same values with it off is exactly
+# the objects it adds, so a leak into another app's objects fails here.
 kinds_of() { # kinds_of <render file>
   awk '/^kind: /{kind=$2} /^  name: /{print kind "/" $2}' "$1" | sort
 }
@@ -164,8 +147,8 @@ for values in charts/s5n/ci/*-values.yaml; do
     --set apps.pbh.enabled=false >"$off"
   helm template t charts/s5n -n seedbox -f "$values" --set gateway.host=box.example.com \
     --set apps.pbh.enabled=true >"$on"
-  # diff answers 1 when the renders differ, which is the point; under pipefail an
-  # unguarded pipeline would end the script with no message at all.
+  # diff answers 1 when the renders differ, which is the point; unguarded under pipefail it
+  # would end the script with no message.
   diff <(kinds_of "$off") <(kinds_of "$on") >"$delta" || true
   added=$(sed -n 's/^> //p' "$delta" | sort | tr '\n' ' ')
   removed=$(sed -n 's/^< //p' "$delta" | sort | tr '\n' ' ')
@@ -178,9 +161,8 @@ for values in charts/s5n/ci/*-values.yaml; do
   echo "== ${values##*/}: pbh adds exactly its own four objects"
 done
 
-# What the on-render has to carry: the host route (the catalog says the app gets
-# a name of its own), the memory limit the JVM sizes its heap from, the Secret key
-# the app and the Job both read, and the wiring entry that connects it.
+# What the on-render carries: the host route, the memory limit the JVM sizes its heap from,
+# the Secret key both the app and the Job read, and the wiring entry.
 pbh=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
 for want in 'hostnames: ["pbh.box.example.com"]' 'memory: 512Mi' 'pbh-token:' \
             '"pbh":{"tokenFile":"/etc/s5n/keys/pbh-token"' \
@@ -189,12 +171,10 @@ for want in 'hostnames: ["pbh.box.example.com"]' 'memory: 512Mi' 'pbh-token:' \
 done
 echo "== pbh render: host route, memory limit, Secret key, wiring entry, one-login switch"
 
-# A Bazarr instance reads one Sonarr and one Radarr, and its pair is the Arrs
-# with the same suffix. A side this release does not run must be *absent* from
-# the Job's config, not an empty object (which the Job refuses) and not an empty
-# string (which sprig's `get` answers for a missing key, and which the Job reads
-# as a wired side). charts/s5n/ci/bazarr-half-pair-values.yaml switches on the
-# 4K Radarr and not the 4K Sonarr, so bazarr-4k has exactly one side.
+# A Bazarr instance reads one Sonarr and one Radarr, its pair being the Arrs with the same
+# suffix. A side this release does not run must be absent from the Job's config -- not an
+# empty object (refused) and not an empty string (sprig's `get` answers one for a missing
+# key, which the Job reads as wired). bazarr-half-pair-values.yaml has one side.
 pair=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/bazarr-half-pair-values.yaml |
   sed -n 's/^    \({"bazarrs".*\)$/\1/p')
 [ -n "$pair" ] || { echo "the half-pair render has no bazarrs in the Job's config"; exit 1; }
@@ -223,11 +203,9 @@ if problems:
 PY
 echo "== bazarr half pair: one side wired, the other absent from the Job's config"
 
-# SABnzbd's two 403 traps are settings in a file, not environment the image
-# passes through: url_base is what mounts its API, and X-Forwarded-For through
-# the Gateway carries the person's real address, which SAB calls external and
-# refuses. The render has to carry both, plus the API key the release Secret
-# mints and the two download paths on the data claim.
+# SABnzbd's two 403 traps are settings in a file: url_base mounts its API, and
+# X-Forwarded-For through the Gateway carries the person's address, which SAB calls external
+# and refuses. The render must carry both, the minted key and the download paths.
 sab=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
 for want in '- sabnzbd-config' '--url-base=/sabnzbd'             '--complete-dir=/data/downloads' '--download-dir=/data/downloads/incomplete'             '--api-key-file=/etc/s5n/keys/sabnzbd-apikey'             '- name: SABNZBD__API_KEY' '- name: SABNZBD__HOST_WHITELIST_ENTRIES'             'sabnzbd-apikey:' '"sabnzbd":{"apiKeyFile":"/etc/s5n/keys/sabnzbd-apikey"'             'path: /sabnzbd/api?mode=version&output=json'; do
   grep -qF -- "$want" <<<"$sab" || { echo "the sabnzbd render has no ${want}"; exit 1; }
@@ -238,16 +216,10 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
 
-# FileBrowser Quantum's whole configuration is one config.yaml the chart owns:
-# the prefix the route keeps, its sign-in through the login's provider, the data
-# contract as its one source read-write, the database on the config claim and
-# the cache on the pod's emptyDir (the file index and the previews are
-# regenerable; the config claim is every app's settings). The default render
-# carries none of it.
-#
-# The app has no way to read a secret from a file, so the client secret is the
-# one setting the file cannot carry: it reaches the pod through the environment,
-# from the Secret box wrote. A chart that rendered it (or the digest) into the
+# FileBrowser Quantum's configuration is one config.yaml the chart owns: the route's prefix,
+# the login's provider, the data contract as its one source read-write, the database on the
+# config claim, the cache on the emptyDir. The app cannot read a secret from a file, so the
+# client secret is the one setting the file cannot carry: a chart that rendered it into the
 # ConfigMap would be a secret in a ConfigMap.
 fb=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
 for want in 'name: filebrowser-config' 'config.yaml: |' 'baseURL: "/filebrowser"' \
@@ -262,13 +234,11 @@ for want in 'name: filebrowser-config' 'config.yaml: |' 'baseURL: "/filebrowser"
             'sizeLimit: 5Gi' 'path: /filebrowser/health'; do
   grep -qF -- "$want" <<<"$fb" || { echo "the filebrowser render has no ${want}"; exit 1; }
 done
-# ... and not the other login: this render carries the Gateway's address, so the
-# app is a client of the provider, and the release that has none keeps noauth.
+# ... and not the other login: this render carries the Gateway's address, so noauth is out.
 grep -qF 'noauth: true' <<<"$fb" &&
   { echo "the filebrowser render has both a provider and noauth: an app that overrides every method has no login"; exit 1; }
-# The mounted file is the app's whole configuration, so it has to be YAML the
-# app can read: a bad indent in a ConfigMap's block scalar is a crash at start,
-# and kubeconform sees the block as one opaque string.
+# The mounted file is the app's whole configuration, so it has to be YAML the app can read:
+# a bad indent in a block scalar is a crash at start, and kubeconform sees one string.
 fb_file=$(mktemp)
 awk '/^  config.yaml: \|$/{want=1; next}
      want && /^[^ ]/{want=0}
@@ -313,9 +283,8 @@ if [ -n "$fb_problems" ]; then
   exit 1
 fi
 rm -f "$fb_file"
-# The other branch: a release with no Gateway address (a plain helm install, or
-# a grant from before box recorded one) is not an OIDC client at all, and the
-# edge's login is the only one -- the shape every other app has on such a box.
+# The other branch: no Gateway address means not an OIDC client at all, and the edge's login
+# is the only one -- the shape every other app has on such a box.
 fb_plain=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
   --set apps.filebrowser.enabled=true)
 grep -qF 'noauth: true' <<<"$fb_plain" ||
@@ -328,12 +297,9 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== filebrowser render: sealed config, the provider as its login, no secret in it, noauth without one; nothing when off"
 
-# No app route keeps Envoy's 15s request timeout: an app behind the one login
-# is one person doing real work, and a long request (autobrr cleaning a large
-# releases database, an Arr's bulk edit or import) answered 504 by the gateway
-# is cut off in the app too. Every rule that sends traffic to an app asks for
-# no request timeout ("0s"); only the slash redirect, which has no backend,
-# has none to set. Counted per HTTPRoute in the render with every app on.
+# No app route keeps Envoy's 15s request timeout: a long request (autobrr cleaning a large
+# database, an Arr's bulk import) answered 504 by the gateway is cut off in the app too.
+# Only the slash redirect, which has no backend, has none to set.
 routes=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml |
   awk '/^---/{if(kind=="HTTPRoute")print name, refs, zero; kind=""; name=""; refs=0; zero=0}
        /^kind: /{kind=$2} /^  name: /{if(name=="")name=$2}
@@ -347,13 +313,10 @@ while read -r name refs zero; do
 done <<<"$routes"
 echo "== every app route: no request timeout ($(grep -c . <<<"$routes") routes)"
 
-# A category is a value inside wiring.json only: never an object name, label,
-# port name or ConfigMap key. Upper case and "/" are legal in a category and
-# illegal in a Kubernetes name, so two renders of the same four instances --
-# one with the old names (tv, movies-4k), one nested and mixed case
-# (4K/Movies) -- must produce exactly the same objects; if a category ever
-# reaches metadata.name, this comparison catches it. wiring.json still carries
-# the nested paths the Job creates.
+# A category is a value inside wiring.json only: never an object name, label, port name or
+# ConfigMap key. Upper case and "/" are legal in a category and illegal in a Kubernetes
+# name, so two renders of the same instances -- old names, and nested mixed case -- must
+# produce exactly the same objects. wiring.json still carries the nested paths.
 render_objects() { # render_objects <values file>
   helm template t charts/s5n -n seedbox -f "$1" |
     awk '/^kind: /{kind=$2} /^  name: /{print kind "/" $2}'
@@ -372,13 +335,10 @@ grep -q '/data/downloads/4K/Movies' <<<"$nested_render" ||
 grep -q '/data/media/4K/TV' <<<"$nested_render" ||
   { echo "the nested render does not carry /data/media/4K/TV"; exit 1; }
 
-# qui keeps an Arr instance per Sonarr and Radarr on the box, for ID lookups,
-# and its own connection test is an Arr API call made from qui's pod. The
-# callee's ingress is inverted from the catalog's `calls`, so a qui entry that
-# names neither Arr is a policy that drops that call without a word -- and on a
-# migrated box the rows are already pointed at the release, so nothing in the app
-# says anything is wrong. Every Arr instance of the render is checked, not just
-# the HD pair: "sonarr" in the catalog means every instance of that Arr.
+# qui keeps an Arr instance per Sonarr and Radarr for ID lookups, and its own test is an Arr
+# API call from its pod. The callee's ingress is inverted from the catalog's `calls`, so an
+# entry naming neither Arr drops that call without a word -- and on a migrated box the rows
+# are already pointed at the release. Every instance is checked.
 qui_policy=$(mktemp)
 helm template t charts/s5n -n seedbox -f charts/s5n/ci/4k-values.yaml \
   --set apps.qui.enabled=true --set gateway.host=box.example.com >"$qui_policy"
@@ -409,17 +369,12 @@ if [ -n "$qui_problems" ]; then
 fi
 echo "== qui render: every Sonarr and Radarr instance admits qui"
 
-# Jellyfin's first-run window is closed inside its pod, and nowhere else: an
-# init container runs the app's own image, binds it to loopback and completes the
-# wizard before the app container starts, so the route carries no /Startup rule
-# to be bypassed in another case spelling. The person's password is mounted by
-# that init container alone -- not by the app container the Gateway reaches.
-#
-# The pod's second init container owns the bind address, and it comes after the
-# wizard on every start: the wizard leaves 127.0.0.1 in network.xml (a trap cannot
-# be relied on -- SIGKILL runs none), and a start that skips the wizard, because
-# system.xml says it is complete, must still clear it or the app binds loopback
-# and nothing outside the pod can reach it again.
+# Jellyfin's first-run window is closed inside its pod: an init container runs the app's own
+# image, binds it to loopback and completes the wizard before the app starts, so the route
+# carries no /Startup rule to be bypassed in another spelling. The password is mounted by
+# that init container alone. The second init container owns the bind address, after the
+# wizard on every start: a trap cannot be relied on (SIGKILL runs none), and a start that
+# skips the wizard must still clear it, or the app binds loopback for good.
 jf_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
 jf=$(awk 'BEGIN{RS="\n---\n"} /kind: StatefulSet/ && /\n  name: jellyfin\n/ {print; exit}' <<<"$jf_render")
 [ -n "$jf" ] || { echo "the catalog render has no jellyfin StatefulSet"; exit 1; }
@@ -440,9 +395,8 @@ jf_main_keys=$(awk '/^      containers:/{f=1} f && /^            - name: keys$/'
   { echo "the wizard's init container does not mount the person's password"; exit 1; }
 [ -z "$jf_main_keys" ] ||
   { echo "the jellyfin app container mounts the person's password"; exit 1; }
-# A box whose values name no proxy still gets the container that writes the bind
-# address: it is the only writer of that element, so without it a wizard's
-# loopback value would stand for ever.
+# A box naming no proxy still gets the container that writes the bind address: it is the
+# only writer of that element.
 jf_noproxy_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml \
   --set-json 'apps.jellyfin.knownProxies=[]')
 jf_noproxy=$(awk 'BEGIN{RS="\n---\n"} /kind: StatefulSet/ && /\n  name: jellyfin\n/ {print; exit}' <<<"$jf_noproxy_render")
