@@ -1,7 +1,6 @@
-// Package apps holds the HTTP clients for the apps s5n wires together. They are
-// deliberately small and schema-driven: every request payload is built from the
-// app's own schema endpoint where one exists, so a version bump changes field
-// lists without changing this package.
+// Package apps holds the HTTP clients for the apps s5n wires together: small and
+// schema-driven, so a version bump changes field lists without changing this
+// package.
 package apps
 
 import (
@@ -31,8 +30,8 @@ type Client struct {
 	Header  http.Header
 }
 
-// NewClient builds a client with a sane timeout. Wiring is a local, short
-// conversation; nothing here should hang for the Job's whole deadline.
+// NewClient builds a client with a sane timeout: wiring is a local, short
+// conversation.
 func NewClient(baseURL string, h Doer) *Client {
 	if h == nil {
 		h = &http.Client{Timeout: 60 * time.Second}
@@ -40,8 +39,8 @@ func NewClient(baseURL string, h Doer) *Client {
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: h, Header: http.Header{}}
 }
 
-// HTTPError is a non-2xx response, kept as an error value so callers can classify
-// (a 409 on create is "already there", a 404 on lookup is "absent").
+// HTTPError is a non-2xx response, kept so callers can classify it (409 on create
+// is "already there", 404 on lookup is "absent").
 type HTTPError struct {
 	Method string
 	URL    string
@@ -63,15 +62,13 @@ func (e *HTTPError) Error() string {
 // IsNotFound reports whether err is a 404 from this package.
 func IsNotFound(err error) bool { return statusIs(err, http.StatusNotFound) }
 
-// IsForbidden reports whether err is a 403 from this package: the app refusing
-// the credential it was given. A timeout never makes one right, and an app that
-// counts failures (PBH blacklists an address after ten) must not be retried.
+// IsForbidden reports whether err is a 403: the app refusing the credential. An app
+// that counts failures (PBH blacklists an address after ten) must not be retried.
 func IsForbidden(err error) bool { return statusIs(err, http.StatusForbidden) }
 
-// IsUnauthorized reports whether err is a 401 from this package: the app
-// answering that the credential names no account it accepts. It is narrower
-// than "the request was refused" -- an app that refuses for another reason
-// answers 403 (Jellyfin's session rules do), and that is not a wrong password.
+// IsUnauthorized reports whether err is a 401: the credential names no account. It is
+// narrower than "refused" -- an app refusing for another reason answers 403
+// (Jellyfin's session rules), and that is not a wrong password.
 func IsUnauthorized(err error) bool { return statusIs(err, http.StatusUnauthorized) }
 
 // IsConflict reports whether err is a 409 from this package.
@@ -92,9 +89,8 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.sendJSON(ctx, http.MethodPost, path, body, out, nil)
 }
 
-// Patch sends a JSON body and decodes the response into out. Maintainerr's
-// settings row is merged rather than replaced, which is what its PATCH does and
-// why the wiring Job sends only the fields it owns.
+// Patch sends a JSON body and decodes the response. Maintainerr's settings row is
+// merged rather than replaced, which is why the Job sends only its own fields.
 func (c *Client) Patch(ctx context.Context, path string, body, out any) error {
 	return c.sendJSON(ctx, http.MethodPatch, path, body, out, nil)
 }
@@ -104,8 +100,8 @@ func (c *Client) Put(ctx context.Context, path string, body, out any) error {
 	return c.sendJSON(ctx, http.MethodPut, path, body, out, nil)
 }
 
-// PostForm sends an application/x-www-form-urlencoded body and returns the raw
-// response text, which is what qBittorrent's auth endpoint answers with.
+// PostForm sends a form body and returns the raw response text, which is what
+// qBittorrent's auth endpoint answers with.
 func (c *Client) PostForm(ctx context.Context, path string, form url.Values, out any) (string, error) {
 	var text string
 	err := c.send(ctx, http.MethodPost, path, "application/x-www-form-urlencoded",
@@ -152,10 +148,9 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, pay
 	return nil
 }
 
-// AnyStatus reports success for any HTTP response at all, including 401/403. It is
-// the right readiness probe for apps that answer "forbidden" until a session
-// exists: the socket, the listener and the routing are what is being waited for,
-// not the payload.
+// AnyStatus reports success for any response at all. It is the right readiness probe
+// for apps that answer "forbidden" until a session exists: the socket, listener and
+// routing are what is waited for.
 func (c *Client) AnyStatus(ctx context.Context, path string) error {
 	req, err := c.request(ctx, http.MethodGet, path, "", nil)
 	if err != nil {
@@ -186,26 +181,24 @@ func (c *Client) request(ctx context.Context, method, path, contentType string, 
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	// JSON is the default, but Plex content-negotiates /identity: asking for
-	// application/json gets a JSON document, and the XML parser would then read
-	// an empty body. A client that sets its own Accept keeps it.
+	// JSON is the default, but Plex content-negotiates /identity: asking for JSON
+	// gets a JSON document, and the XML parser would read an empty body.
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "application/json")
 	}
 	return req, nil
 }
 
-// GetText fetches a plain-text endpoint (qBittorrent's version and auth
-// endpoints answer with text, not JSON).
+// GetText fetches a plain-text endpoint (qBittorrent's version and auth endpoints
+// answer with text).
 func (c *Client) GetText(ctx context.Context, path string) (string, error) {
 	var s string
 	err := c.send(ctx, http.MethodGet, path, "", nil, nil, &s)
 	return s, err
 }
 
-// Retry calls fn until it succeeds or timeout passes. It is how the Job waits for
-// an app to finish starting without holding the Helm hook open for every pod
-// individually.
+// Retry calls fn until it succeeds or timeout passes: how the Job waits for an app
+// to start without holding the Helm hook open per pod.
 func Retry(ctx context.Context, timeout time.Duration, fn func(context.Context) error) error {
 	deadline := time.Now().Add(timeout)
 	delay := 500 * time.Millisecond
@@ -229,10 +222,8 @@ func Retry(ctx context.Context, timeout time.Duration, fn func(context.Context) 
 	}
 }
 
-// IsTimeout reports whether err is a request that ran out of time: the app
-// accepted the connection and never answered, or the caller's deadline passed.
-// It is how a step that writes and then verifies tells "the app is holding the
-// response" from "the app refused".
+// IsTimeout reports whether err is a request that ran out of time: it tells "the
+// app is holding the response" from "the app refused".
 func IsTimeout(err error) bool {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {

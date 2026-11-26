@@ -11,10 +11,8 @@ import (
 	"testing"
 )
 
-// jellyfinFake is the smallest server that behaves like the parts of v12.4 the
-// Job uses: the public info, the wizard (anonymous until complete), sign-in, the
-// user table with policies, the key list and the libraries. It records what was
-// written so a test can assert the Job wrote once and only when it had to.
+// jellyfinFake is the smallest v12.4 server the Job uses: info, the wizard, sign-in,
+// users, keys and libraries, with a record of writes.
 type jellyfinFake struct {
 	mu               sync.Mutex
 	wizardDone       bool
@@ -78,17 +76,14 @@ func (f *jellyfinFake) info(w http.ResponseWriter) {
 	})
 }
 
-// startup is the wizard: anonymous until it is complete, and /Startup/User
-// refuses once the first account has a password -- the app's own rule, which is
-// what makes a re-run safe.
+// startup is the wizard: anonymous until complete, and /Startup/User refuses once the
+// first account has a password.
 func (f *jellyfinFake) startup(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/Startup/User" && r.Method == http.MethodPost:
 		f.startupUserCalls++
 		if f.firstUser == "" {
-			// No user exists yet: Jellyfin creates its default account only from
-			// inside the wizard's own read, and UpdateStartupUser refuses while
-			// there is nothing to rename.
+			// The default account exists only after the wizard's read.
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -164,8 +159,7 @@ func (f *jellyfinFake) userRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *jellyfinFake) signIn(w http.ResponseWriter, r *http.Request) {
-	// The app builds the session's client, device and version from this header
-	// and answers 400 without it, whatever the password was.
+	// Without the header the app answers 400, whatever the password.
 	if !strings.HasPrefix(r.Header.Get("Authorization"), `MediaBrowser Client="`) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("Error processing request."))
@@ -292,10 +286,8 @@ func (f *jellyfinFake) networkConfig(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// auth checks the token the client sent, so a test that forgets to sign in
-// fails the way the real app would answer: 401, not a silent empty list. The
-// token is the Authorization header's Token parameter, which is the only place
-// a 12.4 server reads one.
+// auth checks the Authorization header's Token parameter, the only place a 12.4
+// server reads one.
 func (f *jellyfinFake) auth(w http.ResponseWriter, r *http.Request) bool {
 	token := headerToken(r.Header.Get("Authorization"))
 	if token == "" {
@@ -318,14 +310,9 @@ func (f *jellyfinFake) auth(w http.ResponseWriter, r *http.Request) bool {
 // run must not repeat, and the app's own answer is what tells the run so --
 // /Startup/User answers 403 once the first user has a password, which the Job
 // reads as "the account is there" rather than as a failure.
-// TestJellyfinSignInRefusalIsATypedAnswer: a migrated server's administrator
-// password is one box does not hold, and that refusal has to be tellable from a
-// server that is down or answering 5xx. At v12.4 a wrong name or password is
-// AuthenticationException from DefaultAuthenticationProvider.Authenticate,
-// which Jellyfin.Api/Middleware/ExceptionMiddleware.cs maps to 401; a 403 is the
-// app refusing a *session* for another reason (a device it does not allow, a
-// user at its session limit -- SessionManager.AuthenticateNewSessionInternal)
-// and stays an ordinary error.
+// A refusal must be tellable from a server that is down. At v12.4 a wrong credential
+// is AuthenticationException mapped to 401 (ExceptionMiddleware.cs); a 403 is a
+// session refused for another reason and stays an ordinary error.
 func TestJellyfinSignInRefusalIsATypedAnswer(t *testing.T) {
 	ctx := context.Background()
 	status := http.StatusUnauthorized
@@ -390,9 +377,7 @@ func TestJellyfinWizardIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestJellyfinInfoReportsTheWizard: the readiness probe and the wizard gate are
-// the same call, so a Job that waits for readiness already knows whether the
-// wizard is done.
+// Readiness and the wizard gate are one call.
 func TestJellyfinInfoReportsTheWizard(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
@@ -413,9 +398,8 @@ func TestJellyfinInfoReportsTheWizard(t *testing.T) {
 	}
 }
 
-// TestJellyfinAdministratorIsWrittenOnce: POST /Users/{id}/Policy replaces the
-// whole policy, so the Job reads it first and sets one field; an account that is
-// already an administrator is not written again.
+// The policy endpoint replaces the whole object, so it is read first and written
+// once.
 func TestJellyfinAdministratorIsWrittenOnce(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
@@ -458,8 +442,7 @@ func TestJellyfinAdministratorIsWrittenOnce(t *testing.T) {
 	if f.policyWrites != 1 {
 		t.Fatalf("policy written %d times, want 1", f.policyWrites)
 	}
-	// The policy the Job wrote back is the app's own, not a template: a field
-	// it did not touch is still there.
+	// A field the Job did not touch is still in the policy.
 	if _, ok := policy["IsDisabled"]; !ok {
 		t.Fatalf("the policy lost the fields the app sent: %v", policy)
 	}
@@ -501,9 +484,8 @@ func TestJellyfinAPIKeyIsReused(t *testing.T) {
 	}
 }
 
-// TestJellyfinLibraryAdoptsByPath: an existing library holding the same
-// directory is adopted, whatever it is called, and one with the same name but
-// another path is not: two libraries over one directory is what this prevents.
+// A library holding the directory is adopted whatever its name; a same-named one at
+// another path is not.
 func TestJellyfinLibraryAdoptsByPath(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
@@ -544,10 +526,8 @@ func TestJellyfinLibraryAdoptsByPath(t *testing.T) {
 	}
 }
 
-// TestJellyfinProxiesAreWhatTheServerTrusts: the list is read, not written --
-// the app only applies one at startup -- so what the test pins is that the Job
-// sees exactly what the server holds, and an empty configuration is an empty
-// list rather than an error.
+// The list is read, not written: the Job sees what the server holds, and empty is a
+// list, not an error.
 func TestJellyfinProxiesAreWhatTheServerHolds(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
@@ -580,8 +560,7 @@ func TestJellyfinProxiesAreWhatTheServerHolds(t *testing.T) {
 	}
 }
 
-// wizardUser names the first account the way the wizard's own flow does: the
-// read that makes the default account exist, then the write that renames it.
+// wizardUser makes the default account exist, then renames it.
 func wizardUser(ctx context.Context, j *Jellyfin) error {
 	if _, err := j.StartupUser(ctx); err != nil {
 		return err

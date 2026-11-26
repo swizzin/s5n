@@ -77,10 +77,8 @@ func TestPlexWaitReadyRetriesUntilUp(t *testing.T) {
 }
 
 func TestPlexIdentityAsksForXML(t *testing.T) {
-	// Plex content-negotiates /identity: a request whose Accept names JSON gets
-	// a JSON body back, which the XML parser in Identity reads as EOF. The
-	// server here mimics that exactly, so this test fails if NewPlex stops
-	// asking for XML.
+	// Accept: application/json returns a body the XML parser reads as EOF, so this
+	// fails if NewPlex stops asking for XML.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.Header.Get("Accept"), "xml") {
 			w.Header().Set("Content-Type", "application/json")
@@ -101,9 +99,8 @@ func TestPlexIdentityAsksForXML(t *testing.T) {
 	}
 }
 
-// plexTokenServer serves /library/sections the way a claimed Plex does: 200 to
-// the server token, 401 to anything else. /identity is deliberately absent:
-// VerifyToken must not be able to pass by reading an unauthenticated endpoint.
+// /library/sections answers 200 to the token and 401 otherwise; /identity is absent,
+// so VerifyToken cannot pass by reading it.
 func plexTokenServer(t *testing.T, token string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,8 +126,7 @@ func TestPlexVerifyTokenAcceptsAValidToken(t *testing.T) {
 	}
 }
 
-// A token Plex does not accept must be a distinguishable, token-free error: the
-// wiring receipt prints it verbatim.
+// A rejected token is a distinguishable, token-free error.
 func TestPlexVerifyTokenRejectsUnauthorized(t *testing.T) {
 	srv := plexTokenServer(t, "good-token")
 	const bad = "bad-token-xyz"
@@ -153,8 +149,7 @@ func TestPlexVerifyTokenRejectsUnauthorized(t *testing.T) {
 	}
 }
 
-// The token must travel in X-Plex-Token, never the query string: a URL carrying
-// it would end up in url.Error/HTTPError text and from there in the receipt.
+// The token travels in a header; a URL would put it in an error and the receipt.
 func TestPlexVerifyTokenKeepsTokenOutOfTheURL(t *testing.T) {
 	const token = "secret-token-abc123"
 	var query, path string

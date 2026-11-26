@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// qbitSchema is the shape the real Sonarr/Radarr schema endpoint returns for
-// qBittorrent, trimmed to the fields wiring touches.
+// qbitSchema is the real schema endpoint's shape for qBittorrent, trimmed to the
+// fields wiring touches.
 func qbitSchema() []Item {
 	fields := []Item{
 		{"name": "host", "type": "textbox"},
@@ -33,11 +33,8 @@ func qbitSchema() []Item {
 	return []Item{{"implementation": "QBittorrent", "configContract": "QBittorrentSettings", "fields": raw}}
 }
 
-// fakeArr is a minimal Sonarr, Radarr or Lidarr: schema, download clients, root
-// folders and media management, with a write counter so idempotency is
-// testable. api and kind are the app's own: Lidarr answers /api/v1, its
-// download client names the category musicCategory, and its root folder
-// resource is validated the way Lidarr validates it.
+// fakeArr is a minimal Arr with a write counter, in the app's own shape: Lidarr
+// answers /api/v1, names the category musicCategory, and validates its root folder.
 type fakeArr struct {
 	mu       sync.Mutex
 	urlBase  string
@@ -110,10 +107,8 @@ func (f *fakeArr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.kind == Lidarr {
-			// Lidarr's RootFolderController validates the resource the UI
-			// sends: Name is not empty and both profile ids are positive
-			// (SharedValidator in RootFolders/RootFolderController.cs at
-			// v3.1.2.4902; ValidId is GreaterThan(0)).
+			// Lidarr's RootFolderController needs a name and both positive profile
+			// ids (SharedValidator at v3.1.2.4902).
 			if body.Str("name") == "" || body.Int("defaultQualityProfileId") <= 0 || body.Int("defaultMetadataProfileId") <= 0 {
 				http.Error(w, "Name must not be empty, and both profiles must be chosen", http.StatusBadRequest)
 				return
@@ -155,8 +150,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// readBody decodes a request body, answering 400 instead of failing a test from
-// inside a handler goroutine.
+// readBody decodes a request body, answering 400 rather than failing in a handler.
 func readBody(w http.ResponseWriter, r *http.Request) (Item, bool) {
 	var b Item
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
@@ -182,8 +176,7 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 		Username: "admin", Password: "hunter2",
 	}
 
-	// ownedID 0: nothing recorded yet, so this both creates and tells the
-	// caller the new id to record.
+	// ownedID 0: nothing recorded, so this creates and returns the id to record.
 	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil || result.Change != Created {
 		t.Fatalf("first ensure = %+v, %v; want created", result, err)
@@ -246,9 +239,8 @@ func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
 	}
 }
 
-// A field the wiring Job does not own (priority, here) must survive an
-// ensure even though it differs from what Create would have written: the
-// object already exists and is being overlaid, not replaced.
+// A field the Job does not own must survive an ensure: the object is overlaid, not
+// replaced.
 func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -273,8 +265,8 @@ func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
 	}
 }
 
-// A rename in the Sonarr UI must not cause a second client to be created: the
-// recorded id is what makes an object "ours", not its name.
+// A UI rename must not create a second client: the recorded id is what makes an
+// object ours.
 func TestEnsureDownloadClientFollowsRename(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -302,8 +294,7 @@ func TestEnsureDownloadClientFollowsRename(t *testing.T) {
 	}
 }
 
-// A deleted owned client must be recreated, not silently dropped, and the
-// receipt must be able to say what the old id was.
+// A deleted owned client is recreated, and the receipt names the old id.
 func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -326,9 +317,7 @@ func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
 	}
 }
 
-// With no owned.json (ownedID 0), an existing client named spec.Name is
-// adopted rather than duplicated, and its id comes back so the caller can
-// record it.
+// With no record, an existing client named spec.Name is adopted and its id returned.
 func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -350,8 +339,7 @@ func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
 	}
 }
 
-// A second download client the user added by hand is never written to, never
-// tested, and never mistaken for the owned one.
+// A client the user added by hand is never written, tested or mistaken for ours.
 func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -363,9 +351,7 @@ func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 	f.nextID++
 	mine := Item{"id": f.nextID, "name": "mine", "implementation": "Transmission", "priority": 3, "tags": []any{}}
 	f.clients = append(f.clients, mine)
-	// A shallow copy, not Clone(): Clone round-trips through JSON and would
-	// turn the literal's int fields into float64, making the comparison below
-	// about this test's fixture instead of about what the Job wrote.
+	// A shallow copy: Clone's JSON round trip turns ints into float64.
 	before := Item{}
 	for k, v := range mine {
 		before[k] = v
@@ -392,8 +378,7 @@ func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 	t.Fatal("user-added client disappeared")
 }
 
-// A masked password must never be written back as if it were the real
-// secret, and it must never appear in the receipt's drift list.
+// A masked password is never written back as the secret nor shown in the drift.
 func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -453,16 +438,9 @@ func TestEnsureRootFolderAndHardlinks(t *testing.T) {
 	}
 }
 
-// TestLidarrIsAPIv1WithItsOwnCategoryAndRootFolder: Lidarr is the same code as
-// the other two Arrs with three differences this file must carry. Its HTTP API
-// is /api/v1 (Lidarr.Http/VersionedApiControllerAttribute.cs at v3.1.2.4902:
-// the template is api/v{version}/{resource}, and every controller is
-// [V1ApiController]). Its qBittorrent settings name the category
-// musicCategory (Download/Clients/QBittorrent/QBittorrentSettings.cs). And a
-// root folder POST is validated with Name not empty and both profile ids
-// positive (Lidarr.Api.V1/RootFolders/RootFolderController.cs, through
-// RuleBuilderExtensions.ValidId = GreaterThan(0)), so the box has to choose the
-// app's own first quality and metadata profile.
+// Lidarr differs in three ways: /api/v1 (Lidarr.Http/VersionedApiControllerAttribute.cs
+// at v3.1.2.4902), musicCategory, and a root folder validated with a name and both
+// positive profile ids (RootFolderController.cs), so the box chooses its first ones.
 func TestLidarrIsAPIv1WithItsOwnCategoryAndRootFolder(t *testing.T) {
 	f := &fakeArr{urlBase: "/lidarr", api: "/api/v1", kind: Lidarr, hardlink: true}
 	srv := httptest.NewServer(f)
@@ -534,9 +512,8 @@ func TestWaitReadyRetriesUntilPingSucceeds(t *testing.T) {
 	}
 }
 
-// qBittorrent's login is bypassed for the release's addresses, so the two
-// credential fields are owned and owned as empty: a client an older install
-// wrote a password into is cleared, and the receipt says the object changed.
+// Both credential fields are owned as empty: an older install's password is cleared
+// and the receipt says so.
 func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
@@ -570,9 +547,8 @@ func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
 	}
 }
 
-// migratedClient is a download client the way a source install left one: the
-// operator's own name, the release's qBittorrent as its host, an enabled
-// qBittorrent client with a category and the credential it had.
+// migratedClient is a source install's client: the operator's name, the release's
+// host, and the credential it had.
 func migratedClient(id int, name string) Item {
 	return Item{
 		"id": id, "name": name, "implementation": "QBittorrent", "enable": true,
@@ -589,10 +565,8 @@ func migratedClient(id int, name string) Item {
 	}
 }
 
-// TestEnsureDownloadClientAdoptsTheMigratedClientByHost: a source's client has
-// the operator's name, so the name cannot find it. The host is what says it is
-// the release's qBittorrent, so it is adopted -- with its name kept -- rather
-// than a second client created beside it.
+// A source client has the operator's name, so only its host finds it: it is adopted
+// with its name kept.
 func TestEnsureDownloadClientAdoptsTheMigratedClientByHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	f.clients = []Item{migratedClient(7, "qBT")}
@@ -623,9 +597,7 @@ func TestEnsureDownloadClientAdoptsTheMigratedClientByHost(t *testing.T) {
 	}
 }
 
-// TestEnsureDownloadClientRefusesTwoClientsAtOneHost: two enabled qBittorrent
-// clients at the release's own qBittorrent are two rows box cannot choose
-// between, and picking one would leave the other downloading into nothing.
+// Two clients at one host cannot be chosen between, so it is a refusal.
 func TestEnsureDownloadClientRefusesTwoClientsAtOneHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	f.clients = []Item{
@@ -649,9 +621,7 @@ func TestEnsureDownloadClientRefusesTwoClientsAtOneHost(t *testing.T) {
 	}
 }
 
-// TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost: once box owns one of
-// them, the recorded id is the answer even when a second client shares the
-// host: a rename in the Arr's UI is the operator's business, not a refusal.
+// A recorded id wins over two at the host.
 func TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	f.clients = []Item{
@@ -673,8 +643,7 @@ func TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost(t *testing.T) {
 	}
 }
 
-// TestEnsureDownloadClientIgnoresAClientBoxDoesNotDial: a disabled client, or a
-// client of another type, at the same address is not the one box owns.
+// A disabled client, or one of another type, at the address is not ours.
 func TestEnsureDownloadClientIgnoresAClientBoxDoesNotDial(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	disabled := migratedClient(7, "qBT")

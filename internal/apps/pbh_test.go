@@ -11,16 +11,10 @@ import (
 	"time"
 )
 
-// fakePbh answers like PeerBanHelper v9.5.4's WebAPI: every answer is wrapped in
-// {"success","message","data"}, downloaders are keyed by a string id, PUT
-// creates and PATCH replaces, and the status endpoint reports the last poll
-// result together with the config PBH stored - the password included, which is
-// what PBH really does.
-//
-// Two of the real API's failures are reproduced because the shapes matter more
-// than the status codes: a create whose config has no basicAuth throws inside
-// PBH's own save (500, and the downloader stays registered in memory), and a
-// second PUT of the same id is refused (400).
+// fakePbh answers like PBH v9.5.4: wrapped answers, string-keyed downloaders, PUT
+// creating and PATCH replacing, and a status with the stored config. Its two real
+// failures are reproduced: a config without basicAuth throws in saveToYaml (500), and
+// a second PUT is refused (400).
 type fakePbh struct {
 	mu        sync.Mutex
 	token     string
@@ -32,9 +26,7 @@ type fakePbh struct {
 	puts      int
 	patches   int
 	requests  int
-	// healthyAfter makes the status flip to HEALTHY after that many status
-	// reads, which is how PBH's poll loop behaves: UNKNOWN right after a write,
-	// HEALTHY a few seconds later.
+	// healthyAfter flips to HEALTHY after that many reads, as PBH's poll loop does.
 	healthyAfter int
 	statusReads  int
 	saveFails    bool // a save that answers 500 like PBH's own NPE
@@ -165,8 +157,7 @@ func (f *fakePbh) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pbhSpec is the downloader the wiring Job describes: qBittorrent's Service, no
-// trailing slash and no /api/v2 (PBH appends that itself).
+// pbhSpec is the downloader the Job describes: no trailing slash, no /api/v2.
 func pbhSpec(password string) PbhDownloaderSpec {
 	return PbhDownloaderSpec{
 		ID: "qbittorrent", Name: "qBittorrent",
@@ -174,17 +165,14 @@ func pbhSpec(password string) PbhDownloaderSpec {
 	}
 }
 
-// pbhWiringSpec is the same downloader as the Job writes it: no login at all,
-// because qBittorrent skips its authentication for the release's own addresses.
+// pbhWiringSpec is the Job's downloader: no login, because qBittorrent skips it.
 func pbhWiringSpec() PbhDownloaderSpec {
 	spec := pbhSpec("")
 	spec.Username = ""
 	return spec
 }
 
-// A first run creates the downloader with the whole config PBH's own class
-// needs, and returns the id it lives under: PUT answers 201 with a null body, so
-// the id can only come from what was sent.
+// A first run creates the whole config and returns the id it lives under.
 func TestPbhCreatesDownloader(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -233,8 +221,7 @@ func TestPbhEnsureDownloaderIsIdempotent(t *testing.T) {
 	}
 }
 
-// An update is the stored config with the owned fields overlaid: a name a person
-// changed, and settings s5n has no opinion about, survive it.
+// An update overlays the owned fields; a person's name and other settings survive.
 func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -265,10 +252,8 @@ func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
 	}
 }
 
-// The endpoint PBH reports it dials (with /api/v2) is not the one stored, so a
-// comparison against the list would read as drift on every run. The status
-// endpoint's config is what the update compares, and an untouched downloader
-// there is unchanged.
+// The list reports /api/v2 while the config stores the plain endpoint, so the status
+// config is what the update compares.
 func TestPbhDoesNotDriftOnTheApiEndpoint(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -290,8 +275,7 @@ func TestPbhDoesNotDriftOnTheApiEndpoint(t *testing.T) {
 	}
 }
 
-// Drift on an owned, visible field is restored and reported - the user changed
-// the endpoint in PBH's UI, and the next run puts the data contract back.
+// An owned field changed in the UI is restored and reported.
 func TestPbhRestoresDriftedEndpoint(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -317,8 +301,7 @@ func TestPbhRestoresDriftedEndpoint(t *testing.T) {
 	}
 }
 
-// A downloader the user added by hand is adopted by name on the first run: PBH
-// refuses a duplicate name, so a blind create would fail instead of taking over.
+// A hand-added downloader is adopted by name; PBH refuses a duplicate.
 func TestPbhAdoptsDownloaderByName(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -345,12 +328,9 @@ func TestPbhAdoptsDownloaderByName(t *testing.T) {
 	}
 }
 
-// PeerBanHelper's own config migration 32 re-keys every downloader to a UUID and
-// keeps the old key as its name (MainConfigUpdateScript.assignUniqueIdForDownloader),
-// so an id a migration adopted from a pre-UUID source is stale by the time
-// wiring runs. The downloader is still the one this box would own - it points at
-// the release's qBittorrent - so the run takes it over rather than creating a
-// second one for the same endpoint, and the id it returns is the real one.
+// Config migration 32 re-keys downloaders to a UUID
+// (MainConfigUpdateScript.assignUniqueIdForDownloader), so a migrated id is stale:
+// the row at the release's endpoint is taken over and its real id returned.
 func TestPbhAdoptsTheReKeyedDownloader(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -391,9 +371,7 @@ func TestPbhAdoptsTheReKeyedDownloader(t *testing.T) {
 	}
 }
 
-// The endpoint is the first thing to look for, and the name is the fallback: a
-// downloader whose endpoint nothing settled still answers to the name box's
-// downloader has, and PBH's own duplicate check would refuse the create.
+// The endpoint is looked for first and the name is the fallback.
 func TestPbhAdoptsTheDownloaderWithTheSpecsName(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -420,9 +398,7 @@ func TestPbhAdoptsTheDownloaderWithTheSpecsName(t *testing.T) {
 	}
 }
 
-// Two downloaders on the same endpoint: there is no way to tell which one the
-// box should own, and picking one would silently retire the other's history. It
-// is a refusal that names both, not a guess.
+// Two on one endpoint are a refusal that names both.
 func TestPbhRefusesTwoDownloadersAtTheSameEndpoint(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -449,9 +425,7 @@ func TestPbhRefusesTwoDownloadersAtTheSameEndpoint(t *testing.T) {
 	}
 }
 
-// A recorded id is still authoritative: a second downloader on the same endpoint
-// does not turn the owned one into a refusal, because the record already says
-// which one is box's.
+// A recorded id stays authoritative beside a second downloader.
 func TestPbhOwnedIDWinsOverTheEndpoint(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -479,8 +453,7 @@ func TestPbhOwnedIDWinsOverTheEndpoint(t *testing.T) {
 	}
 }
 
-// A recorded id that is gone means the user deleted it: the run recreates it and
-// says which id disappeared, so the receipt is not silent about it.
+// A gone recorded id means deleted: recreate and name it.
 func TestPbhRecreatesADeletedDownloader(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -497,9 +470,7 @@ func TestPbhRecreatesADeletedDownloader(t *testing.T) {
 	}
 }
 
-// PBH's own save can fail after the downloader is registered: the answer is a
-// 500 whose body carries the app's sentence, and the client must not read it as
-// a success.
+// PBH's save can fail after registering: a 500 is not a success.
 func TestPbhReportsA500WithTheAppsMessage(t *testing.T) {
 	f, srv := newFakePbh(t)
 	f.saveFails = true
@@ -516,9 +487,8 @@ func TestPbhReportsA500WithTheAppsMessage(t *testing.T) {
 	}
 }
 
-// A WebUI token that is not PBH's is refused with 403, and waiting cannot fix
-// it: PBH blacklists an address for 15 minutes after ten failures on one
-// endpoint, so the wait has to give up after the first one.
+// A wrong token is refused 403 and waiting cannot fix it: PBH blacklists after ten
+// failures, so the wait gives up on the first.
 func TestPbhWrongTokenIsRefusedWithoutRetrying(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "not-the-token")
@@ -535,9 +505,8 @@ func TestPbhWrongTokenIsRefusedWithoutRetrying(t *testing.T) {
 	}
 }
 
-// HEALTHY is the proof that PBH logged in to qBittorrent with what was written;
-// until its own poll loop has run the status is UNKNOWN, so the wait has to poll
-// rather than read once.
+// HEALTHY is the proof of login; until the poll loop runs it is UNKNOWN, so the wait
+// polls.
 func TestPbhWaitHealthy(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
@@ -568,8 +537,8 @@ func TestPbhWaitHealthy(t *testing.T) {
 	}
 }
 
-// The version in the receipt comes from the manifest the WebUI reads first, and
-// it answers without a token - so a wrong-token pod is still describable.
+// The version comes from the untokenless manifest, so a wrong-token pod is still
+// describable.
 func TestPbhVersion(t *testing.T) {
 	_, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")

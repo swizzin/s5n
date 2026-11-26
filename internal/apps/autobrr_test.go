@@ -11,9 +11,8 @@ import (
 	"testing"
 )
 
-// autobrrFake is autobrr's download-client API as the probe transcript found it:
-// GET masks both secrets as "<redacted>", POST accepts a duplicate name, and PUT
-// is a whole-row replace that wipes a password or API key it is not sent.
+// autobrrFake is the API as the probe found it: GET masks secrets as "<redacted>",
+// POST accepts a duplicate name, and PUT replaces the whole row.
 type autobrrFake struct {
 	mu        sync.Mutex
 	rows      []Item
@@ -125,10 +124,8 @@ func mustLogin(t *testing.T, a *Autobrr) {
 	}
 }
 
-// The update must carry the whole object, secrets included: autobrr's PUT
-// replaces the row, and only the literal "<redacted>" is read as "keep". A
-// client that sent a GET's object back unchanged would wipe the password and
-// the Arr key from the live row.
+// The update carries the whole object, secrets included: PUT replaces the row and
+// only "<redacted>" means keep.
 func TestAutobrrEnsureDownloaderSendsTheWholeObjectSoPutDoesNotWipe(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -145,8 +142,7 @@ func TestAutobrrEnsureDownloaderSendsTheWholeObjectSoPutDoesNotWipe(t *testing.T
 		t.Fatalf("create = %+v", res)
 	}
 
-	// A second run with a rotated qBittorrent password: the fingerprint is what
-	// makes it visible, because the stored one is never returned.
+	// A rotated password is visible only through the fingerprint.
 	res, err = a.EnsureDownloader(ctx, DownloaderSpec{
 		Name: "qBittorrent", Type: "QBITTORRENT", Host: "http://qbittorrent:8080",
 		Username: "admin", Password: "qbit-pass-2",
@@ -184,10 +180,8 @@ func TestAutobrrEnsureDownloaderSendsTheWholeObjectSoPutDoesNotWipe(t *testing.T
 	}
 }
 
-// A migrated client keeps the operator's own name ("Sonarr4k" is the shape a
-// source install leaves), so a name can never be what finds it: the row is
-// adopted by the Arr it dials, which is the address box's own instance answers
-// on. Nothing is created beside it and nothing is written to it.
+// A migrated client keeps the operator's name, so only its address finds it: it is
+// adopted and nothing is created beside it.
 func TestAutobrrEnsureDownloaderAdoptsAMigratedClientByHost(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -220,9 +214,8 @@ func TestAutobrrEnsureDownloaderAdoptsAMigratedClientByHost(t *testing.T) {
 	}
 }
 
-// The migrated qBittorrent client stores a bare host and a port, which autobrr
-// folds into the host on the way out (autobrrDesired pins port 0). The two are
-// one address, so the row is adopted rather than duplicated.
+// A bare host plus a port is the same address as the folded form: adopted, not
+// duplicated.
 func TestAutobrrEnsureDownloaderAdoptsTheMigratedQBittorrentClient(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -248,10 +241,8 @@ func TestAutobrrEnsureDownloaderAdoptsTheMigratedQBittorrentClient(t *testing.T)
 	}
 }
 
-// A recorded id whose client the operator deleted is not a reason to make a new
-// row: the migrated one at the same address is adopted first, which is the
-// repair for a box that ended up with both pairs. The receipt says which id was
-// adopted, because it is not the one owned.json named.
+// A deleted recorded id adopts the migrated row at the same address first; the
+// receipt names the id it took.
 func TestAutobrrEnsureDownloaderAdoptsByHostWhenTheRecordedClientIsGone(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -284,10 +275,8 @@ func TestAutobrrEnsureDownloaderAdoptsByHostWhenTheRecordedClientIsGone(t *testi
 	}
 }
 
-// A client the operator switched off, one of another type, and one that dials
-// the same host over TLS are not the client this box feeds: adopting any of
-// them would point the box's Arr at something nothing dials, at the other Arr,
-// or at a port with no plain-HTTP Arr behind it.
+// A disabled client, another type, or TLS at the same host is not the one box
+// feeds.
 func TestAutobrrEnsureDownloaderOnlyAdoptsAnEnabledClientOfItsOwnType(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -319,9 +308,7 @@ func TestAutobrrEnsureDownloaderOnlyAdoptsAnEnabledClientOfItsOwnType(t *testing
 	}
 }
 
-// Two enabled clients of the same type at one address: autobrr allows both and
-// nothing says which the operator means, so the lowest id is adopted and the
-// receipt names the choice instead of creating a third.
+// Two at one address: the lowest id is adopted and named, not a third created.
 func TestAutobrrEnsureDownloaderAdoptsTheLowestOfTwoAtOneHost(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -352,9 +339,7 @@ func TestAutobrrEnsureDownloaderAdoptsTheLowestOfTwoAtOneHost(t *testing.T) {
 	}
 }
 
-// autobrr accepts any number of clients with the same name, so a create has to
-// match first: the user's own row with s5n's name is adopted, its type and host
-// corrected, and no second row appears.
+// The user's row with s5n's name is adopted and corrected, not duplicated.
 func TestAutobrrEnsureDownloaderMatchesBeforeCreating(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -400,8 +385,7 @@ func TestAutobrrEnsureDownloaderMatchesBeforeCreating(t *testing.T) {
 	}
 }
 
-// A second run on the recorded id and fingerprint writes nothing, and still
-// proves both clients with autobrr's own test.
+// A second run writes nothing and still proves both clients.
 func TestAutobrrEnsureDownloaderIsIdempotent(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -428,8 +412,7 @@ func TestAutobrrEnsureDownloaderIsIdempotent(t *testing.T) {
 	}
 }
 
-// A changed fingerprint is an update even when every readable field matches:
-// the API cannot show that the secret is stale, so owned.json has to say so.
+// A changed fingerprint is an update even when every readable field matches.
 func TestAutobrrEnsureDownloaderRewritesOnRotatedKey(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	mustLogin(t, a)
@@ -490,12 +473,8 @@ func TestAutobrrLoginRejectsCredentials(t *testing.T) {
 	}
 }
 
-// autobrr v1.91.0 answers 403 to POST /api/auth/login when OIDC is on and the
-// built-in login is switched off (internal/http/auth.go:122-126 at v1.91.1:
-// "password login is unavailable in oidc authentication mode"), and that is not
-// the account's password having changed: it is the app's auth mode, which box's
-// chart decides. The two must not be the same error, because only one of them is
-// fixed by restarting the pod.
+// A 403 from an auth mode without password login is not a changed password: only one
+// of the two is fixed by a restart (internal/http/auth.go:122-126 at v1.91.1).
 func TestAutobrrLoginTellsAnAuthModeRefusalFromABadPassword(t *testing.T) {
 	f, a := newAutobrrFake(t)
 	f.login = http.StatusForbidden
@@ -553,8 +532,8 @@ func asLoginRejected(err error, target **LoginRejectedError) bool {
 	return false
 }
 
-// The update body's own shape: port and tls are pinned to the values that make
-// autobrr use the host verbatim, and settings keeps whatever the user set.
+// The body pins port and tls so the host is used verbatim; settings keeps the
+// user's.
 func TestAutobrrDesiredPinsPortAndKeepsSettings(t *testing.T) {
 	live := Item{
 		"id": 2, "name": "qBittorrent", "type": "QBITTORRENT", "enabled": true,
@@ -585,10 +564,8 @@ func TestAutobrrDesiredPinsPortAndKeepsSettings(t *testing.T) {
 	}
 }
 
-// The comparison the adoption rests on: the scheme and the DNS name are
-// case-blind, a trailing slash is not a different address, the Arr's base path
-// is compared as the app spells it, and a port stored beside the host is part
-// of the same address the Job writes into it.
+// Adoption compares case-blind scheme and name, no trailing slash, the path as
+// stored, and a port beside the host as the same address.
 func TestNormalizeDownloaderHost(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{
 		{"http://sonarr-4k:8990/sonarr-4k", "http://sonarr-4k:8990/sonarr-4k"},

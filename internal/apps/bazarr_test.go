@@ -11,11 +11,9 @@ import (
 	"time"
 )
 
-// fakeBazarr is a minimal Bazarr: its ping, its settings document and the form
-// POST that changes it, with a write counter and a switch that makes the POST
-// never answer, which is what the real app does while its live-sync connection
-// to a freshly configured Arr is still down (bazarr/app/signalr_client.py at
-// v1.6.2: start() loops until it connects, inside the request).
+// fakeBazarr is a minimal Bazarr, with a write counter and a switch that makes the
+// POST never answer while its live-sync connection comes up
+// (bazarr/app/signalr_client.py at v1.6.2).
 type fakeBazarr struct {
 	mu       sync.Mutex
 	urlBase  string
@@ -31,9 +29,8 @@ type fakeBazarr struct {
 const fakeURLBase = "/bazarr"
 
 func newFakeBazarr(key string) *fakeBazarr {
-	// The shape GET /system/settings answers with: one top-level key per
-	// section, the Arrs as their own objects (bazarr/api/system/settings.py at
-	// v1.6.2 returns get_settings()).
+	// One top-level key per section, the Arrs as objects
+	// (bazarr/api/system/settings.py at v1.6.2).
 	return &fakeBazarr{urlBase: fakeURLBase, key: key, settings: map[string]any{
 		"general": map[string]any{"base_url": fakeURLBase, "use_sonarr": false, "use_radarr": false},
 		"sonarr": map[string]any{
@@ -79,9 +76,8 @@ func (f *fakeBazarr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				sec, _ := f.settings[section].(map[string]any)
-				// save_settings casts the form the way the app does: integers
-				// first, then the two booleans (bazarr/app/config.py:724-745 at
-				// v1.6.2), so GET answers with types, not text.
+				// save_settings casts integers then booleans
+				// (bazarr/app/config.py:724-745), so GET answers types.
 				if n, err := strconv.Atoi(v); err == nil {
 					sec[key] = n
 				} else if v == "true" || v == "false" {
@@ -108,9 +104,8 @@ func (f *fakeBazarr) value(section, key string) any {
 	return sec[key]
 }
 
-// TestBazarrWiresItsPairAndIsIdempotent: the whole contract of one side. It is
-// written as the app's own settings form is (settings-sonarr-ip, ...), it says
-// what changed, and a second run writes nothing.
+// One side's contract: written as the app's own form, it says what changed, and a
+// second run writes nothing.
 func TestBazarrWiresItsPairAndIsIdempotent(t *testing.T) {
 	f := newFakeBazarr("bazarr-key")
 	srv := httptest.NewServer(f)
@@ -169,8 +164,7 @@ func TestBazarrWiresItsPairAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestBazarrRestoresADriftedSide: the fields are the release's, so a value
-// changed in the app's own UI is put back, and the receipt names what it was.
+// A value changed in the UI is put back, and the receipt names what it was.
 func TestBazarrRestoresADriftedSide(t *testing.T) {
 	f := newFakeBazarr("bazarr-key")
 	srv := httptest.NewServer(f)
@@ -200,9 +194,7 @@ func TestBazarrRestoresADriftedSide(t *testing.T) {
 	}
 }
 
-// TestBazarrTurnsOffASideItHasNoArrFor: a pair with one Arr. The missing side's
-// own switch is turned off rather than left pointing at an address nothing
-// answers on, and nothing else about that side is written.
+// A pair with one Arr turns the missing side's switch off and writes nothing else.
 func TestBazarrTurnsOffASideItHasNoArrFor(t *testing.T) {
 	f := newFakeBazarr("k")
 	f.settings["general"].(map[string]any)["use_radarr"] = true
@@ -230,11 +222,8 @@ func TestBazarrTurnsOffASideItHasNoArrFor(t *testing.T) {
 	}
 }
 
-// TestBazarrAcceptsSettingsWhoseAnswerWasLost: Bazarr saves the settings and
-// then restarts its live-sync connection inside the same request, looping until
-// the Arr answers. The write is done before that loop, so a POST that never
-// answers is a saved setting, and the run must read it back rather than report
-// a failure the next run would contradict.
+// The write happens before the app's sync loop, so a POST that never answers is
+// still a saved setting: the run reads it back.
 func TestBazarrAcceptsSettingsWhoseAnswerWasLost(t *testing.T) {
 	f := newFakeBazarr("k")
 	f.hang = true
@@ -257,9 +246,7 @@ func TestBazarrAcceptsSettingsWhoseAnswerWasLost(t *testing.T) {
 	}
 }
 
-// TestBazarrRefusesSettingsThatDoNotStick: the app answered 204 and its
-// settings did not change. That is not a slow start, and the run stops naming
-// the field instead of reporting a release it did not wire.
+// The app answered 204 but did not change: the run stops naming the field.
 func TestBazarrRefusesSettingsThatDoNotStick(t *testing.T) {
 	f := newFakeBazarr("k")
 	f.ignore = true
@@ -278,8 +265,7 @@ func TestBazarrRefusesSettingsThatDoNotStick(t *testing.T) {
 	}
 }
 
-// TestBazarrRefusesAnUnknownSide: the Kind is the app's own section name, so a
-// typo is a POST that would create settings the app never reads.
+// A typo'd Kind would create settings the app never reads.
 func TestBazarrRefusesAnUnknownSide(t *testing.T) {
 	f := newFakeBazarr("k")
 	srv := httptest.NewServer(f)
@@ -290,9 +276,7 @@ func TestBazarrRefusesAnUnknownSide(t *testing.T) {
 	}
 }
 
-// TestBazarrNeverLogsOrWritesItsKeyIntoAPath is a guard on the one secret this
-// client carries: the key goes in a header and in the form field that sets it,
-// never into a URL, where a request error would print it.
+// The key goes in a header and the form, never a URL where an error would print it.
 func TestBazarrNeverLogsOrWritesItsKeyIntoAPath(t *testing.T) {
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -13,9 +13,8 @@ func arrSpec(name, kind, baseURL, key string) QuiArrSpec {
 	return QuiArrSpec{Name: name, Type: kind, BaseURL: baseURL, APIKey: key}
 }
 
-// The first run on a box with nothing in qui creates one row per Arr, with the
-// release's address, its key, and enabled -- and proves it with qui's own test,
-// which is an Arr API call made from qui's pod.
+// A first run creates one enabled row per Arr with the release's address and key,
+// proved by qui's own test.
 func TestQuiArrInstanceIsCreatedWithTheReleaseArr(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -51,12 +50,9 @@ func TestQuiArrInstanceIsCreatedWithTheReleaseArr(t *testing.T) {
 	}
 }
 
-// A migrated box's qui holds the source's own Arr rows, and the migration has
-// already pointed each at the release (internal/migrate/qui rewrites
-// arr_instances.base_url to rewrite.Endpoint.URL). Adopting that row is the
-// whole point: a create at the same (type, base_url) is refused 409 by the
-// table's UNIQUE index, so a locator that did not look would fail the run -- or,
-// at another spelling of the same address, add a second row beside it.
+// A migrated qui holds the source's rows, already pointed at the release
+// (internal/migrate/qui). Adopting them is the point: a create at the same
+// (type, base_url) is refused 409 by the UNIQUE index.
 func TestQuiArrInstanceAdoptsTheURLTheMigratorWrites(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -86,10 +82,8 @@ func TestQuiArrInstanceAdoptsTheURLTheMigratorWrites(t *testing.T) {
 	}
 }
 
-// The key is the one thing a migration cannot carry: qui stores it encrypted
-// with the source's own session secret, and it is the source Arr's key anyway.
-// So an adopted row's key is written, and nothing else is: its name, its enabled
-// flag and its priority are the operator's.
+// A migration cannot carry the key: it is encrypted with the source's secret. An
+// adopted row gets the key and nothing else.
 func TestQuiArrInstanceAdoptedRowOnlyGetsItsKey(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -126,8 +120,7 @@ func TestQuiArrInstanceAdoptedRowOnlyGetsItsKey(t *testing.T) {
 	}
 }
 
-// A disabled row is the operator's decision: qui never dials it, so the Job
-// leaves it disabled, does not test it, and says so in the receipt.
+// A disabled row stays disabled, untested, and says so.
 func TestQuiArrInstanceLeavesAnAdoptedRowDisabled(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -154,9 +147,8 @@ func TestQuiArrInstanceLeavesAnAdoptedRowDisabled(t *testing.T) {
 	}
 }
 
-// The UNIQUE index is on the interned text, so the same address can be stored
-// twice with a different spelling of its host. Nothing says which row the
-// operator means, so the lowest id is adopted and the receipt names both.
+// The index is on the text, so a different host spelling is a second row: the lowest
+// id is adopted and both named.
 func TestQuiArrInstanceAdoptsTheLowestOfTwoSpellingsAndSaysSo(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -182,8 +174,7 @@ func TestQuiArrInstanceAdoptsTheLowestOfTwoSpellingsAndSaysSo(t *testing.T) {
 	}
 }
 
-// A row of the other Arr at the same address is a different instance: the unique
-// key is (type, base_url), so the box's Radarr row is not the Sonarr one.
+// The other Arr at that address is a different row: the key is (type, base_url).
 func TestQuiArrInstanceIgnoresTheOtherArrsRow(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -203,8 +194,7 @@ func TestQuiArrInstanceIgnoresTheOtherArrsRow(t *testing.T) {
 	}
 }
 
-// The recorded id is authoritative: a rename in qui's UI, or a row the operator
-// repointed, is still the row box owns, and no second one is created.
+// The recorded id is authoritative, rename or repoint included.
 func TestQuiArrInstanceRecordedIDWins(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -225,9 +215,7 @@ func TestQuiArrInstanceRecordedIDWins(t *testing.T) {
 	}
 }
 
-// A recorded id that is gone is not a create: a migrated box's row is at the
-// address this box would register, so it is adopted and the receipt names the
-// id that disappeared.
+// A gone recorded id adopts the row at the address and names the lost id.
 func TestQuiArrInstanceRecordedGoneAdoptsByURL(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -295,9 +283,7 @@ func TestQuiArrInstanceSecondRunWritesNothing(t *testing.T) {
 	}
 }
 
-// A rotated key in the release Secret is the one change qui cannot show: it
-// never returns a stored key, so the fingerprint recorded in owned.json is what
-// makes the difference visible.
+// qui never returns the key, so the fingerprint makes a rotation visible.
 func TestQuiArrInstanceRotatedKeyIsWritten(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -318,9 +304,8 @@ func TestQuiArrInstanceRotatedKeyIsWritten(t *testing.T) {
 	}
 }
 
-// qui answers 200 with {"success": false} when it cannot reach the Arr, so the
-// status alone would pass a row that dials nothing -- which is exactly what a
-// missing NetworkPolicy edge produces.
+// qui answers 200 with success:false when it cannot reach the Arr -- what a missing
+// NetworkPolicy edge produces.
 func TestQuiArrInstanceFailsWhenQuiCannotReachTheArr(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -340,8 +325,7 @@ func TestQuiArrInstanceFailsWhenQuiCannotReachTheArr(t *testing.T) {
 	}
 }
 
-// The list never carries a stored key, so the key the Job writes is always the
-// release Secret's -- never a mask or a value read back from the app.
+// The list never carries a key: the Job always writes the Secret's.
 func TestQuiArrInstanceWritesTheSpecsKeyAndNeverReadsOneBack(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)

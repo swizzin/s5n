@@ -12,19 +12,14 @@ import (
 	"time"
 )
 
-// Autobrr is autobrr's HTTP API (v1.90.0). Its download clients live under
-// /api/downloaders (internal/http/server.go), and a client's Arr details are
-// its host plus settings.apikey: the host is used verbatim as the Arr's base
-// URL, so it carries the Arr's own path prefix ("http://sonarr:8989/sonarr").
+// Autobrr is autobrr's HTTP API (v1.90.0): clients under /api/downloaders
+// (internal/http/server.go), a client's Arr details being its host plus
+// settings.apikey, with the host used verbatim as the Arr's base URL.
 //
-// Two of the API's behaviours shape the write path:
-//
-//   - PUT treats only the literal "<redacted>" as "keep the old secret"; an
-//     absent or empty password and apikey overwrite what is stored with
-//     nothing (internal/downloader/service.go's Update). So every update sends
-//     the complete object, with the real secrets from the release Secret.
-//   - POST accepts any number of clients with the same name, so a create has to
-//     match first or it adds a second row beside the user's own.
+// PUT treats only "<redacted>" as "keep the old secret", so every update sends the
+// complete object with the real secrets (internal/downloader/service.go's Update).
+// POST accepts any number of clients with the same name, so a create must match
+// first or it adds a second row.
 type Autobrr struct {
 	client   *Client
 	urlBase  string
@@ -32,11 +27,9 @@ type Autobrr struct {
 	password string
 }
 
-// NewAutobrr builds a client. urlBase is autobrr's own base URL ("/autobrr"),
-// which the chart sets through AUTOBRR__BASE_URL; its API is under it.
-//
-// The session cookie is not Secure (internal/http/server.go sets it to false,
-// unconditionally), so a cookie jar replays it over the plain http:// Service.
+// NewAutobrr builds a client. urlBase is its own base URL ("/autobrr"), set through
+// AUTOBRR__BASE_URL. Its session cookie is not Secure (internal/http/server.go), so a
+// jar replays it over plain http.
 func NewAutobrr(baseURL, urlBase, username, password string) *Autobrr {
 	jar, _ := cookiejar.New(nil)
 	c := NewClient(baseURL, &http.Client{Timeout: 60 * time.Second, Jar: jar})
@@ -52,19 +45,15 @@ func (a *Autobrr) Ping(ctx context.Context) error {
 	return err
 }
 
-// WaitReady blocks until autobrr answers or timeout passes. A Ready pod proves
-// less than qui's does: autobrr starts with an unreachable OIDC issuer and
-// retries in the background, which changes nothing about the API this client
-// uses, and its password login is routed either way.
+// WaitReady blocks until autobrr answers. It starts with an unreachable OIDC issuer
+// and retries in the background, which does not affect this API.
 func (a *Autobrr) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return Retry(ctx, timeout, a.Ping)
 }
 
-// Login opens the session. autobrr answers 403 for bad credentials (not 401),
-// so the status alone cannot classify the failure; the body is what separates a
-// rejection from the app's auth mode not offering a password login at all
-// (v1.91.0, where the switch that only hid the form started refusing the
-// endpoint).
+// Login opens the session. autobrr answers 403 for bad credentials, so the body
+// separates a rejection from an auth mode that does not offer password login
+// (refused at the endpoint since v1.91.0).
 func (a *Autobrr) Login(ctx context.Context) error {
 	var out Item
 	err := a.client.Post(ctx, a.api("/auth/login"), map[string]string{
@@ -83,10 +72,8 @@ func (a *Autobrr) Login(ctx context.Context) error {
 	return err
 }
 
-// loginUnavailableMode reads the auth mode out of autobrr's own refusal of a
-// password login, or "" when the body says something else. The sentence is
-// internal/http/auth.go's at v1.91.1: "password login is unavailable in %s
-// authentication mode" in the API's {"message": ...} envelope.
+// loginUnavailableMode reads the mode out of autobrr's refusal, or "" when the body
+// says something else (internal/http/auth.go at v1.91.1).
 func loginUnavailableMode(body string) string {
 	var out struct {
 		Message string `json:"message"`
@@ -122,26 +109,11 @@ type DownloaderSpec struct {
 	APIKey   string
 }
 
-// locateAutobrrClient finds the download client the Job owns. It is
-// locateArrClient's rule for autobrr, which has the same facts to go on:
-//
-//   - a recorded id is authoritative: a rename in autobrr is the operator's
-//     business and must never create a second client beside it;
-//   - a recorded id that no longer exists (the operator deleted the row the Job
-//     made) is not a create. A migrated box's client is adopted by the address
-//     it dials, which is this box's own Arr. That is what repairs a box a
-//     migration left holding both the source's clients and the Job's: delete
-//     the Job's, run again, and the source's is adopted -- the row the
-//     operator's own filters already refer to by id;
-//   - with nothing recorded, the same adoption is what a first run does, so a
-//     migrated client named "Sonarr4k" is not duplicated under the instance's
-//     name. The name stays the fallback, for a box that ran wiring before it
-//     recorded anything;
-//   - only when there is nothing to adopt is a client created.
-//
-// autobrr allows two enabled clients of one type at one address, and nothing
-// says which the operator means: the lowest id is adopted and the receipt says
-// so, rather than a third being made.
+// locateAutobrrClient is locateArrClient's rule for autobrr: a recorded id is
+// authoritative; a stale one, or none, adopts the client at this box's own address
+// (the row the operator's filters refer to), with the name as fallback; only when
+// there is nothing to adopt is one created. Two at one address: the lowest id is
+// adopted and the receipt says so.
 func locateAutobrrClient(list []Item, spec DownloaderSpec, ownedID int) (cur Item, found, recreated bool, previousID int, note string) {
 	if ownedID != 0 {
 		for _, item := range list {
@@ -193,10 +165,8 @@ func adoptionNote(best Item, same []Item, ownedID int) string {
 	return note
 }
 
-// autobrrHostMatches returns the enabled clients of the spec's own type whose
-// address is the one the spec names. autobrr runs several kinds of client, and
-// an Arr client of the other Arr is another app: neither is the one this box
-// feeds, and neither is a client autobrr ever dials when it is switched off.
+// autobrrHostMatches returns the enabled clients of the spec's type at its address:
+// another type is another app, and a disabled one is never dialled.
 func autobrrHostMatches(list []Item, spec DownloaderSpec) []Item {
 	want := normalizeDownloaderHost(spec.Host)
 	if want == "" {
@@ -224,10 +194,8 @@ const (
 	schemeHTTPS = "https://"
 )
 
-// autobrrAddress is the address a client dials, as one string. autobrr folds
-// the scheme and port into a qBittorrent client's host, and a migrated row can
-// still have them apart (host "qbittorrent", port 8080, tls off) while the one
-// this Job writes carries both in the host; the two are one address.
+// autobrrAddress is the address a client dials: autobrr folds scheme and port into a
+// qBittorrent host, and a migrated row can still carry them apart.
 func autobrrAddress(item Item) string {
 	host := strings.TrimSpace(item.Str(fieldHost))
 	if host == "" {
@@ -235,8 +203,8 @@ func autobrrAddress(item Item) string {
 	}
 	scheme, rest, ok := splitScheme(host)
 	if !ok {
-		// autobrr builds the scheme out of the switch, so a row whose host
-		// carries none but has tls set dials a different address.
+		// autobrr builds the scheme from the switch: a host without one and tls
+		// set is a different address.
 		scheme = schemeHTTP
 		if item.Bool("tls") {
 			scheme = schemeHTTPS
@@ -254,10 +222,8 @@ func autobrrAddress(item Item) string {
 	return scheme + head + path
 }
 
-// normalizeDownloaderHost is a client's address the way two of them are
-// compared: the scheme and the DNS name are case-blind, a trailing slash is not
-// a different address, and the Arr's base path is compared as the app spells
-// it.
+// normalizeDownloaderHost compares addresses: scheme and DNS name case-blind, no
+// trailing slash, the base path as stored.
 func normalizeDownloaderHost(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -288,18 +254,13 @@ func splitScheme(raw string) (scheme, rest string, ok bool) {
 	return "", raw, false
 }
 
-// autobrrDesired is the complete object an update must send: the live row with
-// only the fields s5n owns overlaid. Everything else (enabled, throttling rules,
-// basic auth, the Arr's external-client links) is carried through untouched,
-// because autobrr's PUT replaces the whole row.
+// autobrrDesired is the complete object an update sends: the live row with the owned
+// fields overlaid. PUT replaces the whole row, so everything else is carried through.
 //
-// port and tls are owned and pinned to 0/false: for qBittorrent autobrr folds
-// them into the host itself (domain.Downloader.qbitBuildLegacyHost), and a
-// leftover legacy port would be appended to a host that already carries one.
-//
-// The secrets are never compared — the API only ever returns a mask — so they
-// are written unconditionally and the fingerprint in owned.json is what says
-// whether they changed.
+// port and tls are pinned to 0/false: qBittorrent folds them into the host
+// (domain.Downloader.qbitBuildLegacyHost), and a legacy port would be appended twice.
+// Secrets are written unconditionally; the fingerprint in owned.json says whether they
+// changed.
 func autobrrDesired(live Item, spec DownloaderSpec) (Item, []FieldChange) {
 	desired := live.Clone()
 	if desired == nil {
@@ -333,15 +294,11 @@ func autobrrDesired(live Item, spec DownloaderSpec) (Item, []FieldChange) {
 	return desired, drift
 }
 
-// EnsureDownloader makes one client match the spec and proves it with autobrr's
-// own test endpoint before writing anything, the way the Arr download clients
-// are proved.
+// EnsureDownloader makes one client match the spec and proves it with autobrr's test
+// before writing.
 //
-// ownedID and knownFingerprint are owned.json's record: the id keeps a rename
-// working and a second same-named client from being created, and the
-// fingerprint of the secret last written and proven is the only way a rotated
-// Secret is visible (autobrr never returns the stored password or API key). A
-// changed fingerprint is an update even when every readable field matches.
+// The id keeps a rename working, and the fingerprint is the only way a rotated Secret
+// is visible: a changed one is an update even when every readable field matches.
 func (a *Autobrr) EnsureDownloader(ctx context.Context, spec DownloaderSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
 	list, err := a.Downloaders(ctx)
 	if err != nil {
@@ -398,11 +355,8 @@ func (a *Autobrr) EnsureDownloader(ctx context.Context, spec DownloaderSpec, own
 	return EnsureResult{Change: change, ID: desired.Int("id"), Drift: drift, Recreated: recreated, PreviousID: previousID, Note: note}, nil
 }
 
-// downloaderFingerprint is what owned.json records per client: the secret that
-// can rotate under it. That is an Arr client's API key, the Arr's own key from
-// the release Secret. qBittorrent's client has no secret at all now — its
-// username and password are written empty, because qBittorrent skips its login
-// for the release's addresses — so it answers "" and never counts as rotated.
+// downloaderFingerprint is the secret that can rotate under a client: an Arr's key.
+// qBittorrent's client has none (its login is bypassed) and answers "".
 func downloaderFingerprint(spec DownloaderSpec) string {
 	if spec.APIKey != "" {
 		return SecretFingerprint(spec.APIKey)

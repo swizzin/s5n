@@ -25,9 +25,8 @@ func TestSeerrWaitReady(t *testing.T) {
 	}
 }
 
-// Seerr's public settings are the one endpoint it answers without a session, and
-// `initialized` is what tells a box with an admin apart from one nobody has
-// signed in to: a migrated Seerr's settings file carries it true.
+// initialized is what tells a box with an admin from one nobody signed in to; a
+// migrated Seerr carries it true.
 func TestSeerrSettingsReadsInitialized(t *testing.T) {
 	for _, want := range []bool{true, false} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,9 +49,7 @@ func TestSeerrSettingsReadsInitialized(t *testing.T) {
 	}
 }
 
-// A read that is refused is an error, never "no admin": the row the Job prints
-// depends on the answer, and a guess would either ask for a sign-in a box does
-// not need or drop a to-do it does.
+// A refused read is an error, never "no admin": a guess would misstate the row.
 func TestSeerrSettingsRefusalIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "starting", http.StatusServiceUnavailable)

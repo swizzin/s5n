@@ -10,26 +10,20 @@ import (
 	"time"
 )
 
-// Plex is the media server. Its /identity endpoint answers unauthenticated on
-// every build (claimed or not), which is both the readiness probe and the only
-// way the wiring Job learns whether a claim token actually claimed the server:
-// a missing or expired claim token leaves it unclaimed, and Tautulli/Seerr's
-// media rows report that rather than failing the release (AGENTS.md invariant
-// in the "Next work" list).
+// Plex is the media server. /identity answers unauthenticated on every build, so it
+// is the readiness probe and the only way to learn whether a claim token claimed the
+// server: unclaimed makes the media rows pending, not a failed release.
 type Plex struct {
 	client *Client
 }
 
-// NewPlex builds a client. /identity needs no credential at all: Plex answers
-// it unauthenticated on every build, claimed or not. Nothing else here is
-// tokenless — clients that call Plex's library API (Tautulli) are given the
-// server token from the release Secret, because trusting a network range
-// instead would trust the pod CIDR the Gateway proxies from.
+// NewPlex builds a client. Nothing here is tokenless except /identity: clients that
+// call Plex's library API get the Secret's token, because trusting a range would
+// trust the pod CIDR the Gateway proxies from.
 func NewPlex(baseURL string) *Plex {
 	c := NewClient(baseURL, nil)
-	// Plex serves /identity as XML by default and content-negotiates: an
-	// Accept of application/json returns a JSON body instead, which the XML
-	// parser in Identity cannot read. Ask for the format this client parses.
+	// Plex content-negotiates /identity: an Accept of application/json returns a
+	// body the XML parser cannot read.
 	c.Header.Set("Accept", "application/xml")
 	return &Plex{client: c}
 }
@@ -47,9 +41,8 @@ type identityXML struct {
 	Version           string `xml:"version,attr"`
 }
 
-// Ping is the readiness probe: /identity answers before the server has any
-// libraries or claim, so it is also what distinguishes "not up yet" from
-// "up and unclaimed".
+// Ping is the readiness probe: /identity answers before libraries or a claim, so it
+// distinguishes "not up yet" from "up and unclaimed".
 func (p *Plex) Ping(ctx context.Context) error {
 	_, err := p.Identity(ctx)
 	return err
@@ -77,10 +70,8 @@ func (p *Plex) Identity(ctx context.Context) (Identity, error) {
 	}, nil
 }
 
-// TokenRejectedError is Plex answering 401 to an authenticated call: the server
-// token in the release Secret is not one this server accepts. It carries the
-// status code and nothing else — never the token, which travels in a request
-// header rather than the URL, so no error value below can contain it.
+// TokenRejectedError is Plex answering 401: the Secret's token is not one this
+// server accepts. It carries only the status, never the token.
 type TokenRejectedError struct {
 	Status int
 }
@@ -89,18 +80,12 @@ func (e *TokenRejectedError) Error() string {
 	return fmt.Sprintf("plex-token rejected by Plex (%d)", e.Status)
 }
 
-// VerifyToken proves the release's Plex server token (X-Plex-Token) against Plex
-// itself: /library/sections answers 200 to a token the server accepts and 401 to
-// one it does not.
+// VerifyToken proves the Secret's Plex token: /library/sections answers 200 to one
+// the server accepts and 401 to one it does not.
 //
-// /identity cannot do this job. It answers unauthenticated on every build, so
-// Tautulli's get_server_identity — its own "connection test", which reads
-// /identity through its configured PMS host — reports a bogus or expired token
-// as a working link. Only an authenticated Plex call can tell the difference.
-//
-// The token goes in a header, never a query string: URL and transport errors
-// then carry only /library/sections, and the response body is drained rather
-// than quoted, so a server echo can never reach a receipt.
+// /identity cannot do this: it is unauthenticated, so Tautulli's own connection test
+// reports a bogus token as working. The token goes in a header, never the URL, and
+// the body is drained, so no error or receipt can contain it.
 func (p *Plex) VerifyToken(ctx context.Context, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("no Plex token: cannot verify an empty token")
@@ -133,12 +118,9 @@ func (p *Plex) VerifyToken(ctx context.Context, token string) error {
 	return nil
 }
 
-// PlexTokenFingerprint is sha256-hex of a Plex server token: the only form of it
-// the wiring Job may persist. Tautulli lists PMS_TOKEN among its
-// do-not-download keys, so get_settings returns it as null; without a record of
-// what was last proven, a rotated token in the release Secret would never be
-// pushed. The fingerprint makes that comparison possible while the Secret stays
-// the only place the token exists.
+// PlexTokenFingerprint is sha256-hex of a Plex token, the only form the Job may
+// persist: Tautulli returns PMS_TOKEN as null, so a rotation is visible only through
+// this record, while the Secret stays the only place the token exists.
 func PlexTokenFingerprint(token string) string {
 	return SecretFingerprint(token)
 }

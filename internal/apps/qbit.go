@@ -11,10 +11,8 @@ import (
 	"time"
 )
 
-// SaveRoot is where every download must live: the release's data claim, which
-// the library is hardlinked from. internal/qbtconf imports this constant
-// rather than defining its own, so the data contract's path lives in one
-// place.
+// SaveRoot is where every download must live: the release's data claim, which the
+// library is hardlinked from. internal/qbtconf imports this constant.
 const SaveRoot = "/data/downloads"
 
 // Qbit is the qBittorrent WebUI API. Every call after Login rides the session
@@ -25,27 +23,23 @@ type Qbit struct {
 	password string
 }
 
-// NewQbit builds a client. qBittorrent has no API key and no URL base; the
-// chart rewrites the /qbittorrent prefix off at the Gateway. The credentials
-// are empty for s5n's own qBittorrent, whose login is bypassed for the
-// release's addresses; a client built that way never signs in (see Login).
+// NewQbit builds a client. qBittorrent has no API key and no URL base; the chart
+// rewrites the /qbittorrent prefix off at the Gateway. Empty credentials are for
+// s5n's own qBittorrent, whose login is bypassed (see Login).
 func NewQbit(baseURL, username, password string) *Qbit {
 	jar, _ := cookiejar.New(nil)
 	c := NewClient(baseURL, &http.Client{Timeout: 60 * time.Second, Jar: jar})
-	// qBittorrent's CSRF protection compares Referer with the Host header.
+	// CSRF protection compares Referer with the Host header.
 	c.Header.Set("Referer", c.BaseURL)
 	return &Qbit{client: c, username: username, password: password}
 }
 
-// Login authenticates and keeps the session cookie. A wrong password is reported
-// as a credential error, not retried: qBittorrent bans an address after a handful
-// of failures.
+// Login authenticates and keeps the session cookie. A wrong password is a credential
+// error, not retried: qBittorrent bans an address after a handful of failures.
 //
-// A client built without a password signs in to nothing: qBittorrent's WebUI
-// skips its login for the private ranges and for loopback, which is the state
-// internal/qbtconf seals (docs/box.md, "Logins"). Posting the empty login form
-// anyway would be a request that can only add to the failed-login count that
-// gets an address banned.
+// A client built without a password signs in to nothing: the WebUI skips its login for
+// the private ranges and loopback, which internal/qbtconf seals (docs/box.md,
+// "Logins"). Posting the empty form would only add to the failure count.
 func (q *Qbit) Login(ctx context.Context) error {
 	if q.password == "" {
 		return nil
@@ -68,14 +62,10 @@ func (q *Qbit) Login(ctx context.Context) error {
 	}
 }
 
-// WaitReady waits for the WebUI to answer, then logs in once (a client with no
-// password has nothing to log in to; see Login). Login is not retried on a
-// credential error: qBittorrent bans the address after a handful of failures, so
-// a wrong secret must fail loudly and immediately.
+// WaitReady waits for the WebUI, then logs in once if there is a password.
 //
-// The readiness probe accepts any HTTP status: without a session the API answers
-// 403 to every endpoint, and with the login bypassed for the release's
-// addresses it answers 200, so a 403 is progress rather than the failure.
+// The probe accepts any status: without a session every endpoint answers 403, so a
+// 403 is progress rather than the failure.
 func (q *Qbit) WaitReady(ctx context.Context, timeout time.Duration) error {
 	err := Retry(ctx, timeout, func(ctx context.Context) error {
 		if err := q.client.AnyStatus(ctx, "/api/v2/app/version"); err != nil {
@@ -102,12 +92,10 @@ var dataContract = map[string]string{
 }
 
 // EnsureDataContract makes the settings the /data contract depends on match, then
-// reads them back. qBittorrent's image starts with its save path on the config volume
-// and (with automatic torrent management off) ignores category paths, so an Arr's
-// download would land outside /data and could never be hardlinked. Seeding the config
-// file is not enough: the image re-applies its own runtime default, which is why this
-// is done through the API after the app is up, and why the write is not trusted
-// until a fresh read agrees with it.
+// reads them back. The image starts with its save path on the config volume and
+// ignores category paths in manual mode, so a download would land outside /data and
+// could never be hardlinked. The image re-applies its own default, which is why this
+// goes through the API after start-up and the write is not trusted until a read agrees.
 func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
 	prefs, err := q.preferences(ctx)
 	if err != nil {
@@ -134,11 +122,9 @@ func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
 	return Updated, nil
 }
 
-// DataContract asserts the settings the /data contract depends on: downloads land
-// exactly under the save root, and a categorised torrent actually uses its
-// category's path. qBittorrent's defaults fail both — its save path is on the config
-// volume, and it ignores category paths in manual mode — which silently turns
-// hardlink imports into copies, or into downloads nothing will ever import.
+// DataContract asserts the settings: downloads land exactly under the save root, and a
+// categorised torrent uses its category's path. The defaults fail both, silently
+// turning hardlink imports into copies or downloads nothing will import.
 func (q *Qbit) DataContract(ctx context.Context) error {
 	prefs, err := q.preferences(ctx)
 	if err != nil {
@@ -159,9 +145,8 @@ func (q *Qbit) preferences(ctx context.Context) (Item, error) {
 }
 
 // contractDrift describes the first way prefs break the data contract, or "" when
-// they hold. Paths are compared exactly (trailing slash aside): "somewhere under
-// /data" is not the contract, because the Arrs' categories and root folders are
-// derived from this one root.
+// they hold. Paths are compared exactly: "somewhere under /data" is not the
+// contract, because the Arrs' folders are derived from this root.
 func contractDrift(prefs Item) string {
 	for _, key := range []string{"save_path", "temp_path"} {
 		got, _ := prefs[key].(string)
@@ -190,23 +175,15 @@ func (q *Qbit) Categories(ctx context.Context) (map[string]Category, error) {
 	return out, nil
 }
 
-// EnsureCategory creates a category, or corrects its save path. The save path is
-// what makes imports hardlink instead of copy, so a wrong one is repaired rather
-// than tolerated.
+// EnsureCategory creates a category, or corrects its save path: a wrong one makes
+// imports copy instead of link.
 //
-// A category with no save path of its own is not wrong: qBittorrent downloads it
-// into <defaultSavePath>/<name>, which is the same directory when the wanted
-// path is exactly that. A migrated box's categories are all of that shape,
-// because the source stored none, and rewriting one would move where its
-// torrents live for no reason. defaultSavePath is the downloads root the data
-// contract gives qBittorrent; empty means no such allowance.
+// A category with no save path is not wrong: qBittorrent downloads it into
+// <defaultSavePath>/<name>, the same directory when that is the wanted path, and a
+// migrated box's categories are all that shape.
 //
-// A name may be one qBittorrent subcategory ("4K/Movies"). qBittorrent 5.3
-// accepts that shape — its isValidCategoryName refuses only backslashes and empty
-// segments — and creates the parent category ("4K") itself. There is no
-// subcategories preference to set: 5.2 removed the switch 5.0 and 5.1 had
-// (default off), and the explicit save path written here is what the data
-// contract relies on either way.
+// A name may be one subcategory ("4K/Movies"): qBittorrent 5.3 accepts it and creates
+// the parent itself, and the explicit save path is what the data contract relies on.
 func (q *Qbit) EnsureCategory(ctx context.Context, name, savePath, defaultSavePath string) (Change, error) {
 	cats, err := q.Categories(ctx)
 	if err != nil {
