@@ -157,6 +157,16 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rep rewrite.Report,
 		}
 	}
 	tableWrites := m.rewriteTables(tables, t)
+	// The app signs its users in through the box's login now (catalog.yaml:
+	// `oidc: true`), and it resolves an incoming identity to a stored row by
+	// username -- and refuses a row that belongs to another login method
+	// (internal/web/auth.go, getOrCreateAuthenticatedUser, at v2.1.0-stable).
+	// So an account the source's own form created is not the account the box's
+	// login produces, and its scopes, shares and rules stay with it. Renaming it
+	// would need the plan to carry box's login name, and which of several
+	// accounts is the owner's is the operator's answer: this pass leaves it and
+	// says so.
+	rep.Left = append(rep.Left, leftLocalAccounts(users)...)
 
 	rep.Changes = t.changes()
 	if write && rep.Blocked() {
@@ -300,6 +310,43 @@ func (m *mapping) storedPaths() []string {
 type userRow struct {
 	id   string
 	data []byte
+}
+
+// namedAccount is the two fields of a user document that say who it is: the
+// name the app lists it under, and the login method that made it.
+func namedAccount(raw []byte) (name, method string) {
+	doc, err := decodeUser(raw)
+	if err != nil {
+		return "", ""
+	}
+	name, _ = doc["username"].(string)
+	method, _ = doc["loginMethod"].(string)
+	return name, method
+}
+
+// leftLocalAccounts is one Left entry per account the source's own login made,
+// which the box's login will not resolve to. A row with no login method at all
+// is a document from before the app had the field, and one already made by the
+// provider is the account the box's login does find: neither is left.
+func leftLocalAccounts(users []userRow) []rewrite.Left {
+	var out []rewrite.Left
+	for _, u := range users {
+		name, method := namedAccount(u.data)
+		if method == "" || method == "oidc" {
+			continue
+		}
+		label := fmt.Sprintf("%q (%s login)", name, method)
+		out = append(out, rewrite.Left{
+			File:  dbName,
+			Where: "users.loginMethod",
+			What:  label,
+			Why:   "the box signs this app in through its login, not this app's",
+			Detail: fmt.Sprintf(
+				"%s belongs to the source's own login, and the box's app is a client of the box's provider: it matches an incoming identity to a stored account by name and refuses one made by another login method, so this account is not the one the person signs in as, and its scopes, shares and access rules stay with it",
+				label),
+		})
+	}
+	return out
 }
 
 // dbTables is the rows that name a source by its name and a path relative to it.

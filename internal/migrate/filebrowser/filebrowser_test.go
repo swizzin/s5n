@@ -408,6 +408,43 @@ func TestAStalePathIsLeftAndCalledOut(t *testing.T) {
 	}
 }
 
+// TestALocalAccountIsLeftAndCalledOut: the box's app signs its users in through
+// the box's login, and it resolves an identity to a stored account by name --
+// refusing one that another login method made. An account the source's own form
+// created is therefore not the one the person signs in as, and the pass says so
+// instead of renaming a row nothing in the plan says is the owner's.
+func TestALocalAccountIsLeftAndCalledOut(t *testing.T) {
+	local := strings.Replace(userJSON("/data", "/data", "/data", "/data", "/data"),
+		`"version": 6,`, `"loginMethod": "password",`+"\n"+`  "version": 6,`, 1)
+	in := setup(t, `server:
+  sources:
+    - path: /data
+`, local)
+	rep, err := rewriter{}.Check(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a local account blocked the run: %v", rep.Uncovered)
+	}
+	if len(rep.Changes) != 0 {
+		t.Errorf("an account the box's login does not use was rewritten: %v", rep.Changes)
+	}
+	if len(rep.Left) != 1 {
+		t.Fatalf("Left = %+v, want one line for the local account", rep.Left)
+	}
+	left := rep.Left[0]
+	if left.File != dbName || left.Where != "users.loginMethod" {
+		t.Fatalf("Left[0] = %+v, want the account row's login method", left)
+	}
+	if !strings.Contains(left.What, "owner") || !strings.Contains(left.What, "password") {
+		t.Fatalf("Left[0].What = %q, want the account and its login method", left.What)
+	}
+	if !strings.Contains(left.Detail, "box's provider") {
+		t.Fatalf("Left[0].Detail = %q, want the sentence saying the box's login is the one that signs in", left.Detail)
+	}
+}
+
 // TestNoConfigFileStillRewrites: a source with no config.yaml defaulted its
 // source to the working directory, so the database's own paths are the only
 // record of what it had.
