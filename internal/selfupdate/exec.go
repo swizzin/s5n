@@ -10,12 +10,8 @@ import (
 	"syscall"
 )
 
-// Rollback puts the binary box replaced back, once.
-//
-// One step back is the whole promise: the update keeps exactly one previous
-// binary, and putting it back consumes it. A rollback that could go further
-// would need a history box does not keep, and an operator who steps back twice
-// has a release problem to read rather than a third binary to try.
+// Rollback puts the binary box replaced back, once: the update keeps exactly one
+// previous binary, and putting it back consumes it.
 func Rollback(path string) error {
 	previous := previousPath(path)
 	if _, err := os.Stat(previous); err != nil {
@@ -31,17 +27,10 @@ func Rollback(path string) error {
 	return nil
 }
 
-// Reexec replaces this process with the box binary at path, so the update that
-// installed it finishes under the version it installed.
-//
-// args are the process's arguments without the program name, as os.Args[1:]
-// carries them: the caller passes the same arguments it was started with, so
-// the command that triggered the update runs again under the new binary.
-//
-// version is a parameter because a process cannot read the version of the
-// binary it is about to exec; the caller has it from the update it just did.
-// It marks the new process (ReexecEnv) as already updated, which is what stops
-// a release whose page still names something newer from looping.
+// Reexec replaces this process with the box at path, so the update finishes
+// under the version it installed. args is os.Args[1:]. version is a parameter
+// because a process cannot read the version it is about to exec; it marks the
+// new process (ReexecEnv) as already updated, which stops a loop.
 func Reexec(path string, args, env []string, version string) error {
 	if strings.TrimSpace(version) == "" {
 		return errors.New("re-exec: no version to mark the new process with")
@@ -49,16 +38,14 @@ func Reexec(path string, args, env []string, version string) error {
 	return execProcess(path, append([]string{path}, args...), withEnv(env, ReexecEnv, version))
 }
 
-// execProcess is syscall.Exec, which does not return on success. It is a
-// variable so a test can watch the arguments instead of becoming another
-// process, and so the test binary is not replaced by the box it tests.
+// execProcess is syscall.Exec, a variable so a test can watch the arguments
+// instead of becoming another process.
 var execProcess = func(path string, argv, env []string) error {
 	return syscall.Exec(path, argv, env)
 }
 
-// withEnv sets one variable in an environment, replacing any value already
-// there. Appending without removing would leave the process with two entries
-// for one name, and which of them wins is not something to leave to libc.
+// withEnv sets one variable, replacing any existing value: two entries for one
+// name leave the winner to libc.
 func withEnv(env []string, key, value string) []string {
 	out := make([]string, 0, len(env)+1)
 	for _, entry := range env {
