@@ -679,7 +679,7 @@ fi
 log "preparing host paths (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c "
   mkdir -p '$DATA_PATH' \\
-           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,filebrowser,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R $SEEDBOX_PUID:$SEEDBOX_PGID '$DATA_PATH' '$CONFIG_PATH'"
 
 # The update and upgrade scenarios' extra step. Their roots are a host directory
@@ -746,7 +746,7 @@ fi
 # APPS is the app list bootstrap and init write into the grant. Every run wants
 # the whole catalog in front of it; the one step that proves a box with nothing
 # on sets it to `none`, the word for the empty list.
-APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
+APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,filebrowser,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
 
 # box_bootstrap_args <extra...>: the arguments every bootstrap in this script
 # passes, without the one that decides whether it asks. The platform and root's
@@ -2501,7 +2501,7 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
 
   # Every opt-in app is behind the same login, and none of them keeps one of its
   # own: an unauthenticated request must reach the edge before the app does.
-  for app in qui autobrr maintainerr lidarr bazarr sabnzbd; do
+  for app in qui autobrr maintainerr lidarr bazarr sabnzbd filebrowser; do
     app_headers="$WORK/unauth-${app}-headers.txt"
     app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
       --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
@@ -2745,6 +2745,49 @@ if problems:
     print("SABnzbd: " + "; ".join(problems))
     sys.exit(1)
 print(f"  SABnzbd {version['version']}: {complete}, categories {sorted(cats)}")
+PY
+
+  # FileBrowser Quantum behind the same session: its page (no login of its own,
+  # auth.methods.noauth makes every request the one admin user), its health
+  # route under the prefix the chart's config sets, and its API listing /data's
+  # top level -- the data contract's two directories -- which is the proof that
+  # the source the chart sealed is the claim and not the config directory.
+  fb_code=$(curl -sS -o "$WORK/filebrowser-authed.html" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/filebrowser/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/filebrowser/ with the session: ${fb_code}"
+  [ "$fb_code" = 200 ] || { echo "the login did not give access to FileBrowser Quantum (${fb_code})"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/filebrowser-authed.html" ||
+    { echo "the 200 was not FileBrowser Quantum's page"; fail=1; }
+  fb_health=$(curl -sS -o "$WORK/filebrowser-health.json" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/filebrowser/health" 2>/dev/null || true)
+  echo "  GET /filebrowser/health: ${fb_health}"
+  [ "$fb_health" = 200 ] ||
+    { echo "/filebrowser/health answered ${fb_health}: the chart's readiness path is not the one the app serves"; fail=1; }
+  # The index is built in the background after start, so the poll waits for the
+  # first scan instead of racing it.
+  fb_items=""
+  for _ in $(seq 1 60); do
+    fb_items=$(curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/filebrowser/api/resources/items?source=data&path=/" 2>/dev/null || true)
+    case "$fb_items" in *'"downloads"'*'"media"'*) break ;; esac
+    sleep 2
+  done
+  printf '%s' "$fb_items" >"$WORK/filebrowser-items.json"
+  python3 - "$WORK/filebrowser-items.json" <<'PY' || fail=1
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except ValueError:
+    print(f"the items API answered no JSON: {open(sys.argv[1]).read()[:200]!r}")
+    sys.exit(1)
+folders = set(d.get("folders") or [])
+missing = {"downloads", "media"} - folders
+if missing:
+    print(f"FileBrowser Quantum's /data has no {', '.join(sorted(missing))}: {sorted(folders)}")
+    sys.exit(1)
+print(f"  FileBrowser Quantum lists /data: {sorted(folders)}")
 PY
 
   # ---- the login is reachable only through the Gateway ----------------------
@@ -4347,7 +4390,7 @@ PY
   # Secret, a ServiceAccount, the Job and the policies, and no workload.
   apps_pods() {
     $K -n "$NS" get pods -o name 2>/dev/null |
-      grep -cE 'pod/(qbittorrent|sonarr|radarr|lidarr|bazarr|sabnzbd|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
+      grep -cE 'pod/(qbittorrent|sonarr|radarr|lidarr|bazarr|sabnzbd|filebrowser|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
   }
   for i in $(seq 1 120); do
     [ "$(apps_pods)" = 0 ] && break

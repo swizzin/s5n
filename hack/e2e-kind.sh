@@ -232,7 +232,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,filebrowser,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -677,6 +677,8 @@ apps:
   pbh:
     enabled: true
   sabnzbd:
+    enabled: true
+  filebrowser:
     enabled: true
 EOF
 
@@ -1347,7 +1349,7 @@ echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it
 # arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
-for app in qui autobrr maintainerr lidarr bazarr; do
+for app in qui autobrr maintainerr lidarr bazarr filebrowser; do
   : >"$WORK/${app}-headers"
   code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
     "https://${DOMAIN}/${app}/" || true)
@@ -1435,6 +1437,39 @@ print(d[section][key])" "$want" 2>/dev/null || true)
       echo "  /config holds: $(echo "$state" | tr '\n' ' ')"
       grep -qx "maintainerr.sqlite" <<<"$state" ||
         { echo "maintainerr's database is not on the config mount"; fail=1; } ;;
+    filebrowser)
+      # Its health route is under the base URL the chart's config sets, and it
+      # answers without a login because auth.methods.noauth makes every request
+      # the one admin user: the box's login at the edge is the only gate. The
+      # listing is the API's view of /data's top level -- the data contract's
+      # two directories -- which proves the source is the claim and not the
+      # config directory, and that the mounted config was the one it read.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/health" || true)
+      echo "GET /${app}/health via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+      # The index is built in the background after start, so the poll waits for
+      # the first scan instead of racing it.
+      items=""
+      for _ in $(seq 1 60); do
+        items=$(gw_get -s "https://${DOMAIN}/${app}/api/resources/items?source=data&path=/" || true)
+        case "$items" in *'"downloads"'*'"media"'*) break ;; esac
+        sleep 2
+      done
+      printf '%s' "$items" >"$WORK/${app}-items.json"
+      python3 - "$WORK/${app}-items.json" <<'PY' || fail=1
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except ValueError:
+    print(f"the items API answered no JSON: {open(sys.argv[1]).read()[:200]!r}")
+    sys.exit(1)
+folders = set(d.get("folders") or [])
+missing = {"downloads", "media"} - folders
+if missing:
+    print(f"FileBrowser Quantum's /data has no {', '.join(sorted(missing))}: {sorted(folders)}")
+    sys.exit(1)
+print(f"FileBrowser Quantum lists /data: {sorted(folders)}")
+PY
+      ;;
   esac
 done
 
