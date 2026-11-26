@@ -10,30 +10,25 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// The chart's two files, and the only ones a release may be cut for without a
-// maintainer: the app images it blesses, and the platform pins box installs.
-// A platform patch ships in the chart (docs/box.md, "The platform layer"), so
-// both are chart releases, and box's own code and manifests are not here at all.
+// The chart's two files, the only ones a release is cut for without a maintainer: the app
+// images it blesses, and the platform pins box installs. A platform patch ships in the
+// chart (docs/box.md, "The platform layer"), so both are chart releases.
 const (
 	tagPrefix    = "s5n-v"
 	variantsFile = "charts/s5n/variants.yaml"
 	platformFile = "charts/s5n/platform.yaml"
 )
 
-// releasedFiles is every path the automatic release may have moved. Anything
-// else in the range -- a template, a Go file, a doc -- is a maintainer's
-// release, because CI has not proven it safe to publish unattended.
+// releasedFiles is every path the automatic release may have moved; anything else is a
+// maintainer's release, because CI has not proven it safe to publish unattended.
 var releasedFiles = map[string]bool{
 	variantsFile: true,
 	platformFile: true,
 }
 
-// inertFiles change on main without changing what a release is: Renovate reads
-// its config from main and nothing ships it, so a pull request that tunes
-// Renovate does not hold every automatic release after it until a maintainer
-// tags one. It is not a release on its own either: something in the two files
-// above still has to move. A workflow is not inert, because it decides what
-// the release job does.
+// inertFiles change on main without changing what a release is: Renovate reads its config
+// from main and nothing ships it. It is not a release on its own either. A workflow is not
+// inert, because it decides what the release job does.
 var inertFiles = map[string]bool{
 	".github/renovate.json": true,
 }
@@ -51,20 +46,16 @@ type Decision struct {
 
 // decideRange reports whether a push to main may cut a chart release.
 //
-// changed is every path that differs between the last s5n-v* tag and HEAD (the
-// net diff, so a merge commit needs no special case of its own); the four byte
-// slices are charts/s5n/variants.yaml and charts/s5n/platform.yaml at that tag
-// and at HEAD, empty when the file did not exist on that side; prevVersion is
-// the tag's version without its prefix, empty when there is no tag.
+// changed is the net diff since the last s5n-v* tag, so a merge commit needs no case of its
+// own; the byte slices are variants.yaml and platform.yaml at that tag and at HEAD, empty
+// when absent; prevVersion has no prefix and is empty with no tag.
 //
-// A release is cut only when every changed path is one of the two files, both
-// files' changes are patch or digest bumps, and something moved. That is
-// exactly the set Renovate may merge on main unattended, so the release
-// confirms a change CI already ran the full e2e on and never invents one.
+// A release is cut only when every changed path is one of the two files, both files' changes
+// are patch or digest bumps, and something moved: exactly the set Renovate may merge
+// unattended, so the release confirms a change CI already ran the full e2e on.
 func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPlatform []byte, prevVersion string) (Decision, error) {
 	if prevVersion == "" {
-		// v0.2.0 predates the s5n-v family: it says nothing about what this
-		// range contains, so it is not a base to count a patch from.
+		// v0.2.0 predates the s5n-v family, so it is not a base to count a patch from.
 		return Decision{Reason: "no " + tagPrefix + "* tag to build on: v0.2.0 predates the family, so nothing is released until a maintainer tags one"}, nil
 	}
 	since := tagPrefix + prevVersion
@@ -124,20 +115,17 @@ func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPla
 	}, nil
 }
 
-// variant is one image the chart ships for an app: the repository, the tag and
-// the digest. The tag and digest may be empty: that is the s5n image's own
-// entry, whose tag is the chart's appVersion and whose digest is stamped at
-// packaging, never committed.
+// variant is one image the chart ships: repository, tag, digest. The tag and digest may be
+// empty -- the s5n image's own entry, whose tag is the chart's appVersion and whose digest
+// is stamped at packaging.
 type variant struct {
 	Repository string
 	Tag        string
 	Digest     string
 }
 
-// parseVariants reads charts/s5n/variants.yaml as app -> variant -> image. The
-// shape is the chart's own (internal/admission reads the same file the same
-// way): a top-level key per app, a key per variant, and repository/tag/digest
-// under it.
+// parseVariants reads variants.yaml as app -> variant -> image, the shape internal/admission
+// reads the same way.
 func parseVariants(b []byte) (map[string]map[string]variant, error) {
 	var apps map[string]map[string]struct {
 		Repository string `yaml:"repository"`
@@ -157,10 +145,9 @@ func parseVariants(b []byte) (map[string]map[string]variant, error) {
 	return out, nil
 }
 
-// variantReason compares two variants.yaml files: it returns how many app
-// images moved and, when one did not move the way a release may, the reason to
-// refuse. A moved image is a patch or digest change; a minor or major tag, a
-// changed repository, an added or removed app or variant is not.
+// variantReason: how many app images moved, and the reason to refuse when one did not move
+// the way a release may. A patch or digest change is a move; a minor or major tag, a
+// changed repository, or an added or removed app or variant is not.
 func variantReason(oldApps, newApps map[string]map[string]variant) (int, string) {
 	moved := 0
 	for _, key := range unionKeys(oldApps, newApps) {
@@ -194,10 +181,8 @@ func variantReason(oldApps, newApps map[string]map[string]variant) (int, string)
 	return moved, ""
 }
 
-// parsePins reads charts/s5n/platform.yaml as key -> value. Every value is a
-// scalar: a version, -- for the login -- a whole image reference, or a k0s
-// asset checksum. The file is flat, one key per component, with the `# renovate:`
-// marker inline.
+// parsePins reads platform.yaml as key -> scalar: a version, a whole image reference, or a
+// k0s asset checksum, one key per component with its inline `# renovate:` marker.
 func parsePins(b []byte) (map[string]string, error) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(b, &doc); err != nil {
@@ -221,21 +206,15 @@ func scalar(v any) string {
 	}
 }
 
-// isK0sSumKey reports whether a platform.yaml key pins a k0s asset checksum
-// rather than a version. The sums live in the file beside the version they
-// describe, keyed k0sSHA256<arch> (release.ParseVersions requires them), and
-// they are not versions: a 47de... -> 9f2c... move is not a downgrade, it is
-// another release's bytes.
+// isK0sSumKey: a platform.yaml key pinning a k0s asset checksum rather than a version. A
+// checksum move is not a downgrade, it is another release's bytes.
 func isK0sSumKey(key string) bool {
 	return strings.HasPrefix(key, "k0sSHA256")
 }
 
-// pinReason compares two platform.yaml files the way variantReason compares
-// variants.yaml: how many pins moved, and the reason to refuse when one moved
-// past a patch. The checksums are not pins of their own: a k0s bump is counted
-// once, on the k0s line, and the sums that come with it add nothing; sums that
-// move without that line are refused, because they would describe a release the
-// file does not pin.
+// pinReason: how many pins moved, and the reason to refuse when one moved past a patch. The
+// k0s sums add nothing -- a k0s bump is counted once on the k0s line -- and sums that move
+// without that line are refused, since they would describe an unpinned release.
 func pinReason(oldPins, newPins map[string]string) (int, string) {
 	moved := 0
 	for _, key := range sortedKeys(oldPins, newPins) {
@@ -250,9 +229,7 @@ func pinReason(oldPins, newPins map[string]string) (int, string) {
 			continue
 		}
 		if isK0sSumKey(key) {
-			// A checksum is not a version. It describes the k0s release above
-			// it, so it may only move in the commit that moves that line, and
-			// when it does it is not a bump of its own: the k0s line is.
+			// A checksum describes the k0s release above it, so it moves with that line.
 			if oldPins["k0s"] == newPins["k0s"] {
 				return 0, "pin " + key + " changed and the k0s version did not: the sums are of that release's asset, so they move with the k0s line or not at all"
 			}
@@ -274,9 +251,7 @@ func pinReason(oldPins, newPins map[string]string) (int, string) {
 	return moved, ""
 }
 
-// pinVersion is the version a pin's value names: the image tag when the value
-// is a whole image reference (the login), the value itself otherwise. The
-// digest is not the version: it moves with the tag.
+// pinVersion: the image tag when the value is a whole reference, the value otherwise.
 func pinVersion(value string) string {
 	ref := value
 	if i := strings.Index(ref, "@"); i >= 0 {
@@ -294,18 +269,16 @@ type bump int
 const (
 	// bumpNone is an unchanged value: it names the same version and digest.
 	bumpNone bump = iota
-	// bumpPatch is a patch-level move: the first two components (major,
-	// minor) are unchanged. This is Renovate's own rule for a docker tag
-	// (dist/workers/repository/process/lookup/update-type.js): major is the
-	// first component, minor the second, and anything else -- a third patch
-	// number, a fourth build number, a suffix -- is a patch. So sonarr's
-	// 5.0.0.2907 -> 5.0.0.2910 is a patch, which is what lets it automerge.
+	// bumpPatch is a patch-level move, the first two components unchanged -- Renovate's own
+	// rule for a docker tag (dist/workers/repository/process/lookup/update-type.js): major is
+	// the first component, minor the second, and anything else is a patch. So 5.0.0.2907 ->
+	// 5.0.0.2910 is a patch, which is what lets it automerge.
 	bumpPatch
 	// bumpMinor is the second component moving; bumpMajor is the first.
 	bumpMinor
 	bumpMajor
-	// bumpOther is a move this program will not call a bump at all: a
-	// non-numeric tag, a downgrade, or a tag it cannot parse.
+	// bumpOther is a move this program will not call a bump: a non-numeric tag, a
+	// downgrade, or a tag it cannot parse.
 	bumpOther
 )
 
@@ -330,10 +303,9 @@ func classify(oldTag, newTag string) bump {
 	return bumpPatch
 }
 
-// numericParts reads a version's leading dot-separated numbers: 1.2.3 is
-// [1 2 3], v1.37.2+k0s.1 is [1 37 2], 5.0.0.2907 is [5 0 0 2907]. A leading "v"
-// and any "-suffix" or "+build" metadata are not part of the numbers. A tag
-// that names no number at all is not a version this program reasons about.
+// numericParts reads a version's leading dot-separated numbers: 1.2.3 is [1 2 3],
+// v1.37.2+k0s.1 is [1 37 2]. A leading "v" and any metadata are not part of them, and a
+// tag that names no number is not a version this program reasons about.
 func numericParts(v string) []int {
 	s := strings.TrimPrefix(v, "v")
 	if i := strings.IndexAny(s, "-+"); i >= 0 {
