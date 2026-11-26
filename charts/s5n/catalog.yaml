@@ -234,8 +234,13 @@ apps:
     # client, so a second app that speaks OIDC is one entry here (and the
     # chart's `oidc:` block beside it) rather than a box release.
     oidc: true
-    # One qBittorrent, its own instance row.
-    calls: [qbittorrent]
+    # One qBittorrent, its own instance row, and the Arrs: qui's Arr integration
+    # is what resolves a title to the ID it searches for, and the request is made
+    # from qui's own pod. A migrated qui already holds rows the migration has
+    # pointed at the release, so a missing edge here is a connection refused by
+    # the callee with nothing in the app to say so. "sonarr"/"radarr" mean every
+    # instance of that Arr, so an HD/4K pair is the same two names.
+    calls: [qbittorrent, sonarr, radarr]
     # Its database and config.toml, which is where its session secret lives: the
     # credentials it stores in the database are encrypted with that value, so
     # the pair has to go back together (internal/config/config.go at v1.35.0:

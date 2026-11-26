@@ -372,3 +372,40 @@ grep -q '/data/downloads/4K/Movies' <<<"$nested_render" ||
 grep -q '/data/media/4K/TV' <<<"$nested_render" ||
   { echo "the nested render does not carry /data/media/4K/TV"; exit 1; }
 
+# qui keeps an Arr instance per Sonarr and Radarr on the box, for ID lookups,
+# and its own connection test is an Arr API call made from qui's pod. The
+# callee's ingress is inverted from the catalog's `calls`, so a qui entry that
+# names neither Arr is a policy that drops that call without a word -- and on a
+# migrated box the rows are already pointed at the release, so nothing in the app
+# says anything is wrong. Every Arr instance of the render is checked, not just
+# the HD pair: "sonarr" in the catalog means every instance of that Arr.
+qui_policy=$(mktemp)
+helm template t charts/s5n -n seedbox -f charts/s5n/ci/4k-values.yaml \
+  --set apps.qui.enabled=true --set gateway.host=box.example.com >"$qui_policy"
+qui_problems=$(python3 - "$qui_policy" <<'PY'
+import sys, yaml
+
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+policies = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "NetworkPolicy"}
+want = ["sonarr-ingress", "sonarr-4k-ingress", "radarr-ingress", "radarr-4k-ingress"]
+problems = []
+for name in want:
+    policy = policies.get(name)
+    if policy is None:
+        problems.append(f"no {name} in the render")
+        continue
+    peers = [peer for rule in policy["spec"].get("ingress", []) for peer in (rule.get("from") or [])]
+    callers = {((peer.get("podSelector") or {}).get("matchLabels") or {}).get("s5n.io/app") for peer in peers}
+    if "qui" not in callers:
+        problems.append(f"{name} admits {sorted(c for c in callers if c)} and not qui")
+if problems:
+    print("; ".join(problems))
+PY
+)
+rm -f "$qui_policy"
+if [ -n "$qui_problems" ]; then
+  echo "qui's Arr instances: $qui_problems"
+  exit 1
+fi
+echo "== qui render: every Sonarr and Radarr instance admits qui"
+
