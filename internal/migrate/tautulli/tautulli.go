@@ -1,42 +1,20 @@
-// Package tautulli rewrites the paths, the Plex connection and the login
-// Tautulli stored in its config.ini.
+// Package tautulli rewrites the paths, the Plex connection and the login Tautulli
+// stored in config.ini, which is the whole job: its database holds no absolute
+// path (plexpy/config.py at v2.18.2). The path keys are the ones Tautulli itself
+// rewrites when DATA_DIR moves (plexpy/__init__.py:160-170) plus the three
+// declared paths (config.py:108, :163, :53), each in the section
+// _CONFIG_DEFINITIONS gives it, since ConfigObj reads the same name in another
+// section as a different setting.
 //
-// Tautulli keeps everything in one INI file (`config.ini`, plexpy/config.py at
-// v2.18.2: FILENAME = "config.ini") and its database holds no absolute path:
-// `newsletter_log.filename` is a bare name joined to NEWSLETTER_DIR when it is
-// used (plexpy/newsletter_handler.py:242-247), and the export table has no file
-// column. So the file is the whole job.
+// The spelling is lower case: Config._define folds every name (config.py:473),
+// Config.write() builds the file from those keys (:528-556), and ConfigObj is
+// case-sensitive. The lookup accepts any spelling and edits the line where it
+// stands -- a rename would write a setting the app never reads -- and sections are
+// not folded. Lines are edited in place, so comments and unknown keys survive.
 //
-// The set of keys is Tautulli's own: it rewrites exactly this list when its data
-// directory moves (plexpy/__init__.py:160-170 assigns https_cert,
-// https_cert_chain, https_key, log_dir, backup_dir, cache_dir, export_dir and
-// newsletter_dir relative to the new DATA_DIR), which is the app itself saying
-// these values are absolute paths. git_path, newsletter_custom_dir and
-// pms_logs_folder are paths by declaration (plexpy/config.py:108, :163, :53).
-// A key is edited in the section _CONFIG_DEFINITIONS gives it and nowhere else,
-// because ConfigObj would read the same name in another section as a different
-// setting.
-//
-// The spelling is lower case, because that is the only spelling Tautulli writes
-// and the only one it reads: Config._define folds each setting to
-// `ini_key = name.lower()` (plexpy/config.py:473) and looks it up under that
-// name, Config.write() builds the file from those keys (:528-556), and ConfigObj
-// itself is case-sensitive (lib/configobj/__init__.py's Section.__getitem__ is
-// dict's). The lookup accepts a key in any spelling and edits the line where it
-// stands, so a file a person hand-edited is rewritten too and nothing is
-// renamed: a rename would write a setting the app does not read. Sections are
-// not folded, by Tautulli or here: _define passes the section through untouched.
-//
-// Lines are edited in place: only the value after `=` changes, so comments,
-// ordering and every key migrate does not own survive byte for byte.
-//
-// The source is 2.19.1 and the pin is 2.18.2, so this is the one app where
-// migrate reads a newer config than the app will. Tautulli's `_upgrade()` is a
-// chain of `if CONFIG_VERSION == N` steps, and 23 is matched by none of
-// 2.18.2's, so nothing is rewritten downward; unknown keys are kept because
-// Config.write() writes the whole section back (plexpy/config.py:470-495,
-// :660-805). The database half of that downgrade belongs to the coordinator,
-// not to this rewriter.
+// A 2.19 source runs ahead of the 2.18.2 pin: _upgrade steps match on
+// CONFIG_VERSION and 23 matches none, and Config.write() writes unknown keys back
+// (config.py:470-495). The database half of that downgrade is not this rewriter's.
 package tautulli
 
 import (
@@ -56,19 +34,16 @@ import (
 
 func init() { rewrite.Register("tautulli", rewriter{}) }
 
-// configName is Tautulli's config file, in the directory it is given as
-// --config /config (plexpy/config.py: FILENAME).
+// configName is config.ini in the directory given as --config (plexpy/config.py:
+// FILENAME).
 const configName = "config.ini"
 
-// bindAddr is what a pod needs: every container interface. A single-host
-// install commonly binds 127.0.0.1, which inside a pod is nobody but itself.
+// bindAddr is every container interface: a source's 127.0.0.1 is the pod itself.
 const bindAddr = "0.0.0.0"
 
-// The Plex connection and the listen settings, with the sections
-// _CONFIG_DEFINITIONS puts them in (plexpy/config.py:48-61, :127-136). The names
-// are lower case because that is the spelling Tautulli writes and reads a
-// setting under (Config._define's `ini_key = name.lower()`, :473); the lookup
-// in ini.go accepts any spelling and every report names the one the file holds.
+// The Plex connection and listen settings, with the sections _CONFIG_DEFINITIONS
+// puts them in (plexpy/config.py:48-61, :127-136). Names are lower case: the
+// spelling Tautulli writes and reads; the lookup accepts any, reports the file's.
 const (
 	sectionPMS      = "PMS"
 	sectionWeb      = "General"
@@ -82,27 +57,13 @@ const (
 	keyHTTPRoot     = "http_root"
 )
 
-// The keys that make Tautulli ask for its own password. A non-empty
-// http_password is the switch (webstart.py:195-213 at v2.18.2: with one the app
-// registers its auth tool and logs "authentication is enabled"; without one it
-// says "authentication is disabled" and admits everyone), http_basic_auth only
-// picks how it is asked, and the two flags are what make the app hash the value
-// it is given. Behind box the person signs in at the edge once, so these are
-// sealed off exactly as the chart's init container seals them
-// (internal/ttlconf); a source's password would otherwise sit in the file until
-// the first restart put it back, and would be a second password in front of an
-// app nobody should have to sign in to twice.
-//
-// 2.19 added the two keys below them, and an empty password is not enough on its
-// own any more: a start where the setup wizard never finished mints a random
-// password (plexpy/__init__.py:3121-3145 at v2.19.1, generate_first_run_password
-// -- which first_run_complete is what stops), and without a password the app
-// refuses every request a reverse proxy forwarded (webstart.py:406-441,
-// no_password_gate -- which allow_public_no_password is what stops) as well as
-// minting one on a config that upgrades to 2.19 with none (config.py:796-800).
-// So the migrated file says what the chart's init container will say on the next
-// start, rather than waiting for it: first_run_complete in [General], and the
-// gate's switch in [Advanced], the section _CONFIG_DEFINITIONS gives each.
+// The keys that make Tautulli ask for its own password: a non-empty
+// http_password is the switch (webstart.py:195-213 at v2.18.2), the two flags make
+// the app hash it, and http_basic_auth only picks how it is asked. Behind box the
+// login is at the edge, and internal/ttlconf seals these on every start. 2.19 also
+// mints a password when the wizard never finished (__init__.py:3121-3145 at
+// v2.19.1, stopped by first_run_complete) and refuses proxied requests without one
+// (webstart.py:406-441, stopped by allow_public_no_password), so both are set.
 var loginOffKeys = []struct {
 	section string
 	name    string
@@ -218,8 +179,8 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 	}
 	var edits []edit
 
-	// Paths: every absolute value goes through this app's table, and one no
-	// rule covers is a gap rather than a guess.
+	// Every absolute path goes through this app's table; one no rule covers is a
+	// gap.
 	for _, k := range pathKeys {
 		line, ok := f.get(k.section, k.name)
 		if !ok || strings.TrimSpace(line.value) == "" {
@@ -262,19 +223,15 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 			where: at(line), what: e.what})
 	}
 
-	// And its own login goes, said out loud: the one the person uses is the
-	// box's, and an app that asks for a second password is a password they were
-	// never given.
+	// Its own login goes, said out loud: the person signs in at the edge.
 	edits = append(edits, loginOff(f)...)
 	rep.Notes = append(rep.Notes, "its own login is switched off; you sign in through the box")
 	return edits, nil
 }
 
-// loginOff is the edits that switch Tautulli's own web login off. Only the keys
-// the file holds are edited: one that is absent is one the app's defaults answer
-// for, and writing it would be this package inventing a setting. A config.ini
-// Tautulli wrote itself holds all of them -- Config.write() builds the file from
-// _CONFIG_DEFINITIONS -- which is the only kind of file a migration reads.
+// loginOff is the edits that switch the app's login off. Only keys the file holds
+// are edited: an absent one is answered by the app's defaults, and writing it
+// would invent a setting.
 func loginOff(f *iniFile) []edit {
 	var edits []edit
 	for _, k := range loginOffKeys {
@@ -288,22 +245,19 @@ func loginOff(f *iniFile) []edit {
 	return edits
 }
 
-// at is one line's section/key as the file spells it, which is what a report
-// names: a plan that said General/HTTP_ROOT for a file holding
-// General/http_root would name a line the operator cannot find.
+// at is one line's section/key as the file spells it: a report names a line the
+// operator can find.
 func at(line iniLine) string { return line.section + "/" + line.key }
 
-// planPlex is the Plex connection. pms_ip holds the host and pms_port the port;
-// pms_url is the same address as a URL, set when the server was entered by hand
-// (plexpy/webserve.py:359 reads `PMS_URL_OVERRIDE or PMS_URL`), so it moves with
-// them or a stale URL wins over the right host.
+// planPlex is the Plex connection: pms_ip and pms_port hold the address, and
+// pms_url the same as a URL (plexpy/webserve.py:359 reads `PMS_URL_OVERRIDE or
+// PMS_URL`), so it moves with them or a stale URL wins.
 func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error) {
 	ipLine, haveIP := f.get(sectionPMS, keyPMSIP)
 	urlLine, haveURL := f.get(sectionPMS, keyPMSURL)
 	host := strings.TrimSpace(ipLine.value)
 	port := atoi(strings.TrimSpace(f.value(sectionPMS, keyPMSPort)))
-	// A URL column is a whole URL, so its path is part of what settles it on a
-	// host that serves several apps; the two columns are a host and a port.
+	// A URL's path settles it on a host of paths; the other two are host and port.
 	var stored *url.URL
 	if host == "" && haveURL {
 		u, err := url.Parse(strings.TrimSpace(urlLine.value))
