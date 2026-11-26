@@ -1,19 +1,13 @@
 package sabconf
 
-// ini.go is the INI half of this package: a ConfigObj file split into its
-// lines without interpreting anything, so a value this package does not own is
-// written back byte for byte. It is deliberately small -- SABnzbd's file is one
-// `key = value` per line, a `[section]` header, and the app rewrites the whole
-// file in its own formatting on the first save anyway.
-
 import (
 	"bytes"
 	"fmt"
 	"strings"
 )
 
-// line is one line of the file: what it said, which section it belongs to, and
-// where its value sits when it is a key line.
+// line is one line of the file: what it said, its section, and where its value
+// sits when it is a key line.
 type line struct {
 	raw     string // the line without its newline
 	eol     string // "\n" or "\r\n" as it was, "" for a last line without one
@@ -31,8 +25,8 @@ type File struct {
 }
 
 // Parse splits an INI file. A line that is neither blank, a comment, a section
-// header nor a `key = value` is an error: ConfigObj refuses it, and a caller
-// that half-understood it would write a file the app then rejects.
+// header nor `key = value` is an error: ConfigObj refuses it, and a file this
+// half-understood would be one the app rejects.
 func Parse(data []byte) (*File, error) {
 	f := &File{}
 	if len(data) == 0 {
@@ -61,8 +55,7 @@ func Parse(data []byte) (*File, error) {
 }
 
 // readLine appends one line, carrying the current section and its parent
-// section forward. It is one line's whole parse, so the loop above has no
-// branches of its own.
+// forward.
 func (f *File) readLine(raw, eol string, n int, section, parent *string) error {
 	l := line{raw: raw, eol: eol}
 	trimmed := strings.TrimSpace(raw)
@@ -76,8 +69,8 @@ func (f *File) readLine(raw, eol string, n int, section, parent *string) error {
 		}
 		switch {
 		case strings.HasPrefix(name, "["):
-			// ConfigObj's nested section: [[name]] under the last [section].
-			// SABnzbd writes categories and servers this way.
+			// ConfigObj's nested section: SABnzbd writes categories and servers
+			// as [[name]] under the last [section].
 			inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(name, "["), "]"))
 			if *parent == "" || inner == "" {
 				return fmt.Errorf("line %d: nested section %q has no parent section", n, trimmed)
@@ -125,9 +118,8 @@ func (l *line) readKey(raw string, n int, section string) error {
 	return nil
 }
 
-// HasSection reports whether the file declares a section. A duplicate
-// declaration is refused by Set when that section is written, because ConfigObj
-// merges them and this package cannot say which of two values the app reads.
+// HasSection reports whether the file declares a section. A duplicate is
+// refused by Set when that section is written, because ConfigObj merges them.
 func (f *File) HasSection(section string) bool {
 	for _, l := range f.lines {
 		if l.raw != "" && strings.HasPrefix(strings.TrimSpace(l.raw), "[") && l.section == section {
@@ -163,9 +155,9 @@ func (f *File) Keys(section string) []string {
 	return out
 }
 
-// Get returns one key's value. The section is matched exactly (SABnzbd's file
-// is all lower case and ConfigObj is case-sensitive); the key is matched
-// without case so a hand-edited spelling is still read.
+// Get returns one key's value. The section is matched exactly (the file is all
+// lower case and ConfigObj is case-sensitive); the key is matched without case
+// so a hand-edited spelling is still read.
 func (f *File) Get(section, key string) (string, bool) {
 	if l, ok := f.find(section, key); ok {
 		return l.value, true
@@ -193,9 +185,9 @@ func (f *File) find(section, key string) (line, bool) {
 	return line{}, false
 }
 
-// Set writes one key in one section. The value's own line is edited in place,
-// so comments, ordering and spacing survive; a key the section does not have is
-// inserted after the section's last key line, inside that section.
+// Set writes one key in one section. The value's line is edited in place, so
+// comments, ordering and spacing survive; a missing key is inserted inside its
+// section.
 func (f *File) Set(section, key, value string) error {
 	if err := f.checkSection(section); err != nil {
 		return err
@@ -207,8 +199,8 @@ func (f *File) Set(section, key, value string) error {
 	if len(found) == 1 {
 		l := &f.lines[found[0]]
 		l.value = value
-		// The line's own spelling stays: the key, the spaces around '=' and
-		// any trailing space are the file's, and only the value changes.
+		// The line's own spelling stays: the key, the spaces around '=' and any
+		// trailing space belong to the file.
 		l.raw = l.prefix + value + l.suffix
 		return nil
 	}
@@ -247,9 +239,9 @@ func (f *File) findKey(section, key string) ([]int, error) {
 	return found, nil
 }
 
-// insert adds a key after the section's last key line, or right after its
-// header when it has none. A trailing blank line or comment stays after the new
-// key, which is where the app's own writer puts one.
+// insert adds a key after the section's last key line, or after its header when
+// it has none; a trailing blank or comment stays after the new key, where the
+// app's own writer puts one.
 func (f *File) insert(section, key, value string) {
 	at, header, inSection := -1, -1, false
 	for i, l := range f.lines {
@@ -269,8 +261,7 @@ func (f *File) insert(section, key, value string) {
 		at = header
 	}
 	if at == -1 {
-		// No section at all: an empty file is the only caller that reaches
-		// this, so the header and the key are the whole file.
+		// No section at all: an empty file is the only caller that reaches this.
 		if len(f.lines) > 0 && f.lines[len(f.lines)-1].eol == "" {
 			f.lines[len(f.lines)-1].eol = "\n"
 		}
