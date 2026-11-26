@@ -9,15 +9,12 @@ import (
 	"strings"
 )
 
-// imagesCmd prints whether a pull request's whole change is the two chart files
-// an automatic release ships, as KEY=VALUE for $GITHUB_OUTPUT, with the reason
-// on stderr -- the same shape `decide` prints.
+// imagesCmd prints whether a pull request's whole change is the two chart files an automatic
+// release ships, as KEY=VALUE for $GITHUB_OUTPUT with the reason on stderr.
 //
-// The workflow asks this of a pull request into main: a patch or digest bump of
-// the app images or the platform pins is a release, and it has to be tested by
-// the tree it will be merged onto rather than by the one it targets. That tree
-// is develop, and this is the set of files the bump may replace there -- the
-// decision's own set (releasedFiles), not a second list in YAML.
+// The workflow asks it of a pull request into main: an image bump has to be tested by the
+// tree it will merge onto (develop), against the decision's own file set (releasedFiles),
+// not a second list in YAML.
 func imagesCmd(args []string) error {
 	if len(args) != 2 {
 		usage()
@@ -32,13 +29,9 @@ func imagesCmd(args []string) error {
 	return nil
 }
 
-// images reports whether every path that differs between a pull request's base
-// and its head is a file an automatic release ships, and says why in one line.
-//
-// The diff is the three-dot one: what the branch itself changed, not what the
-// base branch did after the branch forked. An empty diff is not an image bump:
-// there is nothing to test. Renovate's own config does not count either -- it is
-// inert for a release (decide's inertFiles), and tuning it is not an image.
+// images: every path that differs between a pull request's base and head is a file an
+// automatic release ships. The diff is the three-dot one (what the branch changed), and an
+// empty diff is nothing to test. Renovate's config does not count: it is inert.
 func (p planner) images(base, head string) (bool, string, error) {
 	base, head = strings.TrimSpace(base), strings.TrimSpace(head)
 	if base == "" || head == "" {
@@ -97,14 +90,9 @@ func releasedPaths() []string {
 	return paths
 }
 
-// overlay writes one file's bytes from ref over the working tree.
-//
-// The ref is fetched from origin when the checkout does not have it: the run
-// checks out the branch under test, and the commits whose files go over it are
-// the pull request's, which nothing has checked out. A file the ref does not
-// ship is an error rather than a deletion: an image bump replaces files that are
-// already there, and removing one on develop is a maintainer's change with its
-// own consequences.
+// overlay writes one file's bytes from ref over the working tree. The ref is fetched when
+// the checkout lacks it, and a file the ref does not ship is an error rather than a
+// deletion: removing one on develop is a maintainer's change.
 func (p planner) overlay(ref, path string) error {
 	if _, err := p.git("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
 		if _, ferr := p.git("fetch", "--depth", "1", "origin", ref); ferr != nil {

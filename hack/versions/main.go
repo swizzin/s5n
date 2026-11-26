@@ -1,12 +1,10 @@
-// Command versions prints the platform versions box installs, one KEY=VALUE
-// line per component, for the e2e scripts.
+// Command versions prints the platform versions box installs, one KEY=VALUE line per
+// component, for the e2e scripts.
 //
-// It reads charts/s5n/platform.yaml from this checkout through the parser box
-// uses (internal/release.ParseVersions), which is the file `helm package` puts
-// inside the chart release box pulls. The e2e of HEAD therefore tests the pins
-// of HEAD, and no script needs a YAML parser of its own (yq is not installed on
-// every host the e2e runs on). It is a reader, not a second list: the chart
-// file is the only home for a version.
+// It reads charts/s5n/platform.yaml from this checkout through the parser box uses
+// (internal/release.ParseVersions), the file `helm package` puts inside the release, so
+// the e2e of HEAD tests the pins of HEAD and no script needs a YAML parser of its own.
+// A reader, not a second list.
 //
 // Usage:
 //

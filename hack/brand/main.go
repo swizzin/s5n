@@ -2,16 +2,10 @@
 //
 //	go run ./hack/brand
 //
-// One file per page it is read on, because a mark is drawn in the palette of
-// the page behind it: docs/brand/s5n-light.svg is the s5n light variant, and
-// docs/brand/s5n-dark.svg the dark one. Both are two-tone -- the 5 in the
-// accent, s and n in the fg -- and both have a transparent background, so a
-// README can `<picture>` them by `prefers-color-scheme` instead of painting a
-// rectangle that only matches one reader's page.
-//
-// The files are generated rather than drawn by hand: the glyph tables live in
-// internal/brand, and an SVG checked in beside a table nothing reads is an SVG
-// that stops being the mark the next time the table moves.
+// One file per page it is read on, because a mark is drawn in its page's palette:
+// docs/brand/s5n-{light,dark}.svg, two-tone and transparent, so a README can <picture>
+// them by prefers-color-scheme. They are generated, not drawn: the glyph tables live in
+// internal/brand, and a checked-in SVG beside a table nothing reads stops being the mark.
 package main
 
 import (

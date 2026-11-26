@@ -876,7 +876,7 @@ if job["metadata"].get("labels"):
 out = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": job["spec"]}
 # The selector belongs to the controller, so a copied Job drops it.
 out["spec"].pop("selector", None)
-# And the controller's identity in the template labels, which a Job refuses to carry twice.
+# And the identity the controller writes into the template labels, refused twice.
 for k in ("batch.kubernetes.io/controller-uid", "controller-uid",
           "batch.kubernetes.io/job-name", "job-name"):
     out["spec"]["template"]["metadata"]["labels"].pop(k, None)

@@ -1,39 +1,26 @@
-// Command sign signs a box release's checksums, generates the key pair that
-// signs them, and checks a signature.
+// Command sign signs a box release's checksums, generates the key pair that signs them, and
+// checks a signature.
 //
-// box verifies a release's signature before it replaces itself as root, so the
-// signing key is the one thing standing between a substituted release and a
-// host. The private half is the release's signing secret (BOX_SIGNING_KEY in
-// release.yaml) and the public half is compiled into box
-// (internal/selfupdate/signing.pub); this command is how a maintainer generates
-// the pair, and how the release workflow signs the checksums it is about to
-// publish. It uses internal/selfupdate's signing functions, so a signature made
-// here is one box accepts by construction rather than by agreement.
+// box verifies a release's signature before it replaces itself as root, so the signing key
+// is the one thing between a substituted release and a host. The private half is the
+// release's secret (BOX_SIGNING_KEY) and the public half is compiled into box
+// (internal/selfupdate/signing.pub). It uses internal/selfupdate's signing functions, so a
+// signature made here is one box accepts by construction.
 //
-// A release is named in its signature as well as by its tag, so signing and
-// verifying both take the version: the assets of one release copied under
-// another's tag are a signature over another release's message, and refused.
+// A release is named in its signature as well as by its tag, so both signing and verifying
+// take the version: one release's assets copied under another's tag are refused.
 //
-// Signing also refuses a seed whose public half is not the key committed in
-// signing.pub. That is the one mistake nothing else can catch: the release
-// would publish, the boxes built from it would carry a key nothing signs with,
-// and every one of them would stop being able to update itself -- discovered by
-// a user, not by the release. An empty signing.pub is refused in its own words
-// and says to commit the key first.
-//
-// It prints the public key and never the private one: the seed is a secret that
-// goes into the repository's secret store and nowhere else, and a terminal is
-// scrollback.
+// Signing refuses a seed whose public half is not the committed key -- a release would
+// publish and every box built from it would stop being able to update itself, discovered
+// by a user -- and an empty signing.pub in its own words. It prints the public key and
+// never the private one.
 //
 // Usage:
 //
-//	sign keygen <private-file>    write a new signing seed to <private-file>,
-//	                              mode 0600 (refusing an existing file), and
-//	                              print the public key to put in signing.pub
-//	sign public <private-file>    print the public key of a seed already kept,
-//	                              so signing.pub can be written again from it
-//	sign sign <version> <file>    sign <file> for the release <version> with the
-//	                              seed in BOX_SIGNING_KEY, and write <file>.sig
+//	sign keygen <private-file>    write a new seed (0600, refusing an existing file) and
+//	                              print the public key for signing.pub
+//	sign public <private-file>    print the public key of a seed already kept
+//	sign sign <version> <file>    sign <file> for <version>, writing <file>.sig
 //	sign verify <version> <file> <key-file>
 //	                              check <file>.sig against a public key
 package main
@@ -81,10 +68,8 @@ func usage() {
 	os.Exit(2)
 }
 
-// keygen writes a new signing seed and prints its public half. The file is
-// created exclusively: a key that already exists is a key some release was
-// signed with, and replacing it would make every box built with the old public
-// half unable to verify anything new.
+// keygen writes a new signing seed and prints its public half. The file is created
+// exclusively: replacing a key would strand every box built with the old public half.
 func keygen(args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return errors.New("keygen needs one path: the file to write the private seed to")
@@ -95,8 +80,7 @@ func keygen(args []string, out io.Writer) error {
 		return fmt.Errorf("generating a key: %w", err)
 	}
 
-	// O_EXCL also refuses a symbolic link, which is what a seed must not be
-	// written through.
+	// O_EXCL also refuses a symbolic link, which a seed must not be written through.
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -120,10 +104,8 @@ func keygen(args []string, out io.Writer) error {
 	return nil
 }
 
-// publicKey prints the public half of a seed already kept. keygen prints it
-// once, and a terminal that lost the line would otherwise leave the maintainer
-// with a seed whose public half nothing can name: signing.pub could not be
-// written again, and the only way forward would be a new key.
+// publicKey prints the public half of a seed already kept, so signing.pub can be written
+// again without generating a new key.
 func publicKey(args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return errors.New("public needs one path: the file holding the private seed")
@@ -140,19 +122,13 @@ func publicKey(args []string, out io.Writer) error {
 	return nil
 }
 
-// signingPubPath is the committed public key, read from the repository root the
-// command is run from: release.sh signs there, and the rehearsal signs in its
-// own clone, so the file this checks is the one that release's box embeds. It is
-// a variable so a test can point it at a key it generated.
+// signingPubPath is the committed public key, read from the repository root the command is
+// run from (a test points it at a key it generated).
 var signingPubPath = filepath.Join("internal", "selfupdate", "signing.pub")
 
-// checkSigningKey refuses a seed whose public half is not the key this release's
-// boxes will verify with, and refuses an empty committed key in its own words.
-//
-// The alternative is a release nobody notices is broken: it publishes, it
-// verifies against nothing, and every box built from it can never take another
-// box release. Naming both keys is what tells the maintainer whether the seed or
-// the committed key is the mistake.
+// checkSigningKey refuses a seed whose public half is not what this release's boxes verify
+// with, and an empty committed key in its own words. Naming both keys says whether the seed
+// or the committed key is the mistake.
 func checkSigningKey(seed ed25519.PrivateKey) error {
 	committed, err := os.ReadFile(signingPubPath)
 	if err != nil {
@@ -175,10 +151,8 @@ func checkSigningKey(seed ed25519.PrivateKey) error {
 	return nil
 }
 
-// sign writes <file>.sig: the base64 signature over the release's tag and the
-// file's exact bytes, one line, which is the asset a box release publishes
-// beside its checksums. The seed comes from the environment so it never appears
-// in a process list, which a command-line argument would.
+// sign writes <file>.sig: the base64 signature over the release's tag and the file's bytes.
+// The seed comes from the environment so it never appears in a process list.
 func sign(args []string, out io.Writer) error {
 	if len(args) != 2 {
 		return errors.New("sign needs two arguments: the release version and the file to sign, whose signature is written to <file>.sig")
@@ -207,9 +181,7 @@ func sign(args []string, out io.Writer) error {
 	return nil
 }
 
-// verify checks a signature the way box will, for the version it will check it
-// as, so a maintainer can check a published release and the rehearsal can check
-// the one it just signed, without a box binary or a network.
+// verify checks a signature the way box will, for the version it will check it as.
 func verify(args []string, out io.Writer) error {
 	if len(args) != 3 {
 		return errors.New("verify needs three arguments: the release version, the signed file and the public key")

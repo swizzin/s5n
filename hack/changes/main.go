@@ -1,22 +1,19 @@
 // Command changes decides whether a push needs the acceptance test.
 //
-// The e2e jobs are the expensive half of CI: a kind cluster each, ten to
-// twenty minutes apiece. A push that only writes documentation cannot change
-// what any of them asserts, and on develop a documentation commit is the
-// common case, so those pushes skip them.
+// The e2e jobs are the expensive half of CI: a kind cluster each, ten to twenty minutes
+// apiece. A push that only writes documentation cannot change what any of them asserts, and
+// on develop that is the common case, so those pushes skip them.
 //
-// The rule lives here rather than in a `paths:` filter because the edges are
-// the whole point: a branch's first push, a force push, a rename out of docs/,
-// an empty diff. A workflow cannot test its own `if:`; this can, and does
-// (changes_test.go). The release decision is a command for the same reason.
+// The rule lives here rather than in a `paths:` filter because the edges are the whole
+// point: a branch's first push, a force push, a rename out of docs/, an empty diff. A
+// workflow cannot test its own `if:`; this can (changes_test.go).
 //
 // Usage:
 //
 //	changes e2e BASE HEAD   e2e=true|false on stdout, the reason on stderr
 //
-// The caller appends stdout to $GITHUB_OUTPUT and prints stderr as the job's
-// log. Which commits BASE and HEAD are is the caller's question: CI asks it
-// only for a push to develop, with BASE the head of develop's last green run.
+// Which commits BASE and HEAD are is the caller's question: CI asks only for a push to
+// develop, with BASE the head of develop's last green run.
 package main
 
 import (
@@ -50,9 +47,8 @@ func usage() {
 	os.Exit(2)
 }
 
-// e2eCmd prints the verdict as KEY=VALUE on stdout, for $GITHUB_OUTPUT, with
-// the reason on stderr, where it is the job's log -- the shape hack/release
-// decide prints, so a reader of either job sees the same thing.
+// e2eCmd prints the verdict as KEY=VALUE on stdout, with the reason on stderr -- the shape
+// hack/release decide prints.
 func e2eCmd(args []string) error {
 	if len(args) != 2 {
 		usage()
@@ -71,8 +67,7 @@ func verdictLine(v Verdict) string {
 	return fmt.Sprintf("e2e=%t\n", v.Run)
 }
 
-// repo reads git history from a working tree. root is the repository root:
-// "." for the command, a temp directory for a test.
+// repo reads git history from a working tree: "." for the command, a temp dir for a test.
 type repo struct {
 	root string
 }
@@ -93,23 +88,17 @@ func (r repo) git(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// e2e is the push's verdict: the e2e runs unless it is certain that only
-// documentation changed.
-//
-// Every way of not knowing answers "run it". An all-zero base is a branch's
-// first push or a tag; a base this checkout cannot resolve is a shallow clone;
-// a base that is not an ancestor of head is a force push that rewrote the
-// history the diff would have been against; an empty diff proves nothing about
-// what the commit carries. A wasted runner costs minutes, a skipped assertion
-// costs the reason CI exists.
+// e2e is the push's verdict: the e2e runs unless it is certain only documentation changed.
+// Every way of not knowing answers "run it": an all-zero base is a first push or a tag, an
+// unresolvable base is a shallow clone, a non-ancestor is a force push, an empty diff
+// proves nothing. A wasted runner costs minutes; a skipped assertion costs why CI exists.
 func (r repo) e2e(base, head string) (Verdict, error) {
 	if strings.Trim(base, "0") == "" {
 		return Verdict{Run: true, Reason: "the e2e runs: no base commit (a branch's first push)"}, nil
 	}
 	ancestor, err := r.isAncestor(base, head)
 	if err != nil {
-		// The base is not in this checkout -- a shallow clone, or a push
-		// whose base was garbage-collected -- so there is no diff to read.
+		// The base is not in this checkout (a shallow clone, or collected), so there is no diff.
 		return Verdict{Run: true, Reason: fmt.Sprintf("the e2e runs: cannot tell whether %s is behind %s (%v)", short(base), short(head), err)}, nil
 	}
 	if !ancestor {
@@ -122,9 +111,8 @@ func (r repo) e2e(base, head string) (Verdict, error) {
 	return docsOnly(changed), nil
 }
 
-// isAncestor reports whether base is an ancestor of head. git answers "no"
-// with exit 1 and nothing on stderr; every other failure is an error, because
-// "cannot tell" must never be read as "no, and skip".
+// isAncestor: git answers "no" with exit 1 and nothing on stderr; every other failure is an
+// error, because "cannot tell" must never be read as "skip".
 func (r repo) isAncestor(base, head string) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "--is-ancestor", base, head)
 	cmd.Dir = r.root
@@ -141,9 +129,9 @@ func (r repo) isAncestor(base, head string) (bool, error) {
 	return false, fmt.Errorf("git merge-base --is-ancestor: %w: %s", err, strings.TrimSpace(stderr.String()))
 }
 
-// changed is every path that differs between base and head, with git's status
-// letter and both sides of a rename. `--name-only` would report only the new
-// path, and a file moved out of docs/ would then look like documentation.
+// changed is every path that differs between base and head, with status letter and both
+// sides of a rename: --name-only would report only the new path, and a file moved out of
+// docs/ would then look like documentation.
 func (r repo) changed(base, head string) ([]change, error) {
 	out, err := r.git("diff", "--name-status", "-z", "-M", base, head)
 	if err != nil {
@@ -152,8 +140,7 @@ func (r repo) changed(base, head string) ([]change, error) {
 	return parseNameStatus(out)
 }
 
-// short is a commit for a log line, not for an error message: full shas make
-// the reason unreadable and the reader has the run in front of them.
+// short is a commit for a log line: full shas make the reason unreadable.
 func short(sha string) string {
 	if len(sha) > 12 {
 		return sha[:12]

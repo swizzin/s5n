@@ -1,22 +1,18 @@
-// Command appcalls prints the in-release call edges a seedbox release contains:
-// one "caller callee" per line, for every pair the chart's catalog declares and
-// this release has both ends of switched on.
+// Command appcalls prints the in-release call edges a seedbox release contains: one
+// "caller callee" per line, for every catalog pair this release has both ends of.
 //
-// It exists so an e2e can prove those edges without keeping a second list of
-// them: the chart derives its NetworkPolicy from the same `calls` entries, and a
-// hand-typed copy in a test script is exactly the thing that drifts from the
-// policy it is meant to check (a shipped release proved it by declaring an edge
-// its ingress refused). The catalog is read through internal/catalog, so this
-// prints what a validated manifest says, not what a YAML reader happens to find.
+// It exists so an e2e can prove those edges without keeping a second list: the chart
+// derives its NetworkPolicy from the same `calls` entries, and a hand-typed copy is
+// exactly what drifts from the policy it checks (a shipped release proved it). The
+// catalog is read through internal/catalog, so this prints what a validated manifest
+// says.
 //
 // Usage:
 //
 //	go run ./hack/appcalls [chart dir] <enabled app>...
 //
-// The chart dir defaults to charts/s5n, relative to the repository root, which
-// is where the e2e scripts run it from. The app names are the release's enabled
-// apps -- an e2e reads them from the pods it installed, so nothing here names an
-// app either.
+// The chart dir defaults to charts/s5n; the app names are the release's enabled apps, so
+// nothing here names an app either.
 package main
 
 import (
@@ -54,11 +50,8 @@ func main() {
 	}
 }
 
-// pairs is the catalog's edges filtered to a release: both ends enabled, in
-// catalog order and then in the order each entry lists its calls. An app that is
-// not in the release contributes nothing, which is the same rule the chart's
-// ingress follows -- an app that is switched off admits nothing and is admitted
-// by nothing.
+// pairs is the catalog's edges filtered to a release: both ends enabled, in catalog order.
+// An app that is not in the release contributes nothing, as the chart's ingress has it.
 func pairs(cat *catalog.Catalog, enabled map[string]bool) [][2]string {
 	var out [][2]string
 	for _, app := range cat.Apps() {
