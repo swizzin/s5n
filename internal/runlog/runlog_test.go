@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// Where the log goes is one rule with three answers: root's directory, a
-// user's state directory, and a directory the environment names, which wins
-// because the e2e points it under its own work tree.
 func TestDirChoice(t *testing.T) {
 	env := func(m map[string]string) func(string) string {
 		return func(k string) string { return m[k] }
@@ -41,9 +38,8 @@ func TestDirChoice(t *testing.T) {
 	}
 }
 
-// A run log is root's or a user's and nobody else's: the file is 0600 and the
-// directory box makes is 0700, because a transcript carries the box's own
-// addresses.
+// The transcript carries box's own addresses, so the file is 0600 and the
+// directory 0700.
 func TestLogIsPrivate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "box")
 	l, err := OpenAt(dir, "update")
@@ -73,8 +69,6 @@ func TestLogIsPrivate(t *testing.T) {
 	}
 }
 
-// The log is the screen with timestamps on it: one line in, one line out, each
-// with the same UTC stamp in front.
 func TestLinesAreTimestamped(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "apply")
 	if err != nil {
@@ -95,8 +89,6 @@ func TestLinesAreTimestamped(t *testing.T) {
 	}
 }
 
-// A line that is only half written when the log closes is still a line: the
-// transcript does not end mid-word.
 func TestPartialLineIsFinished(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "status")
 	if err != nil {
@@ -113,9 +105,8 @@ func TestPartialLineIsFinished(t *testing.T) {
 	}
 }
 
-// A registered secret never reaches the file, whatever line it turns up on --
-// including the longest one, so a password that contains another secret is
-// taken out whole.
+// The longest registered secret is replaced first, so a password containing
+// another secret is taken out whole.
 func TestSecretsNeverReachTheFile(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "update")
 	if err != nil {
@@ -141,8 +132,6 @@ func TestSecretsNeverReachTheFile(t *testing.T) {
 	}
 }
 
-// Colour is the screen's, not the log's: the log is plain text a person reads
-// with less.
 func TestColourIsStripped(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "apply")
 	if err != nil {
@@ -158,8 +147,6 @@ func TestColourIsStripped(t *testing.T) {
 	}
 }
 
-// One run's log stops at its cap, and the last line says why: a log that ends
-// in the middle of a sentence is a log an operator cannot trust.
 func TestLogStopsAtItsCap(t *testing.T) {
 	l, err := OpenAt(t.TempDir(), "apply")
 	if err != nil {
@@ -181,8 +168,6 @@ func TestLogStopsAtItsCap(t *testing.T) {
 	}
 }
 
-// The directory keeps the newest twenty and the newest 64 MiB, oldest first, so
-// a box that checks every fifteen minutes does not fill /var/log.
 func TestDirectoryIsPruned(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -215,8 +200,7 @@ func TestDirectoryIsPruned(t *testing.T) {
 	}
 }
 
-// The size cap prunes by total, not only by count: twenty logs that are each
-// 10 MiB are over the limit even though there are few of them.
+// The size cap prunes by total, not only by count.
 func TestDirectoryIsPrunedBySize(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -254,9 +238,6 @@ func TestDirectoryIsPrunedBySize(t *testing.T) {
 	}
 }
 
-// A directory that cannot be written never fails a command: the log comes back
-// disabled, the reason is the caller's to say, and writes are accepted and
-// dropped.
 func TestAnUnwritableDirectoryIsOneLine(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -294,9 +275,6 @@ func read(t *testing.T, path string) string {
 	return string(b)
 }
 
-// Two runs of one command in the same second are two runs: box applies and
-// checks faster than a filename's second, and neither may cost the other its
-// transcript.
 func TestTwoRunsInOneSecondBothKeepTheirLog(t *testing.T) {
 	dir := t.TempDir()
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -320,9 +298,6 @@ func TestTwoRunsInOneSecondBothKeepTheirLog(t *testing.T) {
 	}
 }
 
-// The prune is box's own: a directory an operator named with BOX_LOG_DIR can hold
-// other programs' logs, and a file that is not named the way box names its logs
-// is never box's to remove, whatever its age.
 func TestThePruneLeavesWhatBoxDidNotWrite(t *testing.T) {
 	dir := t.TempDir()
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -370,9 +345,6 @@ func TestThePruneLeavesWhatBoxDidNotWrite(t *testing.T) {
 	}
 }
 
-// The update timer wakes every fifteen minutes. Its wakes keep a few logs of
-// their own and never more, so a morning's failed apply is still there in the
-// evening rather than pushed out by twenty quiet checks.
 func TestTimerWakesNeverPushOutARealRun(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
