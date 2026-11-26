@@ -359,11 +359,14 @@ func TestSetRefusals(t *testing.T) {
 	}{
 		{name: "a mapping in place", fixture: "values.yaml", path: "apps.sonarr.resources", value: map[string]any{}, want: "is a mapping"},
 		{
-			name:  "a list in place",
-			doc:   "apps:\n  plex:\n    noAuthNetworks:\n      - 10.0.0.0/8\n",
-			path:  "apps.plex.noAuthNetworks",
+			// A list is replaced as a whole (see TestAOneEntryListIsWrittenUnderItsKey
+			// and TestAListIsReplacedWhereItStands); a mapping is not, because
+			// each of its keys is the file's author's.
+			name:  "a mapping in place",
+			doc:   "apps:\n  plex:\n    env:\n      A: b\n",
+			path:  "apps.plex.env",
 			value: []any{},
-			want:  "is a list",
+			want:  "is a mapping",
 		},
 		{name: "a key inside a flow mapping", fixture: "values.yaml", path: "apps.radarr.env.X", value: "y", want: "on one line"},
 		{name: "into a scalar", fixture: "values.yaml", path: "apps.qbittorrent.image.tag.deeper", value: "x", want: "not a mapping"},

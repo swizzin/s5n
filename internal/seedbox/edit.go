@@ -279,6 +279,9 @@ func (e *Editor) set(p Path, value any) error {
 // replace swaps one scalar in place. Everything else on the line — the key, the
 // spacing before the value, a trailing comment — stays byte for byte.
 func (e *Editor) replace(p Path, n, parent *yaml.Node, value any) error {
+	if n.Kind == yaml.SequenceNode {
+		return e.replaceSequence(p, n, value)
+	}
 	if n.Kind != yaml.ScalarNode {
 		return fmt.Errorf("%s is a %s; box changes one value at a time and will not rewrite it — edit the file by hand", p, kindName(n))
 	}
@@ -304,6 +307,47 @@ func (e *Editor) replace(p Path, n, parent *yaml.Node, value any) error {
 		return fmt.Errorf("%s: %w", p, err)
 	}
 	e.src = splice(e.src, e.lineStart(n.Line)+start, e.lineStart(n.Line)+end, []byte(text))
+	return nil
+}
+
+// replaceSequence rewrites one block list where it stands, for a value box owns
+// as a whole (a box's trusted proxy networks: a node added to the cluster is a
+// different list, not an entry to add). The list's own indentation is kept, and
+// the entries are the app's own encoding of the new value -- a flow list
+// ("[a, b]") is rewritten as a block, which is how the file's author reads it.
+func (e *Editor) replaceSequence(p Path, n *yaml.Node, value any) error {
+	block, err := isBlockValue(value)
+	if err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	if !block {
+		return fmt.Errorf("%s is a list and the value asked for is not one", p)
+	}
+	if n.Style&yaml.FlowStyle != 0 {
+		return fmt.Errorf("%s is written on one line; write it out over several lines before box can change it", p)
+	}
+	text, err := encodeValue(value)
+	if err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	pad := strings.Repeat(" ", n.Column-1)
+	parts := strings.Split(text, "\n")
+	lines := make([]string, len(parts))
+	for i, part := range parts {
+		lines[i] = pad + part
+	}
+	return e.replaceLines(n.Line, e.nodeEnd(n), lines)
+}
+
+// replaceLines swaps whole lines, from..to inclusive, for lines. The lines
+// handed in carry their own indentation.
+func (e *Editor) replaceLines(from, to int, lines []string) error {
+	starts := lineStarts(e.src)
+	if from < 1 || to < from || to > len(starts)-1 {
+		return fmt.Errorf("lines %d-%d are outside the file", from, to)
+	}
+	text := strings.Join(lines, "\n") + "\n"
+	e.src = splice(e.src, starts[from-1], starts[to], []byte(text))
 	return nil
 }
 
@@ -539,7 +583,15 @@ func renderKeyLine(pad, key string, value any, step int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.Contains(text, "\n") {
+	// A list or a mapping is always written under its key, never after it: a
+	// one-element sequence encodes as a single line ("- app.db"), and
+	// "key: - app.db" is not YAML. A scalar that happens to be one line stays
+	// inline, which is what keeps a set of scalars readable.
+	block, err := isBlockValue(value)
+	if err != nil {
+		return "", err
+	}
+	if !block && !strings.Contains(text, "\n") {
 		return pad + key + ": " + text, nil
 	}
 	var b strings.Builder
@@ -552,6 +604,16 @@ func renderKeyLine(pad, key string, value any, step int) (string, error) {
 }
 
 func encodeKey(k string) (string, error) { return encodeStyled(k, 0) }
+
+// isBlockValue reports whether a value encodes as a block (a list or a mapping)
+// rather than as one scalar on the key's own line.
+func isBlockValue(v any) (bool, error) {
+	n := &yaml.Node{}
+	if err := n.Encode(v); err != nil {
+		return false, err
+	}
+	return n.Kind != yaml.ScalarNode, nil
+}
 
 // encodeValue renders a value the way the chart file would hold it.
 func encodeValue(v any) (string, error) {
