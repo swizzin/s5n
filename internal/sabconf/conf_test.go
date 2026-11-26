@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// testSettings is the chart's shape: /sabnzbd on the box's own name, downloads
-// on the data claim, the release Secret's key, and the Gateway trusted.
+// testSettings is the chart's shape.
 var testSettings = Settings{
 	URLBase:     "/sabnzbd",
 	CompleteDir: "/data/downloads",
@@ -15,10 +14,9 @@ var testSettings = Settings{
 	VerifyXFF:   false,
 }
 
-// imageDefaults is the shape the pinned image copies out of /defaults on a
-// first start: top-level ConfigObj keys, [misc] with its settings, then the
-// notification sections. Only the keys this package owns matter to the test;
-// the rest are here so a rewrite can be proven to leave them alone.
+// imageDefaults is the shape the pinned image copies out of /defaults on a first
+// start. Only the keys this package owns matter; the rest prove a rewrite leaves
+// them alone.
 const imageDefaults = `__version__ = 19
 __encoding__ = utf-8
 [misc]
@@ -64,9 +62,7 @@ func TestSealWritesEveryOwnedKeyIntoAnEmptyFile(t *testing.T) {
 	}
 }
 
-// TestSealIsANoOpOnAFileTheAppWrote is the case that matters on every start
-// after the first: the app rewrote the file from its own memory and the init
-// container must not touch it again.
+// The first start after this one finds a file the app rewrote from memory.
 func TestSealIsANoOpOnAFileTheAppWrote(t *testing.T) {
 	app := strings.NewReplacer(
 		`api_key = ""`, `api_key = `+testSettings.APIKey,
@@ -86,9 +82,9 @@ func TestSealIsANoOpOnAFileTheAppWrote(t *testing.T) {
 	}
 }
 
-// TestSealRepairsEveryDriftedValue: a source's file or an older image's defaults
-// are the download paths on the config claim and XFF verification on, which is
-// a copy instead of a hardlink and a 403 through the Gateway.
+// A source's file or an older image's defaults carry the download paths on the
+// config claim and XFF verification on: a copy instead of a hardlink and a 403
+// through the Gateway.
 func TestSealRepairsEveryDriftedValue(t *testing.T) {
 	out, changed, err := Seal([]byte(imageDefaults), testSettings)
 	if err != nil {
@@ -122,10 +118,9 @@ func TestSealRepairsEveryDriftedValue(t *testing.T) {
 	}
 }
 
-// TestSealAddsAMissingKeyInsideItsOwnSection: verify_xff_header is not in the
-// image's defaults at all, so a first start has to gain the key inside [misc].
-// Appending it at the end of the file would put it in the last section, where
-// SABnzbd reads it as a notification setting and ignores it.
+// verify_xff_header is not in the image's defaults, so it must be added inside
+// [misc]: at the end of the file SABnzbd would read it as a notification setting
+// and ignore it.
 func TestSealAddsAMissingKeyInsideItsOwnSection(t *testing.T) {
 	out, _, err := Seal([]byte(imageDefaults), testSettings)
 	if err != nil {
@@ -184,9 +179,9 @@ func TestFileKeepsTheSpellingAndSpacingOfALineItEdits(t *testing.T) {
 	}
 }
 
-// TestNestedSectionsAreReadAndLeftAlone: SABnzbd writes every category and
-// server as a ConfigObj subsection ([[tv]] under [categories]), and the sealer
-// must not mistake one for a top-level section or write into it.
+// SABnzbd writes every category and server as a ConfigObj subsection ([[tv]]
+// under [categories]), and the sealer must not mistake one for a top-level
+// section or write into it.
 func TestNestedSectionsAreReadAndLeftAlone(t *testing.T) {
 	file := `[misc]
 complete_dir = Downloads/complete
