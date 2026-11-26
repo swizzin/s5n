@@ -12,8 +12,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// planYAML is what a discovery run writes for a source whose libraries live
-// under /srv/media: every path in it is invented.
+// planYAML is what discovery writes for a source whose libraries live under
+// /srv/media. Paths are invented.
 const planYAML = `version: 2
 apps:
   bazarr:
@@ -60,10 +60,8 @@ hosts:
     app: radarr
 `
 
-// settingsFileFixture is the shape the pinned image writes, with the two Arrs
-// pointing at the source's Services and a path mapping whose two sides are the
-// two apps' own views of one library. Everything this package does not own is
-// kept in the fixture verbatim, so a test can hold the pass to not touching it.
+// settingsFileFixture is the shape the pinned image writes, holding everything
+// this package does not own, so a test can hold the pass to not touching it.
 const settingsFileFixture = `auth:
   apikey: 0123456789abcdef0123456789abcdef
   password: ''
@@ -94,8 +92,8 @@ sonarr:
   ssl: false
 `
 
-// dbFixture is the two library tables with the paths the source stored, and
-// one subtitle row with no path yet (a subtitle the app has not placed).
+// dbFixture is the library tables with the stored paths, and one unplaced
+// subtitle row.
 const dbFixture = `
 CREATE TABLE table_shows (
     sonarrSeriesId INTEGER PRIMARY KEY,
@@ -184,9 +182,8 @@ func runs() map[string][]string {
 	}
 }
 
-// TestRewritesBothArrsAndTheLibrary: the two sections point at the box's own
-// Services, and every library path moves with the media root, including the
-// subtitle files beside it.
+// TestRewritesBothArrsAndTheLibrary: the sections point at the box's Services and
+// every library path moves with the media root.
 func TestRewritesBothArrsAndTheLibrary(t *testing.T) {
 	in := setup(t)
 	ctx := context.Background()
@@ -201,8 +198,8 @@ func TestRewritesBothArrsAndTheLibrary(t *testing.T) {
 	for _, c := range rep.Changes {
 		got[c.Where] += c.Count
 	}
-	// The port each side already names is the release's own, so it is not a
-	// change; the sonarr side's empty base URL is.
+	// Each port is already the release's, so it is no change; the sonarr base URL
+	// is.
 	for where, n := range map[string]int{
 		"sonarr.ip":                   1,
 		"sonarr.base_url":             1,
@@ -236,8 +233,7 @@ func TestRewritesBothArrsAndTheLibrary(t *testing.T) {
 	assertWrittenSettings(t, in.Dir)
 	assertWrittenPaths(t, in.Dir)
 
-	// A migrated copy sits where box wants it, so a second check has nothing to
-	// say and its Write changes nothing.
+	// A second check has nothing to say and its Write changes nothing.
 	again, err := rewriter{}.Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -254,8 +250,8 @@ func TestRewritesBothArrsAndTheLibrary(t *testing.T) {
 	}
 }
 
-// TestASwitchedOffSideIsLeftAndSaidSo: nothing dials it, so an address the plan
-// does not cover is not a gap.
+// TestASwitchedOffSideIsLeftAndSaidSo: nothing dials it, so an uncovered address
+// is not a gap.
 func TestASwitchedOffSideIsLeftAndSaidSo(t *testing.T) {
 	in := setup(t)
 	doc := parseSettings(mustRead(t, filepath.Join(in.Dir, settingsFile)))
@@ -263,8 +259,7 @@ func TestASwitchedOffSideIsLeftAndSaidSo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(in.Dir, settingsFile), doc.bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The radarr address now points somewhere no rule covers, which only a side
-	// that is on would make a gap.
+	// Now uncovered, but only an ON side would make that a gap.
 	doc.setScalar("radarr", "ip", "203.0.113.9", true)
 	if err := os.WriteFile(filepath.Join(in.Dir, settingsFile), doc.bytes(), 0o600); err != nil {
 		t.Fatal(err)
@@ -288,8 +283,8 @@ func TestASwitchedOffSideIsLeftAndSaidSo(t *testing.T) {
 	}
 }
 
-// TestAnAddressNoRuleCoversBlocks: a stored address the plan does not settle is
-// the operator's to decide, and the run stops rather than guess.
+// TestAnAddressNoRuleCoversBlocks: an unsettled address is the operator's, and
+// the run stops rather than guess.
 func TestAnAddressNoRuleCoversBlocks(t *testing.T) {
 	in := setup(t)
 	doc := parseSettings(mustRead(t, filepath.Join(in.Dir, settingsFile)))
@@ -309,10 +304,8 @@ func TestAnAddressNoRuleCoversBlocks(t *testing.T) {
 	}
 }
 
-// TestAMappingWithTwoArrsIsLeft: a mapping says "the path this Arr reports",
-// and with two Sonarrs the pair cannot say which one's. Leaving it (and saying
-// so) is the decision; rewriting it at a guess would point one library's files
-// at the other's.
+// TestAMappingWithTwoArrsIsLeft: a pair names the path one Arr reports, and with
+// two Sonarrs it cannot say which; a guess would point one library at the other.
 func TestAMappingWithTwoArrsIsLeft(t *testing.T) {
 	in := setup(t)
 	in.Runs["sonarr"] = []string{"sonarr", "sonarr-4k"}
@@ -331,8 +324,7 @@ func TestAMappingWithTwoArrsIsLeft(t *testing.T) {
 	}
 }
 
-// TestAStoredPathNoRuleCoversBlocks: a library row outside every rule is a gap,
-// not a value to leave.
+// TestAStoredPathNoRuleCoversBlocks: a library row outside every rule is a gap.
 func TestAStoredPathNoRuleCoversBlocks(t *testing.T) {
 	in := setup(t)
 	ctx := context.Background()
@@ -358,10 +350,9 @@ func TestAStoredPathNoRuleCoversBlocks(t *testing.T) {
 	}
 }
 
-// TestTheFileIsOnlyTouchedWhereItMust: the pass replaces the owned values and
-// keeps every other byte, including the app's own empty scalars and nulls. The
-// expected file is the fixture with exactly the owned lines rewritten, which is
-// what makes this a byte-level proof and not a value-level one.
+// TestTheFileIsOnlyTouchedWhereItMust: the expected file is the fixture with
+// exactly the owned lines rewritten, a byte-level proof rather than a value-level
+// one.
 func TestTheFileIsOnlyTouchedWhereItMust(t *testing.T) {
 	in := setup(t)
 	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {
@@ -374,8 +365,7 @@ func TestTheFileIsOnlyTouchedWhereItMust(t *testing.T) {
 		"  ip: radarr.media", `  ip: "radarr"`,
 		"  base_url: /\ns", "  base_url: \"/sonarr\"\ns", // the sonarr section's, below
 	).Replace(settingsFileFixture)
-	// The sonarr base_url is the section's own line; the replacer above cannot
-	// tell it from another "/", so it is set here.
+	// The replacer cannot tell this line from another "/", so it is set here.
 	want = strings.Replace(want, "  apikey: sonarr-key\n  base_url: /\n", "  apikey: sonarr-key\n  base_url: \"/sonarr\"\n", 1)
 	got := string(mustRead(t, filepath.Join(in.Dir, settingsFile)))
 	if got != want {
@@ -383,8 +373,8 @@ func TestTheFileIsOnlyTouchedWhereItMust(t *testing.T) {
 	}
 }
 
-// assertWrittenSettings is the settings half of the rewrite: both Arrs at the
-// release's address, the mapping gone, and everything else the file said.
+// assertWrittenSettings: both Arrs at the release's address, the mapping gone, the
+// rest of the file as it was.
 func assertWrittenSettings(t *testing.T, dir string) {
 	t.Helper()
 	doc := parseSettings(mustRead(t, filepath.Join(dir, settingsFile)))
@@ -412,8 +402,8 @@ func assertWrittenSettings(t *testing.T, dir string) {
 	}
 }
 
-// assertWrittenPaths is the library half: every stored path moved with the
-// media root, the subtitle beside its film included.
+// assertWrittenPaths: every stored path moved, the subtitle beside its film
+// included.
 func assertWrittenPaths(t *testing.T, dir string) {
 	t.Helper()
 	paths := readPaths(t, dir)
