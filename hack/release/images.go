@@ -13,8 +13,8 @@ import (
 // an automatic release ships, as KEY=VALUE for $GITHUB_OUTPUT, with the reason
 // on stderr -- the same shape `decide` prints.
 //
-// The workflow asks this of a pull request into main: a patch or digest bump of
-// the app images or the platform pins is a release, and it has to be tested by
+// The workflow asks this of a pull request into main: a bump of the app images
+// or the platform pins may be a release, and it has to be tested by
 // the tree it will be merged onto rather than by the one it targets. That tree
 // is develop, and this is the set of files the bump may replace there -- the
 // decision's own set (releasedFiles), not a second list in YAML.

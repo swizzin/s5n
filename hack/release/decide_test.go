@@ -110,12 +110,11 @@ func TestDecideRange(t *testing.T) {
 			reasonIn: []string{".github/workflows/ci.yaml"},
 		},
 		{
-			name:    "a minor bump does not release",
+			name:    "an app image's minor bump releases the chart",
 			changed: []string{variantsFile},
 			oldV:    variants, newV: variantsYAML("5.1.0.2907", hex64("a")),
 			oldP: platform, newP: platform,
-			prev:     "0.2.0",
-			reasonIn: []string{"minor bump", "sonarr.default"},
+			prev: "0.2.0", release: true, version: "0.2.1",
 		},
 		{
 			name:    "a major bump does not release",
