@@ -121,11 +121,28 @@ func whole(path string, v any, kind Kind) Change {
 }
 
 // FormatChanges renders a diff as the lines of a confirmation prompt.
+//
+// A change under secrets. is named, never shown: the prompt is read on screen
+// and kept in the run log, and every value there is a credential -- an Arr API
+// key, a Plex token, a generated password. Whether a secret changed is what a
+// person reviewing an apply needs to see, and its value is exactly what they
+// must not.
 func FormatChanges(changes []Change) string {
 	var b strings.Builder
 	for i, c := range changes {
 		if i > 0 {
 			b.WriteByte('\n')
+		}
+		if isSecretPath(c.Path) {
+			switch c.Kind {
+			case Added:
+				fmt.Fprintf(&b, "+ %s: (secret)", c.Path)
+			case Removed:
+				fmt.Fprintf(&b, "- %s: (secret)", c.Path)
+			default:
+				fmt.Fprintf(&b, "~ %s: (secret changed)", c.Path)
+			}
+			continue
 		}
 		switch c.Kind {
 		case Added:
@@ -137,6 +154,13 @@ func FormatChanges(changes []Change) string {
 		}
 	}
 	return b.String()
+}
+
+// isSecretPath says whether a key path is under the document's secrets map,
+// which is the one place a values file holds a credential. An index under it
+// (secrets.tokens[0]) is part of the same subtree.
+func isSecretPath(path string) bool {
+	return path == "secrets" || strings.HasPrefix(path, "secrets.") || strings.HasPrefix(path, "secrets[")
 }
 
 // renderValue is the short form a user reads: strings quoted so they can see the

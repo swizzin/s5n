@@ -49,6 +49,45 @@ func TestDiff(t *testing.T) {
 	}
 }
 
+// TestFormatChangesNeverPrintsASecret is the one thing a confirmation prompt
+// may not do: a change under secrets. is shown as a change, and its value is
+// not on screen. The prompt is read by whoever runs the box and is kept in the
+// run log, so a value here would be a credential in a file.
+func TestFormatChangesNeverPrintsASecret(t *testing.T) {
+	before := map[string]any{
+		"secrets": map[string]any{
+			"plexClaimToken": "old-claim-token",
+			"plexToken":      "unchanged-but-still-secret",
+			"goneToken":      "a-token-being-removed",
+		},
+	}
+	after := map[string]any{
+		"secrets": map[string]any{
+			"plexClaimToken": "new-claim-token",
+			"plexToken":      "unchanged-but-still-secret",
+			"freshToken":     "a-token-being-added",
+		},
+	}
+	got := FormatChanges(Diff(before, after))
+	for _, leaked := range []string{
+		"old-claim-token", "new-claim-token", "a-token-being-removed",
+		"a-token-being-added", "unchanged-but-still-secret",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("the diff printed a secret value %q:\n%s", leaked, got)
+		}
+	}
+	for _, want := range []string{
+		"+ secrets.freshToken: (secret)",
+		"- secrets.goneToken: (secret)",
+		"~ secrets.plexClaimToken: (secret changed)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("diff %q does not carry %q:\n%s", got, want, got)
+		}
+	}
+}
+
 func TestDiffOfIdenticalDocumentsIsEmpty(t *testing.T) {
 	a := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"enabled": true}}, "n": 1}
 	if got := Diff(a, cloneMap(a)); len(got) != 0 {
