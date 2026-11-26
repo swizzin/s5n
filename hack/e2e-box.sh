@@ -2385,8 +2385,9 @@ EOF
   # the redirect and the challenge path are the proof of which route wins.
   cert=s5n-tls-box-example-test
   # The run's hosts are one row: the issuer they share, how many names it is
-  # for, and the reason. Four identical rows were one fact printed four times.
-  grep -qE "^· certificates +Let's Encrypt for 4 hosts · tls\.issuer=letsencrypt forces Let's Encrypt$" "$WORK/bootstrap1.txt" ||
+  # for, and the reason. The same fact printed once per name was four rows of
+  # noise; it is five now that Jellyfin has a host of its own.
+  grep -qE "^· certificates +Let's Encrypt for 5 hosts · tls\.issuer=letsencrypt forces Let's Encrypt$" "$WORK/bootstrap1.txt" ||
     { echo "init did not say the issuer was forced:";
       grep -E "Let's Encrypt" "$WORK/bootstrap1.txt" | head -3; fail=1; }
   grep -qE "^  ✓ ${DOMAIN} +https \\(Let's Encrypt\\)" "$WORK/bootstrap1.txt" ||
@@ -3108,10 +3109,26 @@ except Exception: print("")' || true
   # never serves there (a fresh server answers it anonymously) -- and the
   # receipt is the Job's own record of the same work. The kind e2e reads the API
   # on the pod's port, where the box's key belongs.
-  for lib in sonarr radarr lidarr; do
-    grep -q "jellyfin/library/${lib}" "$WORK/bootstrap1.txt" ||
-      { echo "the receipt has no jellyfin/library/${lib} row: the Job built no library for it"; fail=1; }
-  done
+  jf_status=$($K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.status\.json}' 2>/dev/null || true)
+  echo "$jf_status" >"$WORK/jf-status.json"
+  if python3 - "$WORK/jf-status.json" <<'PYLIBS'
+import json, sys
+try:
+    steps = json.load(open(sys.argv[1])).get("steps") or []
+except Exception as exc:
+    print("  the Job published no receipt to read: %s" % exc)
+    sys.exit(1)
+byName = {s.get("name"): s for s in steps}
+missing = [n for n in ("sonarr", "radarr", "lidarr") when byName.get("jellyfin/library/" + n, {}).get("result") != "ok"]
+if missing:
+    print("  the receipt has no ok row for %s: the Job built no library for them" % ", ".join(missing))
+    sys.exit(1)
+PYLIBS
+  then
+    :
+  else
+    fail=1
+  fi
   jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
   grep -q '"AppName":"s5n"' "$WORK/jf-keys.json" ||
     { echo "the Job minted no API key named s5n"; fail=1; }
@@ -5387,9 +5404,9 @@ EOF
   else
     cat "$WORK/bootstrap3.txt"; fail=1
   fi
-  # One row for the names the move is about: all four answer the same address
+  # One row for the names the move is about: all five answer the same address
   # now, so the decision is one fact and its size.
-  grep -qE "^· certificates +Let's Encrypt for 4 hosts · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
+  grep -qE "^· certificates +Let's Encrypt for 5 hosts · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
     { echo "init did not move the box's names to Let's Encrypt";
       grep -E "^· (certificates|[a-z.]+ +Let's)" "$WORK/bootstrap3.txt" | head -3; fail=1; }
   if grep -qE "add a DNS record for" "$WORK/bootstrap3.txt"; then
