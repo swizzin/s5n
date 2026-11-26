@@ -1,33 +1,22 @@
-{{- /*
-Default-deny inside the release, then only the flows the stack needs:
-  gateway -> every app http
-  an app's callers -> that app http, from the catalog's inverted `calls`
-  internet -> qbittorrent peer port
-  all -> DNS; all -> public internet (indexers, metadata); all -> pods of this release
-Egress to other in-cluster namespaces and RFC1918 ranges is denied except DNS, but is
-unrestricted *within* the release (the blanket podSelector rule below). So ingress is
-the only side that decides an app-to-app call: a caller's egress needs no rule of its
-own, and the callee's ingress is the whole gate. That makes catalog.yaml's `calls` --
-per app, the in-release apps it dials -- the one statement of the release's internals;
-each app's ingress is that list inverted over the enabled apps, and no template names a
-peer. An app that is switched off admits nothing and is admitted by nothing.
+{{- /* Default-deny inside the release, then only the flows the stack needs: the Gateway to
+       every app's http, an app's callers to that app, the internet to qBittorrent's peer
+       port, and DNS, the public internet and this release's own pods for everyone.
 
-A rehearsal box (`.Values.rehearsal`, which box sets in the grant and no file may set)
-keeps every rule below except the public-internet ipBlocks: DNS and this release's own
-pods are the only egress. That is what lets a copy of a live seedbox's configs run
-beside the live box without announcing to trackers, joining IRC, querying indexers with
-its keys or reaching plex.tv. It cannot stop what a policy someone else adds to the
-namespace admits, and it cannot stop a CNI that does not enforce egress at all; that is
-why `box migrate apply` proves the lock from inside the namespace before any app starts.
-The wiring Job's API-server rule and an OIDC app's route to the box's own Gateway proxy
-are kept: both are this cluster, not the internet.
-*/ -}}
+       Egress is wide open *within* the release, so ingress is the only side that decides an
+       app-to-app call: catalog.yaml's `calls` is the one statement of the release's internals,
+       each app's ingress is that list inverted, and no template names a peer.
+
+       A rehearsal box (.Values.rehearsal, which box sets and no file may) keeps every rule
+       except the public-internet ipBlocks, so a copy of a live box's configs cannot announce
+       to trackers, join IRC or reach plex.tv. It cannot stop a policy someone else adds, or a
+       CNI that does not enforce egress, which is why `box migrate apply` proves the lock from
+       inside the namespace first. The wiring Job's API-server rule and an OIDC app's route to
+       the Gateway are kept: both are this cluster. */}}
 {{- if or .Values.rehearsal .Values.networkPolicy.enabled }}
 {{- $root := . }}
-{{- /* The catalog's entries and the apps this release switched on: the two halves
-of every ingress peer list below. The catalog ships inside the chart and values
-cannot override it (internal/catalog refuses a manifest that disagrees with
-values.yaml), so this is the same list box validates. */}}
+{{- /* The catalog's entries and the apps this release switched on: the two halves of every
+       ingress peer list below. values cannot override the catalog (internal/catalog refuses a
+       manifest that disagrees with values.yaml), so this is the list box validates. */}}
 {{- $catalogApps := (.Files.Get "catalog.yaml" | fromYaml).apps | default dict }}
 {{- $enabledApps := dict }}
 {{- range $app, $cfg := .Values.apps }}
@@ -79,21 +68,16 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.wiring.enabled }}
-{{- /*
-The wiring Job's only extra flow: the API server, to publish its receipt.
+{{- /* The wiring Job's only extra flow: the API server, to publish its receipt.
 
-NetworkPolicies are evaluated after kube-proxy has DNAT'd a Service, so the address
-that matters is the API server's endpoint, not the `kubernetes` Service IP — and the
-port is the endpoint's (6443 on k0s, k3s and kind; 443 where the API is fronted by a
-load balancer). Both are looked up at install time, with values.apiServerCIDRs as the
-fallback for offline rendering.
+       NetworkPolicies are evaluated after kube-proxy has DNAT'd a Service, so the address that
+       matters is the endpoint's, not the `kubernetes` Service IP -- and its port (6443 on
+       k0s, k3s and kind; 443 behind a load balancer). Both are looked up at install time, with
+       values.apiServerCIDRs as the fallback for offline rendering.
 
-The endpoint addresses come from the `kubernetes` Service's EndpointSlices, not its
-v1 Endpoints: Endpoints is deprecated in favour of discovery.k8s.io/v1, and reading
-the old kind makes client-go warn on every install. A slice belongs to a Service
-through its kubernetes.io/service-name label, and its addresses are IPv4 (/32) or
-IPv6 (/128), so the suffix follows the address's family.
-*/ -}}
+       The addresses come from EndpointSlices, not v1 Endpoints: Endpoints is deprecated and
+       reading it makes client-go warn on every install. A slice belongs to a Service through
+       its kubernetes.io/service-name label, and its addresses are IPv4 (/32) or IPv6 (/128). */}}
 {{- $api := list }}
 {{- with (lookup "v1" "Service" "default" "kubernetes") }}
 {{- range (.spec.clusterIPs | default list) }}{{ $api = append $api (printf "%s/32" .) }}{{ end }}
@@ -146,16 +130,14 @@ spec:
 {{- end }}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $ctx := dict "root" $root "inst" $inst }}
-{{- /* An app that signs in through the login's OIDC provider (catalog.yaml's
-`oidc: true`, read through s5n.oidc) dials the issuer itself, over the box's name. That name is a
-hostAliases entry pointing at the Gateway's proxy Service, so the connection
-leaves this pod for a proxy pod in another namespace -- which the release's own
-egress policy denies, along with every RFC1918 range. One rule admits it.
+{{- /* An app that signs in through the login's OIDC provider (catalog.yaml's `oidc: true`)
+       dials the issuer over the box's name, a hostAliases entry pointing at the Gateway's
+       proxy in another namespace -- which the release's egress policy denies along with every
+       RFC1918 range. One rule admits it.
 
-The port is 10443, not 443: NetworkPolicy matches the post-DNAT container port,
-and Envoy Gateway shifts a privileged Service port into an ephemeral one inside
-the pod (its Service is 443 -> 10443). A rule naming 443 silently drops --
-measured, and the reason this comment exists. */}}
+       The port is 10443, not 443: NetworkPolicy matches the post-DNAT container port, and
+       Envoy Gateway shifts a privileged Service port into an ephemeral one inside the pod. A
+       rule naming 443 silently drops. */}}
 {{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") }}
 {{- if $oidc }}
 ---
@@ -184,10 +166,9 @@ spec:
         {{- end }}
       ports:
         - { port: 10443, protocol: TCP }
-    {{- /* A host-networked proxy is reached at its node address over the
-    Gateway's own port: there is no pod to select and no port shift to
-    compensate for. Envoy Gateway is never that, but a hand-written gatewayFrom
-    may be. */}}
+    {{- /* A host-networked proxy is reached at its node address over the Gateway's own port: no
+           pod to select and no port shift. Envoy Gateway is never that, but a hand-written
+           gatewayFrom may be. */}}
     {{- $blocks := list }}
     {{- range $peer := $root.Values.networkPolicy.gatewayFrom }}
     {{- if hasKey $peer "ipBlock" }}{{ $blocks = append $blocks $peer }}{{ end }}
@@ -216,21 +197,12 @@ spec:
         {{- with $root.Values.networkPolicy.extraHttpFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- /*
-        Who may call this app: every enabled app whose catalog entry lists it.
-        Inverting the catalog's list is the point, not a convenience. Egress
-        inside the release is wide open (the blanket podSelector rule below), so
-        an ingress list is the only thing that can refuse a call, and one that
-        was written by hand and forgot a caller dropped that caller's requests
-        silently. One list, inverted, cannot disagree with itself: an app that
-        dials a peer says so in the catalog, and the peer's ingress follows from
-        the same sentence.
+        {{- /* Who may call this app: every enabled app whose catalog entry lists it. Inverting the
+               catalog's list is the point: an ingress list is the only thing that can refuse a call,
+               and one written by hand that forgot a caller dropped its requests silently.
 
-        Admitting a caller is not authorization: the app's own credentials are
-        (an Arr's API key, Plex's own token). Only enabled apps are read here,
-        so an app that is switched off admits nothing and is admitted by
-        nothing.
-        */}}
+               Admitting a caller is not authorization -- the app's own credentials are -- and only
+               enabled apps are read, so a switched-off app admits nothing and is admitted by nothing. */}}
         {{- range $caller, $on := $enabledApps }}
         {{- $entry := get $catalogApps $caller | default dict }}
         {{- if has $inst.app ($entry.calls | default list) }}

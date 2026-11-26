@@ -1,7 +1,5 @@
-{{- /*
-One StatefulSet + Service (+ HTTPRoute) per instance. Per-app differences are data in
-values.yaml; this template is the only place a pod spec is written.
-*/ -}}
+{{- /* One StatefulSet + Service (+ HTTPRoute) per instance. Per-app differences are data in
+       values.yaml; this template is the only place a pod spec is written. */}}
 {{- include "s5n.authEdge" . -}}
 {{- include "s5n.claimsExist" . -}}
 {{- $root := . -}}
@@ -13,23 +11,14 @@ values.yaml; this template is the only place a pod spec is written.
 {{- $ctx := dict "root" $root "inst" $inst }}
 {{- $urlBase := printf "/%s" $inst.name }}
 {{- $exposure := include "s5n.exposure" (dict "root" $root "app" $inst.app) | trim }}
-{{- /* An app that signs in through the login's OIDC provider. The catalog says which
-apps do (`oidc: true`) -- the same flag box reads to register the client -- so this
-is the chart's half of one decision, and the two can never name different apps.
+{{- /* An app that signs in through the login's OIDC provider: the catalog's `oidc: true`,
+       the same flag box reads to register the client.
 
-auth.oidc.gatewayIP is the switch, not the app's name: box writes it at init from
-the Gateway's proxy Service, and it is the one thing an OIDC app cannot do
-without -- its issuer is the box's own HTTPS URL, so without the address the pod
-cannot reach the login, and an app whose only login is the provider has no way
-in at all. (Since qui v1.36.0 it does not refuse to start over it: discovery is
-per request, so the pod is Ready and its page can only say the provider is
-unavailable -- with its built-in login switched off, that is a page nobody can
-sign in to. autobrr retries in the background for a few minutes and then does
-the same.) A plain `helm install` (and a box whose grant predates the provider)
-has no such value, and gets the app's previous configuration: no login in the
-app, the edge's login in front. That is why this is not `oidc: true` alone --
-that would leave every helm-only install of the catalog file with an app that
-starts and cannot be signed in to. */}}
+       auth.oidc.gatewayIP is the switch, not the app's name: box writes it at init from the
+       Gateway's proxy Service, and an OIDC app cannot reach its issuer (the box's own HTTPS
+       URL) without it -- and one whose own login is off then has no way in at all. A plain
+       helm install has no such value and gets the app's previous shape, no login in the app
+       and the edge's in front; which is why this is not `oidc: true` alone. */}}
 {{- $oidcIP := "" }}
 {{- with $root.Values.auth }}
 {{- with .oidc }}
@@ -39,28 +28,16 @@ starts and cannot be signed in to. */}}
 {{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") (ne $oidcIP "") }}
 {{- $appHost := "" }}
 {{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
-{{- /* The peer port qBittorrent's Service and container take. The chart ships no
-default for it: a fixed number in the upper band of the NodePort range is one the
-API server can hand to another Service first (a LoadBalancer's, one per
-listener), and then every install of this seedbox is refused. box picks a free
-one from the lower band and records it in the grant; a helm install must choose
-its own. */}}
+{{- /* The peer port qBittorrent's Service and container take. The chart ships no default: a
+       fixed number in the upper NodePort band is one the API server may hand to another
+       Service first. box picks a free one from the lower band and records it in the grant. */}}
 {{- $torrentPort := "" }}
 {{- if eq $inst.app "qbittorrent" }}
 {{- $torrentPort = required "apps.qbittorrent.torrent.port: set the peer port peers reach this box on (box records one at init, from the lower band of the NodePort range, 30000-30085 by default)" (($cfg.torrent | default dict).port) }}
 {{- end }}
-{{- /* FileBrowser Quantum's whole configuration is this file: it reads
-       config.yaml at start and never writes it back (every setting its UI
-       changes is a row in the database), so a ConfigMap is the config, and the
-       app owns no init container. It is mounted at the app's own config path so
-       a migrated source's copy is what the mount hides, and the app never reads
-       two files.
-
-       The one setting that cannot be in it is the OIDC client secret, which is
-       a Secret box wrote into this namespace: the app has no file spelling for
-       it, only FILEBROWSER_OIDC_CLIENT_SECRET in its environment, and the chart
-       hands it that the way PeerBanHelper gets its token. Everything else the
-       login needs is here, so one file says what this app's login is. */}}
+{{- /* FileBrowser Quantum's whole configuration is this file: it never writes it back (every
+       UI setting is a database row), mounted at the app's own config path so a migrated
+       copy is what the mount hides. Its OIDC client secret cannot live here; see env below. */}}
 {{- if eq $inst.app "filebrowser" }}
 ---
 apiVersion: v1
@@ -191,13 +168,9 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       {{- if $oidc }}
-      # The issuer is the URL the browser used -- https://<host>/auth -- and the
-      # app dials it itself, so the name has to resolve and the certificate has
-      # to verify. It resolves to the Gateway's proxy, which is the only thing
-      # that answers for that name; box reads the address from the cluster and
-      # writes it into the grant, because a user's apply may not read the
-      # Gateway's namespace. A grant from before the provider has none, and the
-      # pod then starts without this: the next root run fills it in.
+      {{- /* The issuer is https://<host>/auth and the app dials it itself, so the name must resolve
+             to the Gateway's proxy and the certificate verify. box reads that address from the
+             cluster and writes it into the grant, because a user's apply may not read the Gateway. */}}
       hostAliases:
         - ip: {{ $oidcIP | quote }}
           hostnames:
@@ -209,14 +182,10 @@ spec:
       {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
         {{- if $root.Values.rehearsal }}
-        # A rehearsal box's app starts only once its own pod's egress is closed.
-        # A CNI programs a new pod's NetworkPolicy a moment after the pod
-        # starts, and an app that dials out in that moment (an announce, an IRC
-        # join, plex.tv) would reach the internet as the live box. This runs
-        # first, in the app's own network namespace, and waits until an address
-        # the lock denies stops answering; it fails -- and the app never starts
-        # -- if that does not happen. box proved the lock with the same address
-        # before switching any app on, and records it in the grant.
+        {{- /* A rehearsal box's app starts only once its own pod's egress is closed: a CNI programs
+               the NetworkPolicy a moment after the pod starts, and an app that dials out in that
+               moment (an announce, an IRC join, plex.tv) would reach the internet as the live box.
+               box proved the lock with the same address and records it in the grant. */}}
         - name: rehearsal-gate
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
@@ -231,36 +200,18 @@ spec:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
         {{- end }}
         {{- if $credentialInit }}
-        # qBittorrent and Tautulli generate their own WebUI/API credential on first
-        # start, and qui and autobrr hand out an API key only to a signed-in
-        # session: none of the four can be given credentials from the environment.
-        # Each gets an init container that seals a known value into its own config
-        # or user table first -- one that runs before the app, on the app's own
-        # config subPath, so the file it edits is the file the app reads.
+        {{- /* qBittorrent and Tautulli generate their own WebUI/API credential on first start, and
+               qui and autobrr hand out a key only to a signed-in session: none can be given
+               credentials from the environment, so each gets an init container that seals a known
+               value into its own config or user table first, on the app's own config subPath. */}}
         {{- if eq $inst.app "sabnzbd" }}
-        # SABnzbd needs two things before it reads its own settings, and the
-        # image's own entrypoint does the first half of the work: it copies
-        # /defaults/sabnzbd.ini to /config on a first start and rewrites
-        # api_key, nzb_key and host_whitelist from SABNZBD__* on every start.
-        # Three settings cannot be expressed that way, and each one is a 403 or
-        # a copy instead of a hardlink if it is wrong:
-        #
-        #   url_base           read when the web app is mounted, so the API
-        #                      lives under the prefix a running process never
-        #                      changes;
-        #   complete_dir       the image's default is Downloads/complete,
-        #   download_dir       relative to /config, so an Arr's import could
-        #                      never be hardlinked from /data;
-        #   verify_xff_header  the Gateway sends X-Forwarded-For carrying the
-        #                      person's real address, and SAB classifies that as
-        #                      external and answers 403 to the UI and most of
-        #                      the API. Off means it trusts the only thing in
-        #                      front of it, which is the Gateway's proxy.
-        #
-        # The first container is the app's own image because only it has the
-        # defaults file; it writes nothing when one exists. The second is the
-        # s5n image, which seals the keys by line (internal/sabconf) and writes
-        # nothing when the file already says what the chart wants.
+        {{- /* SABnzbd's image copies /defaults/sabnzbd.ini into /config and rewrites api_key,
+               nzb_key and host_whitelist from SABNZBD__* on every start. Three settings cannot be
+               expressed that way, and each one is a 403 or a copy instead of a hardlink: url_base
+               (the route's prefix, read when the web app is mounted), complete_dir/download_dir
+               (the image's default is under /config, which no Arr could hardlink from /data), and
+               verify_xff_header (on, the Gateway's X-Forwarded-For classifies the person as external
+               and the UI answers 403). internal/sabconf seals them by line, writing only on a change. */}}
         - name: defaults
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -323,9 +274,8 @@ spec:
             - tautulli-config
             - --conf=/config/config.ini
             - --api-key-file=/etc/s5n/keys/tautulli-apikey
-            # The prefix the route keeps. The app builds its redirects from it,
-            # so the value and the route have to be one decision: rewritePath is
-            # false for this app in values.yaml.
+            {{- /* The prefix the route keeps: the app builds its redirects from it, so the value and the
+                   route are one decision (rewritePath is false for this app in values.yaml). */}}
             - --http-root={{ $urlBase }}
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
@@ -337,15 +287,9 @@ spec:
               mountPath: /etc/s5n/keys
               readOnly: true
         {{- else if eq $inst.app "bazarr" }}
-        # Bazarr, the fifth app with this arrangement, generates the key its own
-        # API answers to and reads its URL prefix at import time, so both are
-        # sealed into its own settings file before it reads it. Neither can be set through the API: general.base_url
-        # is read when the app registers its blueprints, so the API itself lives
-        # under the prefix a running process never changes, and the key is what a
-        # request would have to present to change anything at all. The app
-        # rewrites the file whole from memory on every start and every settings
-        # save, so this runs before each one and writes only if a value differs
-        # (internal/bazconf).
+        {{- /* Bazarr mints its own API key and reads its base_url when it registers its blueprints,
+               so both are sealed into its settings file before it reads it. It rewrites that file
+               from memory on every start and save, so this runs before each one (internal/bazconf). */}}
         - name: config
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
@@ -364,16 +308,10 @@ spec:
               mountPath: /etc/s5n/keys
               readOnly: true
         {{- else if eq $inst.app "qui" }}
-        # qui's user table is the only way to an API key: it mints one only for
-        # a signed-in session, so an unattended install needs an account it owns
-        # (docs/box.md, "An app that keeps its own user table has one account box
-        # owns"). Created when it is missing, and set to the release Secret's
-        # password on every start, which is also what puts back a password
-        # changed inside the running app; until the pod restarts the wiring Job
-        # reports that mismatch instead of a generic HTTP error. The password
-        # is read from the mounted key and piped in: a flag would put it in the
-        # pod spec, readable by anything that may describe the pod. A second run
-        # answers "User account already exists" and exits 0.
+        {{- /* qui mints an API key only for a signed-in session, so an unattended install needs an
+               account it owns (docs/box.md). Created when missing and set to the Secret's password
+               on every start, which also puts back one changed inside the running app. The password
+               is piped in from the mounted key: a flag would put it in the pod spec. */}}
         - name: account
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -396,11 +334,8 @@ spec:
             - name: tmp
               mountPath: /tmp
         {{- else if eq $inst.app "autobrr" }}
-        # autobrr's account, the same arrangement as qui's with one difference:
-        # its create-user exits 1 on a second run instead of answering 0, so the
-        # one sentence "only 1 user account is supported" is what counts as done.
-        # Matching that message (never `|| true`) keeps a real failure -- an
-        # unwritable database, a wrong image -- a failed pod.
+        {{- /* autobrr's account, as qui's, except its create-user exits 1 on a second run: the one
+               sentence "only 1 user account is supported" is what counts as done, never `|| true`. */}}
         - name: account
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -437,47 +372,15 @@ spec:
             - name: tmp
               mountPath: /tmp
         {{- else if eq $inst.app "jellyfin" }}
-        # The first-run wizard, closed before the server the Gateway reaches
-        # ever starts.
-        #
-        # Until its wizard is complete Jellyfin's StartupController answers
-        # *anyone* -- its policy is FirstTimeSetupOrElevated, and that handler
-        # succeeds for every request while IsStartupWizardCompleted is false
-        # (Jellyfin.Api/Auth/FirstTimeSetupPolicy/FirstTimeSetupHandler.cs at
-        # v12.4). The window is not only /Startup: EnvironmentController (the
-        # filesystem browser), SystemController.GetSystemInfo and
-        # LocalizationController carry the same policy. POST /Startup/User is
-        # where the first user -- the server's administrator -- is named and
-        # passworded, so whoever reached a fresh server first would own it.
-        #
-        # A route rule at the edge is the wrong place to close it: Gateway API
-        # path matching is case-sensitive and ASP.NET's routing is not, so
-        # /startup/user reaches the same endpoint, and an administrator would
-        # lose /Library/VirtualFolders and /Environment for ever. So the chart
-        # closes it inside the pod instead: this container runs the app's own
-        # image against the same /config before the app container starts, waits
-        # for the server it started, completes the wizard, stops that server
-        # with SIGTERM and waits for it (so jellyfin.db and its WAL are
-        # flushed), and exits. A pod does not become Ready while an init
-        # container runs, so the Service has no endpoint and the Gateway has
-        # nowhere to send a request: there is no moment a server answers the
-        # outside with the wizard open. The server this container starts binds
-        # 127.0.0.1 only, from network.xml's LocalNetworkAddresses
-        # (MediaBrowser.Common/Net/NetworkConfiguration.cs, read at startup by
-        # Jellyfin.Networking.Manager.NetworkManager), so even the pod network
-        # cannot reach it.
-        #
-        # It leaves that 127.0.0.1 in the file on purpose: the next container in
-        # this pod start, network-config, owns the bind address and puts it back
-        # on every start. A restore here could not be trusted -- a trap does not
-        # run on SIGKILL (an OOM kill, an eviction, a reboot, a pod deleted past
-        # its grace period) -- and it would throw away what this server's own
-        # /Startup/RemoteAccess save wrote to the file.
-        #
-        # The person's password is the release Secret's jellyfin-user-password,
-        # mounted here and nowhere else in this pod. A server whose
-        # system.xml already says the wizard is done (a migrated box, a
-        # restart) exits at once without starting anything.
+        {{- /* The first-run wizard, closed before the server the Gateway reaches ever starts. Until
+               it completes, Jellyfin's StartupController answers anyone
+               (FirstTimeSetupPolicy/FirstTimeSetupHandler.cs at v12.4) and POST /Startup/User names
+               the administrator. A route rule cannot close it: Gateway API matching is
+               case-sensitive and ASP.NET's routing is not. So the app's own image runs against the
+               same /config first, bound to 127.0.0.1, completes the wizard and stops that server with
+               SIGTERM so jellyfin.db and its WAL are flushed. A pod is not Ready while an init
+               container runs, so nothing outside ever reaches an open wizard. network-config below
+               clears the loopback on every start, because a trap does not run on SIGKILL. */}}
         - name: startup-wizard
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -611,35 +514,12 @@ spec:
             - name: keys
               mountPath: /etc/s5n/keys
               readOnly: true
-        # network.xml's two settings, on every start, after the wizard and
-        # before the app.
-        #
-        # LocalNetworkAddresses is the interfaces Jellyfin binds, and empty means
-        # every interface the pod has (MediaBrowser.Common/Net/NetworkConfiguration.cs
-        # at v12.4: "the interface addresses which Jellyfin will bind to. If
-        # empty, all interfaces will be used"; NetworkManager.GetAllBindInterfaces
-        # is what Kestrel is built from). Empty is the only value this chart can
-        # stand behind: inside a pod, Jellyfin on 127.0.0.1 is a server nothing
-        # outside its own pod can reach, and the NetworkPolicy -- not the bind
-        # address -- is the gate. So this container runs on every start, with or
-        # without a proxy list, and always writes that element empty. That is what
-        # makes the startup-wizard's loopback value safe to leave behind: nothing
-        # is restored from a backup (a trap does not run on SIGKILL, and a
-        # restored file is one Jellyfin's own save then contradicts), the file is
-        # simply put right before the app reads it. A server whose system.xml says
-        # the wizard is complete skips the wizard entirely, which is exactly the
-        # start this container is what makes reachable.
-        #
-        # KnownProxies is written even when the box names none. With it empty
-        # Jellyfin ignores X-Forwarded-For completely (ConfigureForwardHeaders),
-        # so a list an earlier values file had written must not survive in the
-        # app's own saves; a box with no list is a wiring receipt line, not a
-        # silent trust.
-        #
-        # Both are read at startup and the app rewrites the whole file when its
-        # own settings change, so this runs before every start and edits those two
-        # elements only; every other byte, Jellyfin's own writes included, is left
-        # alone (internal/jellyconf).
+        {{- /* network.xml's two settings, before every start. LocalNetworkAddresses empty means every
+               interface (NetworkConfiguration.cs at v12.4), the only value this chart can stand
+               behind: inside a pod, Jellyfin on 127.0.0.1 is unreachable even from its own pod, and
+               the NetworkPolicy is the gate. KnownProxies is written even when the box names none:
+               empty makes Jellyfin ignore X-Forwarded-For, and an earlier list must not survive in
+               the app's own saves. Every other byte is left alone (internal/jellyconf). */}}
         - name: network-config
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
@@ -656,44 +536,15 @@ spec:
               mountPath: /config
               subPath: {{ $inst.name }}
         {{- else if eq $inst.app "pbh" }}
-        # PeerBanHelper's config file, prepared before the app reads it. The
-        # token comes from the environment (PBH_APITOKEN), so the one thing this
-        # file has to say without a person is that this box did not ask for the
-        # app's anonymous usage statistics. Three steps, and the order is what
-        # makes a first start clean:
-        #
-        #   1. no file yet: write the one PBH itself writes on a first start, out
-        #      of the jar the image ships, so the app is configured exactly as it
-        #      would have configured itself and nothing here is a guess;
-        #   2. on every start: privacy.analytics false, the app's own switch for
-        #      Sentry, its event POSTs and the analytics script it injects into
-        #      its index page. A config that has no `privacy:` block at all --
-        #      one a PeerBanHelper older than its own migration 41 wrote, which
-        #      is exactly what a migrated box brings -- gets the block, so the
-        #      file says what this box decided rather than what the app defaults
-        #      to when the key is missing;
-        #   3. the image's own template, one key changed, where the app's config
-        #      migration reads it -- the paragraph after this list is why.
-        # Step 2 is not a one-off because PBH's config migrations rewrite blocks
-        # of this file as versions move, and one of them resets this key.
-        #
-        # Step 3 is that migration, made to keep this key. PBH's config update
-        # script 41 does `privacy.analytics = <the template in its own jar>`
-        # unconditionally (MainConfigUpdateScript.java at v9.5.4), and the jar's
-        # template says true: a config older than 41 -- anything a v7 or v8 wrote
-        # -- would have this box's false overwritten with true on the start that
-        # migrates it, and the app would then run one start with analytics on,
-        # before this container could put it back. Raising the config's
-        # `config-version` past 41 would skip that script, and eleven real config
-        # migrations with it (a proxy setting whose meaning changed, downloader
-        # ids, the ban-remapping block): not a trade this chart can make. So the
-        # key's only writer is given this box's answer instead: a copy of the
-        # image's own template, one value changed and every other byte the
-        # image's, appended to the JVM's boot class path. The class loader looks
-        # there before the jar, so every migration sees the same template with
-        # `analytics: false`, and nothing else in the file is ours. Copied out of
-        # the jar on every start, so an image bump carries its own template and
-        # this can never drift from it.
+        {{- /* PeerBanHelper's config file, prepared before the app reads it. The token comes from the
+               environment, so the one thing this file must say without a person is that this box
+               asked for no analytics. Step 2 runs on every start because PBH's own config migrations
+               rewrite blocks of the file as versions move. Step 3 is one of them: the script that
+               reaches config-version 41 sets privacy.analytics from the jar's template, which says
+               true (MainConfigUpdateScript.java at v9.5.4), so a v7 or v8 config would run one start
+               with analytics on -- and skipping past 41 would skip eleven real migrations. So a copy
+               of the image's own template, one value changed, goes on the boot class path, where
+               every migration reads this box's answer. */}}
         - name: config
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -769,9 +620,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "s5n.secretName" $root }}
                   key: {{ printf "%s-apikey" $inst.name }}
-            # External is the no-op scheme: the UI and /initialize.json are open,
-            # /api stays API-key-gated, and AuthenticationRequired does nothing.
-            # The login is in front of the release (auth.edge), not in the app.
+            {{- /* External is the no-op scheme: the UI and /initialize.json are open, /api stays
+                   API-key-gated. The login is at the edge (auth.edge), never in the app. */}}
             - name: {{ $cfg.envPrefix }}__AUTH__METHOD
               value: External
             {{- end }}
@@ -781,34 +631,28 @@ spec:
             - name: QBT_TORRENTING_PORT
               value: {{ $torrentPort | quote }}
             {{- else if eq $inst.app "bazarr" }}
-            # The image's own port variable, which its entrypoint passes to
-            # `bazarr.py --port` (apps/bazarr/entrypoint.sh in
-            # home-operations/containers): the CLI flag wins over the port in
-            # config/config.yaml, so the chart's port is the one it listens on.
+            {{- /* The image's own port variable, passed to `bazarr.py --port`
+                   (apps/bazarr/entrypoint.sh in home-operations/containers): the flag wins over the
+                   config file's port, so the chart's port is the one it listens on. */}}
             - name: BAZARR__PORT
               value: {{ $cfg.port | quote }}
             {{- else if eq $inst.app "sabnzbd" }}
-            # The image's own environment: its entrypoint passes the address and
-            # port to `--server` and rewrites the file's key lines from these.
+            {{- /* The image's own environment: its entrypoint passes the address and
+                   port to `--server` and rewrites the file's key lines from these. */}}
             - name: SABNZBD__PORT
               value: {{ $cfg.port | quote }}
-            # The key the init container sealed into sabnzbd.ini, re-applied by
-            # the image's own entrypoint on every start, so a file an older
-            # image wrote is the release Secret's key too.
+            {{- /* The key the init container sealed, re-applied by the entrypoint on every start, so a
+                   file an older image wrote is the release Secret's key too. */}}
             - name: SABNZBD__API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "s5n.secretName" $root }}
                   key: {{ printf "%s-apikey" $inst.name }}
             {{- with $root.Values.gateway.host }}
-            # The names a browser and the wiring Job use through the Gateway
-            # and the Service. SABnzbd's own DNS-rebinding guard refuses any
-            # Host that is not localhost, an IP literal, a *.local name or on
-            # this list -- and with its own login off that guard is always
-            # active (sabnzbd/interface.py:249-275 at 5.1.3). The entrypoint
-            # writes these beside the pod's hostname. The Service name is here
-            # because the Job dials http://<instance>:<port>, and a 403 there
-            # would look like a routing fault rather than a host check.
+            {{- /* SABnzbd's DNS-rebinding guard refuses any Host not on this list, and with its own login
+                   off the guard is always active (sabnzbd/interface.py:249-275 at 5.1.3). The Service
+                   name is here because the wiring Job dials http://<instance>:<port>, and a 403 there
+                   would look like a routing fault rather than a host check. */}}
             - name: SABNZBD__HOST_WHITELIST_ENTRIES
               value: {{ printf "%s, %s" $inst.name . | quote }}
             {{- else }}
@@ -816,9 +660,8 @@ spec:
               value: {{ $inst.name | quote }}
             {{- end }}
             {{- else if eq $inst.app "plex" }}
-            # Absent (optional secretKeyRef) when no claim token was supplied at
-            # install, or once it has already been consumed: the entrypoint only
-            # exchanges it for a server token when PlexOnlineToken is still empty.
+            {{- /* Absent when no claim token was supplied, or once it is consumed: the entrypoint only
+                   exchanges it for a server token while PlexOnlineToken is empty. */}}
             - name: PLEX_CLAIM_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -834,26 +677,18 @@ spec:
               value: 0.0.0.0
             - name: QUI__PORT
               value: {{ $cfg.port | quote }}
-            # qui's own baseUrl, not a stripped prefix: it builds its asset URLs
-            # under it, so the route keeps the path and rewritePath stays false.
+            {{- /* qui's own baseUrl, not a stripped prefix: it builds its asset URLs
+                   under it, so the route keeps the path and rewritePath stays false. */}}
             - name: QUI__BASE_URL
               value: {{ $urlBase | quote }}
             {{- if not $oidc }}
-            # qui's login is off, like the Arrs' External scheme: the login is at
-            # the edge (auth.edge), never in the app. The account the init
-            # container creates still exists -- unused while authentication is
-            # disabled, and the one a release that later gains the provider
-            # signs in with. Disabling it takes three
-            # settings (internal/domain/config.go at v1.35.0: IsAuthDisabled is
-            # AuthDisabled && IAcknowledgeThisIsABadIdea, and
-            # ValidateAuthDisabledConfig refuses to start without the allowlist).
-            # The allowlist is every address because it can only ever match the
-            # TCP peer: in front of this app that is the Gateway's proxy pod, not
-            # the browser, and NetworkPolicy already admits only the Gateway and
-            # this release. Plex's noAuthNetworks warning is the opposite case --
-            # Plex sits outside the edge, so a range trusted there would open the
-            # server itself to whoever reaches it. A pod that got past the
-            # NetworkPolicy would already be inside the release.
+            {{- /* qui's login is off, like the Arrs' External scheme: the login is the edge's. The
+                   account still exists, unused, and is the one a release that later gains the provider
+                   signs in with. Disabling it takes three settings (internal/domain/config.go at
+                   v1.35.0: IsAuthDisabled is AuthDisabled && IAcknowledgeThisIsABadIdea, and
+                   ValidateAuthDisabledConfig refuses to start without the allowlist). Every address is
+                   allowed because the TCP peer is the Gateway's proxy pod, not the browser, and the
+                   NetworkPolicy already admits only the Gateway and this release. */}}
             - name: QUI__AUTH_DISABLED
               value: "true"
             - name: QUI__I_ACKNOWLEDGE_THIS_IS_A_BAD_IDEA
@@ -862,85 +697,60 @@ spec:
               value: "0.0.0.0/0,::/0"
             {{- end }}
             {{- else if eq $inst.app "autobrr" }}
-            # autobrr reads every setting from its own name in caps
-            # (AUTOBRR__<SETTING>, internal/config/config.go's loadFromEnv at
-            # v1.90.0), and the image ships no config, so these are its whole
-            # first start. The listen address has to be every interface: its
-            # default is 127.0.0.1, which inside a pod is nobody but itself.
+            {{- /* autobrr reads every setting from its own name in caps (AUTOBRR__<SETTING>,
+                   internal/config/config.go's loadFromEnv at v1.90.0), and the image ships no config, so
+                   these are its whole first start. Its default 127.0.0.1 is nobody but the pod itself. */}}
             - name: AUTOBRR__HOST
               value: 0.0.0.0
             - name: AUTOBRR__PORT
               value: {{ $cfg.port | quote }}
-            # Its baseUrl, not a stripped prefix: it builds the UI's asset URLs
-            # under it, so the route keeps the path and rewritePath stays false.
-            # The trailing slash is required, not cosmetic: the server mounts
-            # its routers at the base URL's *string* plus the rest of the path
-            # -- `r.Mount(routeBaseURL, webRouter)` and
-            # `r.Mount(routeBaseURL+"api", apiRouter)` (internal/http/server.go:300-302
-            # at v1.90.0) -- so "/autobrr" puts the API at "/autobrrapi" and
-            # every /autobrr/api path answers 404, including the readiness probe.
+            {{- /* Its baseUrl, not a stripped prefix: it builds the UI's asset URLs under it, and the
+                   trailing slash is required, not cosmetic. It mounts at the base URL's *string* plus the
+                   rest of the path (`r.Mount(routeBaseURL, webRouter)`,
+                   `r.Mount(routeBaseURL+"api", apiRouter)`, internal/http/server.go:300-302 at v1.90.0),
+                   so "/autobrr" would put the API at "/autobrrapi" and answer 404 to everything. */}}
             - name: AUTOBRR__BASE_URL
               value: {{ printf "%s/" $urlBase | quote }}
-            # Legacy mode rewrites the UI's URLs for a proxy that strips the
-            # prefix. Nothing strips here, so the app writes them itself; the
-            # setting is what picks between the two (added upstream in v1.55.0).
+            {{- /* Legacy mode rewrites the UI's URLs for a proxy that strips the prefix; nothing strips
+                   here, so the app writes them itself. */}}
             - name: AUTOBRR__BASE_URL_MODE_LEGACY
               value: "false"
-            # Its own update check is a request to GitHub on every start, which
-            # is a phone-home nothing here asked for. The chart moves the image
-            # by digest and the box updates itself; the app never needs to know.
+            {{- /* Its own update check is a request to GitHub on every start, a phone-home nothing here
+                   asked for: the chart moves the image by digest and the box updates itself. */}}
             - name: AUTOBRR__CHECK_FOR_UPDATES
               value: "false"
             {{- with $root.Values.gateway.host }}
-            # The one origin its UI is reached at. The default is "*", which is
-            # every origin; the cookie is scoped to this host either way, and
-            # the docs ask for this once auth is anything but the app's own form.
+            {{- /* The one origin its UI is reached at. The default is "*", every origin, and the cookie
+                   is scoped to this host either way. */}}
             - name: AUTOBRR__CORS_ALLOWED_ORIGINS
               value: {{ printf "https://%s" . | quote }}
             {{- end }}
             {{- else if eq $inst.app "pbh" }}
-            # PeerBanHelper keeps its whole state under `data` in its working
-            # directory (/app/data), and that root is a Java system property
-            # rather than a setting: this points it at the one mount the chart
-            # gives it. The image's entrypoint is a plain `java ...` command
-            # (Dockerfile's ENTRYPOINT at v9.5.4), so nothing in it forwards the
-            # variable -- the JVM reads JAVA_TOOL_OPTIONS itself, which is what
-            # makes this the way in.
+            {{- /* PeerBanHelper keeps its whole state under `data` in its working directory (/app/data),
+                   and that root is a Java system property, not a setting: the image's entrypoint is a
+                   plain `java ...` (Dockerfile's ENTRYPOINT at v9.5.4), so JAVA_TOOL_OPTIONS is the way
+                   in. */}}
             - name: JAVA_TOOL_OPTIONS
               value: -Dpbh.datadir=/config -Xbootclasspath/a:/tmp/pbh-config
-            # Its WebUI token, from the release Secret. PBH reads it as
-            # `pbh.apiToken`, the switch that wins over config.yml's
-            # server.token (Main.setupHttpServer, ExternalSwitch.parse), so the
-            # app is given its token without anything writing to its config file
-            # and a first start has no OOBE wizard to complete. The variable
-            # name is the switch's own (ExternalSwitch spells a setting as its
-            # name upper-cased, dots and dashes to underscores).
+            {{- /* Its WebUI token, from the release Secret: PBH reads `pbh.apiToken` as the switch that
+                   wins over config.yml's server.token (Main.setupHttpServer, ExternalSwitch.parse), so
+                   the app is given its token without anything writing its config file. */}}
             - name: PBH_APITOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "s5n.secretName" $root }}
                   key: pbh-token
-            # One login, not two. PBH's WebUI cannot accept a token the edge
-            # supplies: its login handler reads the token from the request BODY
-            # (PBHAuthenticateController.handleLogin), which is what its page
-            # posts, so no header an HTTPRoute filter injects can answer the
-            # login -- and Envoy Gateway 1.9.3's route credentialInjection,
-            # which can read a Secret and set an Authorization header, cannot
-            # reach a JSON field. With this switch off no header is checked at
-            # all, so injecting one would add a Secret to every request's path
-            # for no change in who gets in. The app's own login is switched off
-            # and the edge's is the only one (the same arrangement as qui's,
-            # and Maintainerr has no login at all). The switch is the app's own:
-            # `pbh.web.requireLogin`, ExternalSwitch, read by Javalin's auth
-            # gate before the body when a request carries no valid token. The
-            # token above is still set, because an empty one sends PBH into
-            # OOBE instead of serving the API at all.
+            {{- /* One login, not two. PBH's login handler reads the token from the request BODY
+                   (PBHAuthenticateController.handleLogin), and Envoy Gateway 1.9.3's
+                   route credentialInjection cannot reach a JSON field, so injecting a header would add a
+                   Secret to every request for no change in who gets in. With this switch off no header is
+                   checked at all: the edge's login is the only one. The token above is still set, because
+                   an empty one sends PBH into OOBE instead of serving the API. */}}
             - name: PBH_WEB_REQUIRELOGIN
               value: "false"
             {{- else if eq $inst.app "filebrowser" }}
-            # The image's default path is under its home directory, which is on
-            # the read-only root filesystem. This is the file the ConfigMap
-            # above writes.
+            {{- /* The image's default path is under its home directory, which is on the read-only root
+                   filesystem. This is the file the ConfigMap above writes. */}}
             - name: FILEBROWSER_CONFIG
               value: /config/config.yaml
             {{- else if eq $inst.app "maintainerr" }}
@@ -948,41 +758,27 @@ spec:
               value: 0.0.0.0
             - name: UI_PORT
               value: {{ $cfg.port | quote }}
-            # Maintainerr applies its global prefix to every route, health and
-            # API included, so its own BASE_PATH does the work and the route
-            # keeps the prefix.
+            {{- /* Maintainerr applies its global prefix to every route, health and API included, so its
+                   own BASE_PATH does the work and the route keeps the prefix. */}}
             - name: BASE_PATH
               value: {{ $urlBase | quote }}
-            # One directory holds everything it writes: the SQLite database,
-            # logs, overlays and the UI bundle start.sh stages on every boot.
-            # DATA_DIR moves that directory, so /config (the subPath mount) is
-            # enough and no second mount branch is needed. The staged UI is why
-            # it has to be writable, not merely readable.
+            {{- /* One directory holds everything it writes -- the database, logs, overlays and the UI
+                   bundle start.sh stages on every boot -- and DATA_DIR moves it, so the /config subPath
+                   is enough. The staged UI is why it has to be writable, not merely readable. */}}
             - name: DATA_DIR
               value: /config
-            # A weekly usage report to the vendor is not a default anyone here
-            # chose. TELEMETRY=off is the app's own switch, and it wins over the
-            # in-app setting.
+            {{- /* A weekly usage report to the vendor is not a default anyone here chose: TELEMETRY=off
+                   is the app's own switch, and it wins over the in-app setting. */}}
             - name: TELEMETRY
               value: "off"
             {{- end }}
             {{- if $oidc }}
             {{- if eq $inst.app "filebrowser" }}
-            # The one setting its config.yaml cannot carry: the client secret.
-            # FileBrowser Quantum's only spelling for it that is not the file is
-            # this environment variable -- it has no _FILE variant, unlike qui
-            # and autobrr -- so the chart hands it the Secret through the
-            # environment, the way PeerBanHelper gets its token. Nothing else
-            # about the login is here: the issuer, the client id and the switch
-            # are the config.yaml above, which is where a reader looks for this
-            # app's configuration.
-            #
-            # It is also the app's startup dependency rather than a page-level
-            # one: at v2.1.0-stable a provider that will not answer at start is
-            # a fatal error (pkg/settings/config.go:568-571), so this pod is
-            # Ready only once the issuer is reachable with the box's own
-            # certificate -- which is why box's per-host step runs before the
-            # release moves.
+            {{- /* The one setting its config.yaml cannot carry: the client secret. FileBrowser Quantum
+                   has no _FILE spelling for it, unlike qui and autobrr, so the chart hands it the Secret
+                   through the environment. It is also why this pod is Ready only once the issuer is
+                   reachable with the box's certificate: at v2.1.0-stable a provider that will not answer
+                   is a fatal error (pkg/settings/config.go:568-571). */}}
             - name: FILEBROWSER_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -990,77 +786,32 @@ spec:
                   key: client-secret
             {{- else }}
             {{- $oidcPrefix := upper $inst.app }}
-            # This app signs in through the login's own OIDC provider, so its
-            # page offers a login after all -- one that resolves to the same
-            # person as the edge. That login is the person's: no account of
-            # theirs lives in the app, only the client id and the secret
-            # Authelia issued it.
-            #
-            # One account does live in the app: the automation account the
-            # chart owns (s5n.wiringAccount). qui and autobrr hand an API key
-            # only to a signed-in session, so an unattended install needs an
-            # account it controls -- the init container creates it and re-sets
-            # it to the release Secret's password on every start, and the wiring
-            # Job signs in with it to register the app's connections. It is not
-            # offered in the UI and is not a second way in for a person: what
-            # bounds it is the edge's login in front and the NetworkPolicy,
-            # which admits only the Gateway and the wiring Job to this port.
-            #
-            # The names are the app's own, and both clients that speak OIDC read
-            # them from their own name in caps: QUI__<NAME> at v1.35.0
-            # (internal/config/config.go:270-276, from internal/domain/config.go:79-84)
-            # and AUTOBRR__<NAME> at v1.90.0 (internal/config/config.go:409-432,
-            # from internal/domain/config.go:34-40). So the prefix is the
-            # catalog app's name uppercased, and an app that spells its settings
-            # differently is a chart change that says so -- one the e2e's login
-            # would catch, because a client that cannot read these does not sign
-            # anyone in.
-            #
-            # The secret is read from a file, never an env value: a pod's
-            # environment is readable by anything that may describe the pod.
-            # qui's bindOrReadFromFile is what makes the _FILE spelling mean
-            # that (config.go:1082-1102); autobrr's GetEnvStr looks for the _FILE
-            # name before the plain one, for every setting (config.go:452-468).
-            # (FileBrowser Quantum has no _FILE spelling, which is why it is the
-            # one client that gets its secret through the environment.)
-            #
-            # OIDC is the login the app's page offers. Neither app stops routing
-            # its own credential endpoints, and the account above is the only row
-            # either user table has: qui refuses /api/auth/setup once OIDC is on,
-            # so its row can only come from the CLI the init container runs, and
-            # autobrr's onboarding endpoint is refused as soon as that row exists
-            # (it was open only while the table was empty). What keeps those
-            # endpoints from anyone but this seedbox's user is the edge in front
-            # and the NetworkPolicy, not this flag; it is worth knowing before an
-            # OIDC app is ever served without one.
-            #
-            # autobrr 1.91 resolves its auth mode and capabilities in one place
-            # (internal/domain/config.go's AuthCapabilities at v1.91.1) and
-            # refuses the password login outright when the built-in login is
-            # switched off: POST /api/auth/login answers 403 "password login is
-            # unavailable in oidc authentication mode"
-            # (internal/http/auth.go:122-126). Until 1.90 the switch only hid the
-            # form in the UI, so the wiring Job's account could still sign in;
-            # from 1.91 that account has no way in at all and no downloader is
-            # ever registered. So the built-in login STAYS ON for autobrr -- the
-            # account remains the wiring Job's, past the edge and the
-            # NetworkPolicy -- and its own 1.91 setting, automatic OIDC login
-            # (OIDCAutoRedirect, the login page sends the browser to the provider
-            # itself), is what keeps the form from being offered. qui answers a
-            # password login in its own code and needs neither.
-            #
-            # What an unreachable issuer costs does not differ: neither client
-            # refuses to start over it. qui v1.36.1 discovers the provider on
-            # demand (internal/api/handlers/oidc.go:87-113 and 209 at v1.36.1),
-            # so the pod is Ready and its page offers only the
-            # provider-unavailable line; autobrr starts and retries discovery
-            # for about four minutes (internal/auth/oidc.go:78-96 and 156-167
-            # at v1.90.0). Ready therefore proves nothing about the issuer for
-            # either one, and the e2e's sign-in is the proof for both. Before
-            # qui v1.36.0 the discovery happened at startup and qui would not
-            # start without it; the switch at the top of this file is unchanged
-            # by that, because an app whose only login is the provider still
-            # cannot be signed in to without the address.
+            {{- /* This app signs in through the login's own OIDC provider, so its page offers a login
+                   after all, and it is the person's: no account of theirs lives in the app, only the
+                   client id and the secret Authelia issued it.
+
+                   One account does live in the app, the automation account the chart owns
+                   (s5n.wiringAccount): qui and autobrr hand an API key only to a signed-in session, so an
+                   unattended install needs one it controls, and the wiring Job signs in with it. It is
+                   not a second way in for a person: the edge's login and the NetworkPolicy bound it.
+
+                   The names are the app's own, read from its name in caps: QUI__<NAME> at v1.35.0
+                   (internal/config/config.go:270-276, from internal/domain/config.go:79-84) and
+                   AUTOBRR__<NAME> at v1.90.0 (internal/config/config.go:409-432). An app that spells
+                   them differently is a chart change the e2e's sign-in would catch. The secret is read
+                   from a file, never an env value, because a pod's environment is readable by anything
+                   that may describe the pod (qui's bindOrReadFromFile, config.go:1082-1102; autobrr's
+                   GetEnvStr, config.go:452-468).
+
+                   autobrr 1.91 refuses the password login outright when the built-in login is off (403,
+                   "password login is unavailable in oidc authentication mode",
+                   internal/http/auth.go:122-126 at v1.91.1), and then the wiring Job's account has no way
+                   in and no downloader is ever registered. So its built-in login stays on, and
+                   OIDCAutoRedirect is what keeps the form from being offered; qui answers a password
+                   login in its own code and needs neither. An unreachable issuer costs neither a start:
+                   qui discovers on demand (internal/api/handlers/oidc.go:87-113 at v1.36.1) and autobrr
+                   retries for about four minutes (internal/auth/oidc.go:78-96 at v1.90.0), so Ready
+                   proves nothing about the issuer and the e2e's sign-in is the proof for both. */}}
             - name: {{ $oidcPrefix }}__OIDC_ENABLED
               value: "true"
             - name: {{ $oidcPrefix }}__OIDC_ISSUER
@@ -1081,14 +832,10 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
-            # The anchor, when the box's certificate is not publicly trusted:
-            # the login's own root, which box copies into a ConfigMap in this
-            # namespace. SSL_CERT_DIR adds a directory to Go's system pool;
-            # SSL_CERT_FILE would replace the bundle, and then every public
-            # indexer this app talks to would fail its own TLS.
-            #
-            # The ConfigMap is optional because a Let's Encrypt box has none:
-            # the image's bundle already trusts the issuer's chain.
+            {{- /* The anchor, when the box's certificate is not publicly trusted: the login's own root,
+                   which box copies into a ConfigMap here. SSL_CERT_DIR adds a directory to Go's system
+                   pool; SSL_CERT_FILE would replace the bundle, and every public indexer would then fail
+                   its own TLS. The ConfigMap is optional because a Let's Encrypt box has none. */}}
             - name: SSL_CERT_DIR
               value: /etc/s5n-host-ca
             {{- end }}
@@ -1107,10 +854,9 @@ spec:
               containerPort: {{ $torrentPort }}
               protocol: UDP
             {{- end }}
-          # Thirty minutes to open the port, for every app. An app migrates its
-          # database before it listens, and a migration that outlasted the probe
-          # would be restarted mid-way and read as a crashloop by box update's
-          # gate. A crash still shows at once: the container exits on its own.
+          {{- /* Thirty minutes to open the port, for every app: an app migrates its database before it
+                 listens, and a migration that outlasted the probe would be restarted mid-way. A crash
+                 still shows at once, because the container exits on its own. */}}
           startupProbe:
             tcpSocket:
               port: http
@@ -1146,11 +892,9 @@ spec:
               mountPath: /data
             - name: config
               {{- if eq $inst.app "seerr" }}
-              # Seerr keeps its database, settings and rotated logs in
-              # CONFIG_DIRECTORY, which its image defaults to /app/config.
-              # Mounting the claim at /config would leave that on the read-only
-              # root filesystem, which is an EROFS crash at start-up; this is
-              # the one app whose config path is not /config.
+              {{- /* Seerr keeps its database, settings and rotated logs in CONFIG_DIRECTORY, which its
+                     image defaults to /app/config; the claim at /config would leave that on the read-only
+                     root filesystem, an EROFS crash at start. The one app whose config path is not /config. */}}
               mountPath: /app/config
               {{- else }}
               mountPath: /config
@@ -1159,8 +903,8 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- if eq $inst.app "filebrowser" }}
-            # The chart's config, read-only over the claim's own copy of the
-            # path, and the cache the app rebuilds.
+            {{- /* The chart's config, read-only over the claim's own copy of the
+                   path, and the cache the app rebuilds. */}}
             - name: config-file
               mountPath: /config/config.yaml
               subPath: config.yaml
@@ -1183,11 +927,9 @@ spec:
               mountPath: /transcode
             {{- end }}
             {{- if eq $inst.app "jellyfin" }}
-            # Jellyfin's cache: transcode segments go here (JELLYFIN_CACHE_DIR),
-            # and its image writes nothing else outside /config, so the read-only
-            # root filesystem holds. It is an emptyDir, not the config claim:
-            # segments are the size of the media being watched and a restart
-            # loses nothing that cannot be made again.
+            {{- /* Jellyfin's cache: transcode segments go here (JELLYFIN_CACHE_DIR), and its image writes
+                   nothing else outside /config, so the read-only root filesystem holds. An emptyDir, not
+                   the claim: a segment is the size of the media being watched. */}}
             - name: cache
               mountPath: /cache
             {{- end }}
@@ -1201,10 +943,9 @@ spec:
         - name: tmp
           emptyDir: {}
         {{- if eq $inst.app "filebrowser" }}
-        # The index of a large library and 1 GiB of previews fit here; the app's
-        # own archive limit is 20 GB, so a resumable download of a folder larger
-        # than the free space in the cache fails, while a plain download streams
-        # through it. Losing the cache is a re-index, never a lost setting.
+        {{- /* The index of a large library and 1 GiB of previews fit here, and the app's own archive
+               limit is 20 GB: a resumable download larger than the free space fails, while a plain
+               one streams through. Losing the cache is a re-index, never a lost setting. */}}
         - name: cache
           emptyDir:
             sizeLimit: 5Gi
@@ -1217,8 +958,8 @@ spec:
         {{- end }}
         {{- if $oidc }}
         {{- if ne $inst.app "filebrowser" }}
-        # The client secret box wrote into this namespace, created once and
-        # never regenerated: the login holds only its digest.
+        {{- /* The client secret box wrote into this namespace, created once and
+               never regenerated: the login holds only its digest. */}}
         - name: oidc
           secret:
             secretName: {{ printf "s5n-oidc-%s" $inst.app }}
@@ -1227,9 +968,8 @@ spec:
               - key: client-secret
                 path: client-secret
         {{- end }}
-        # Root's anchor, when this box's certificate is not publicly trusted.
-        # optional because a Let's Encrypt box has no ConfigMap and does not
-        # need one; an empty directory is a valid SSL_CERT_DIR.
+        {{- /* Root's anchor, when this box's certificate is not publicly trusted; optional because a
+               Let's Encrypt box has no ConfigMap and an empty directory is a valid SSL_CERT_DIR. */}}
         - name: host-ca
           configMap:
             name: s5n-host-ca
@@ -1276,8 +1016,8 @@ spec:
               - key: autobrr-password
                 path: autobrr-password
         {{- else if eq $inst.app "bazarr" }}
-        # One key per instance, so a second Bazarr has its own and neither can
-        # read the other's settings.
+        {{- /* One key per instance, so a second Bazarr has its own and neither can
+               read the other's settings. */}}
         - name: keys
           secret:
             secretName: {{ include "s5n.secretName" $root }}
@@ -1286,9 +1026,8 @@ spec:
               - key: {{ printf "%s-apikey" $inst.name }}
                 path: {{ printf "%s-apikey" $inst.name }}
         {{- else if eq $inst.app "jellyfin" }}
-        # The person's password, in the pod only for the wizard's init
-        # container: the app container never mounts it, so the server that
-        # serves the Gateway cannot read the credential its player uses.
+        {{- /* The person's password, mounted only for the wizard: the container that serves the
+               Gateway never sees the credential its player uses. */}}
         - name: keys
           secret:
             secretName: {{ include "s5n.secretName" $root }}
@@ -1297,9 +1036,8 @@ spec:
               - key: jellyfin-user-password
                 path: jellyfin-user-password
         {{- else if eq $inst.app "sabnzbd" }}
-        # The API key the init container seals into sabnzbd.ini and the app's
-        # entrypoint re-applies from SABNZBD__API_KEY, so the file, the app and
-        # the wiring Job all answer to the release Secret's one value.
+        {{- /* The key the init container seals and the entrypoint re-applies, so the file, the app and
+               the wiring Job all answer to the release Secret's one value. */}}
         - name: keys
           secret:
             secretName: {{ include "s5n.secretName" $root }}
@@ -1379,9 +1117,9 @@ spec:
       sectionName: {{ . }}
       {{- end }}
   {{- if eq $exposure "host" }}
-  # This app's UI writes absolute asset paths, so it is served at a name of its
-  # own (the catalog says so) and never under a prefix. The certificate and the
-  # listeners for this name are root's, written from the grant by box.
+  {{- /* This app's UI writes absolute asset paths, so it is served at a name of its own (the
+         catalog says so) and never under a prefix; the name's certificate and listeners are
+         root's, written from the grant by box. */}}
   hostnames: [{{ $appHost | quote }}]
   {{- else }}
   {{- with $root.Values.gateway.host }}
@@ -1390,12 +1128,10 @@ spec:
   {{- end }}
   rules:
     {{- if eq $exposure "path" }}
-    # The prefix without its slash is a redirect to the prefix with it. An app
-    # that mounts its routes under its base URL as a string (autobrr's
-    # `r.Mount(routeBaseURL, ...)` with "/autobrr/") answers nothing at
-    # "/autobrr", so a link or a typed address that drops the slash would be a
-    # dead end; every app served under a path gets the same rule, so none is.
-    # An Exact match outranks the PathPrefix rule below for this one path.
+    {{- /* The prefix without its slash redirects to the prefix with it: an app that mounts under
+           its base URL as a string (autobrr's `r.Mount(routeBaseURL, ...)`) answers nothing at
+           "/autobrr", so a link that dropped the slash would be a dead end. Exact outranks the
+           PathPrefix rule below. */}}
     - matches:
         - path:
             type: Exact
@@ -1408,14 +1144,13 @@ spec:
               replaceFullPath: {{ printf "%s/" $urlBase }}
             statusCode: 301
     {{- end }}
-    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}    # The live task stream is a Server-Sent Events connection that has to stay
-    # open, and Envoy's route timeout defaults to 15s, which would cut it: the
-    # UI's log and task views would go quiet with nothing in the logs to say
-    # why. It asks for no request timeout (Gateway API reads "0s" as "none"),
-    # as every app rule below does too; it is a rule of its own for the
-    # stream's path, kept so the reason is written next to it. Gateway API sends a
-    # request to the rule with the longest matching path prefix, so the stream
-    # takes this rule and the rest of /maintainerr the one below.
+    {{- /* The live task stream is a Server-Sent Events connection that has to stay
+           open, and Envoy's route timeout defaults to 15s: the UI's log and task views
+           would go quiet with nothing in the logs. It asks for no request timeout
+           (Gateway API reads "0s" as none), as the rule below does, and is its own
+           rule because Gateway API sends a request to the longest matching prefix:
+           the stream takes this one, the rest of /maintainerr the next. */}}
+    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}
     - matches:
         - path:
             type: PathPrefix
@@ -1434,10 +1169,9 @@ spec:
             {{- else }}
             value: {{ $urlBase }}
             {{- end }}
-      # No request timeout (Gateway API reads "0s" as none). Envoy's 15s default
-      # cut real work off mid-way: autobrr cleaning a large releases database
-      # answered 504 and the app's own request was cancelled with it. Every
-      # app here is behind the one login, so a long request is its person's.
+      {{- /* No request timeout (Gateway API reads "0s" as none). Envoy's 15s default cut real work
+             off mid-way: autobrr cleaning a large releases database answered 504 and the app's own
+             request was cancelled with it. */}}
       timeouts:
         request: 0s
       {{- if and (eq $exposure "path") $cfg.rewritePath }}

@@ -1,24 +1,19 @@
-{{- /*
-The wiring Job: Helm post-install / post-upgrade hook.
+{{- /* The wiring Job: Helm post-install / post-upgrade hook.
 
-It reads a rendered config (URLs, categories, paths, and file paths into the
-mounted Secret — never the secrets themselves), reconciles the apps into the s5n
-data contract, proves hardlinks on /data, and writes its receipt into
-`<release>-wiring` under status.json / summary.txt.
+       It reads a rendered config (URLs, categories, paths, and file paths into the mounted
+       Secret, never the secrets themselves), reconciles the apps into the data contract,
+       proves hardlinks on /data, and writes its receipt into `<release>-wiring` under
+       status.json / summary.txt.
 
-The Job pod uses the ServiceAccount below, whose only permission is that one
-ConfigMap. It is not tracked by Helm, so `helm upgrade` replaces it and the
-previous run's logs stay readable until then.
-*/ -}}
+       The pod uses the ServiceAccount below, whose only permission is that one ConfigMap. Not
+       tracked by Helm, so `helm upgrade` replaces it and the previous run's logs stay
+       readable until then. */}}
 {{- if .Values.wiring.enabled }}
 {{- $root := . }}
 {{- $name := printf "%s-wiring" (include "s5n.fullname" .) }}
 
-{{- /* Every Bazarr instance and the Arr pair it reads (s5n.bazarrs): a pair
-       is resolved from the enabled instances, so a Bazarr whose sonarr-4k is
-       switched off reads the Radarr alone. Built here rather than in
-       workloads.yaml because this is the only consumer; the guard is for the
-       release's shape, not for this Job. */ -}}
+{{- /* Every Bazarr instance and the Arr pair it reads (s5n.bazarrs), built here because this
+       is the only consumer; the guard is for the release's shape, not for this Job. */}}
 {{- $bazarrs := list }}
 {{- range $bz := include "s5n.bazarrs" . | fromJsonArray }}
 {{- $entry := dict
@@ -26,9 +21,8 @@ previous run's logs stay readable until then.
       "url" (printf "http://%s:%v" $bz.name $bz.port)
       "urlBase" (printf "/%s" $bz.name)
       "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $bz.name) }}
-{{- /* Only the sides this release runs become keys. sprig's `get` answers ""
-       for a key that is not there, and an empty string is not the nil the Job
-       reads as "this box runs no such Arr": hasKey is what tells them apart. */}}
+{{- /* Only the sides this release runs become keys: sprig's `get` answers "" for a missing
+       key, and an empty string is not the nil the Job reads as "no such Arr". */}}
 {{- range $side := list "sonarr" "radarr" }}
 {{- if hasKey $bz $side }}
 {{- $_ := set $entry $side (get $bz $side) }}
@@ -66,23 +60,18 @@ previous run's logs stay readable until then.
 {{- $_ := set $cfg "bazarrs" $bazarrs }}
 {{- end }}
 {{- if and .Values.apps.qbittorrent .Values.apps.qbittorrent.enabled }}
-{{- /* The WebUI skips its login for the release's addresses (the init container
-       seals that), so this Job -- like every app that calls it -- carries no
-       credential at all: the URL is the whole entry. */}}
-{{- /* savePath is the data contract's downloads root, which a category with
-       no save path of its own downloads into: a migrated category is that
-       shape, and the Job must leave it alone. */}}
+{{- /* The WebUI skips its login for the release's addresses (the init container seals that),
+       so this Job carries no credential: the URL is the whole entry. */}}
+{{- /* savePath is the data contract's downloads root, where a category with no save path of
+       its own downloads: a migrated category is that shape, and the Job leaves it alone. */}}
 {{- $_ := set $cfg "qbittorrent" (dict
       "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
       "savePath" "/data/downloads") }}
 {{- end }}
 {{- if and .Values.apps.sabnzbd .Values.apps.sabnzbd.enabled }}
-{{- /* The usenet download client. The Job creates a category per Arr instance
-       under its complete_dir and registers the client in every Arr, so this
-       block is the whole address plus the two paths the data contract gives it.
-       downloadDir is the temporary tree: SAB moves a finished job from there to
-       complete_dir, and both are on /data, so the move is a rename and an
-       Arr's import is a hardlink. */}}
+{{- /* The usenet download client: a category per Arr instance under its complete_dir, and the
+       client registered in every Arr. downloadDir is the temporary tree, on /data with
+       complete_dir, so SAB's move is a rename and an Arr's import is a hardlink. */}}
 {{- $_ := set $cfg "sabnzbd" (dict
       "url" (printf "http://sabnzbd:%v" .Values.apps.sabnzbd.port)
       "urlBase" "/sabnzbd"
@@ -102,40 +91,34 @@ previous run's logs stay readable until then.
       "url" (printf "http://plex:%v" .Values.apps.plex.port)) }}
 {{- end }}
 {{- if and .Values.apps.tautulli .Values.apps.tautulli.enabled }}
-{{- /* The URL carries the prefix the route keeps: the app's own http_root is
-       sealed to it by the init container, so its API lives at /tautulli/api/v2
-       and the root of the pod's port is only a redirect. plexTokenFile may
-       legitimately not exist yet: the PMS link then reports pending instead of
-       being configured against a Plex that trusts the pod network. */}}
+{{- /* The URL carries the prefix the route keeps: the init container seals the app's http_root
+       to it, so its API lives at /tautulli/api/v2. plexTokenFile may not exist yet: the PMS
+       link then reports pending rather than trusting the pod network. */}}
 {{- $_ := set $cfg "tautulli" (dict
       "url" (printf "http://tautulli:%v/tautulli" .Values.apps.tautulli.port)
       "apiKeyFile" "/etc/s5n/keys/tautulli-apikey"
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}
 {{- if and .Values.apps.maintainerr .Values.apps.maintainerr.enabled }}
-{{- /* Maintainerr's BASE_PATH is set from the instance name and applies to its
-       API and its health route alike, so this Job's paths carry the prefix. Its
-       Plex connection is written through the API, with the same server token
-       Tautulli's PMS link takes; without one the row is pending, never a
-       connection with no credential. */}}
+{{- /* Maintainerr's BASE_PATH applies to its API and its health route alike, so these paths
+       carry the prefix. Its Plex connection takes the same server token as Tautulli's link;
+       without one the row is pending, never a connection with no credential. */}}
 {{- $_ := set $cfg "maintainerr" (dict
       "url" (printf "http://maintainerr:%v" .Values.apps.maintainerr.port)
       "urlBase" "/maintainerr"
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}
 {{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
-{{- /* The publicUrl is where a person opens Seerr, not where this Job dials it:
-       Seerr's bundle loads its assets from the site root, so the chart serves it
-       at <app>.<domain> (catalog.yaml's exposure), and the one row that asks a
-       human to sign in there has to name that address rather than the Service. */}}
+{{- /* The publicUrl is where a person opens Seerr, not where this Job dials it: Seerr's bundle
+       loads its assets from the site root, so the chart serves it at <app>.<domain>, and the
+       one row that asks a human to sign in names that address. */}}
 {{- $_ := set $cfg "seerr" (dict
       "url" (printf "http://seerr:%v" .Values.apps.seerr.port)
       "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr") | trim)) }}
 {{- end }}
 {{- if and .Values.apps.qui .Values.apps.qui.enabled }}
-{{- /* qui keeps its own user table: the account the chart owns is what this
-       sign-in uses (s5n.wiringAccount), and the password is a file reference
-       into the mounted Secret like every other credential here. */}}
+{{- /* qui keeps its own user table: the account the chart owns is what this sign-in uses
+       (s5n.wiringAccount), and the password is a file reference into the mounted Secret. */}}
 {{- $_ := set $cfg "qui" (dict
       "url" (printf "http://qui:%v" .Values.apps.qui.port)
       "urlBase" "/qui"
@@ -143,9 +126,8 @@ previous run's logs stay readable until then.
       "passwordFile" "/etc/s5n/keys/qui-password") }}
 {{- end }}
 {{- if and .Values.apps.autobrr .Values.apps.autobrr.enabled }}
-{{- /* Same account arrangement as qui's. autobrr's base URL carries a trailing
-       slash in its own setting, but its API routes are mounted under baseUrl
-       plus "/api", so the path this client appends is "/autobrr/api/...". */}}
+{{- /* Same account as qui's. autobrr's base URL carries a trailing slash in its own setting,
+       but its API is mounted under baseUrl plus "/api": this client appends "/autobrr/api/...". */}}
 {{- $_ := set $cfg "autobrr" (dict
       "url" (printf "http://autobrr:%v" .Values.apps.autobrr.port)
       "urlBase" "/autobrr"
@@ -160,18 +142,13 @@ previous run's logs stay readable until then.
       "tokenFile" "/etc/s5n/keys/pbh-token") }}
 {{- end }}
 {{- if and .Values.apps.jellyfin .Values.apps.jellyfin.enabled }}
-{{- /* Jellyfin keeps its accounts, its API keys and its library paths in
-       jellyfin.db, so nothing can be sealed into a file before it starts. The
-       app's own init container completes the first-run wizard before the app
-       container starts, so this Job only checks that it is complete; `username`
-       is the account root's login admits, the name the wizard gives the person's
-       account, and the two passwords are file references into the mounted
-       Secret, never values here.
+{{- /* Jellyfin keeps its accounts, its API keys and its library paths in jellyfin.db, so
+       nothing can be sealed into a file before it starts: its init container completes the
+       wizard, and this Job only checks that it is complete. `username` is the account root's
+       login admits, and the two passwords are file references into the mounted Secret.
 
-       The libraries are one per Arr instance: the same library directory
-       directories this run creates (the dirs step), with the collection type
-       that Arr writes. Nothing else in the release adds a library, so this list
-       is the whole of what the server has. */}}
+       The libraries are one per Arr instance -- the directories this run creates, with the
+       collection type that Arr writes -- so this list is the whole of what the server has. */}}
 {{- $collections := dict "sonarr" "tvshows" "radarr" "movies" "lidarr" "music" }}
 {{- $libraries := list }}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
@@ -215,9 +192,9 @@ metadata:
   labels:
     {{- include "s5n.labels" . | nindent 4 }}
 rules:
-  # RBAC cannot scope `create` by resourceNames (the object has no name until it
-  # exists), so this verb covers any ConfigMap in the namespace. The Job only ever
-  # creates its own receipt, and only when `helm uninstall` has left it absent.
+  {{- /* RBAC cannot scope `create` by resourceNames (the object has no name until it
+         exists), so this verb covers any ConfigMap in the namespace. The Job only ever
+         creates its own receipt, and only when `helm uninstall` has left it absent. */}}
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create"]
@@ -266,8 +243,8 @@ spec:
       {{- end }}
     spec:
       restartPolicy: Never
-      # This pod needs the API to publish its receipt; every app pod explicitly
-      # does not get a token.
+      {{- /* This pod needs the API to publish its receipt; every app pod explicitly
+             does not get a token. */}}
       automountServiceAccountToken: true
       enableServiceLinks: false
       serviceAccountName: {{ $name }}
@@ -303,8 +280,8 @@ spec:
         - name: keys
           secret:
             secretName: {{ include "s5n.secretName" . }}
-            # fsGroup makes the release's gid the group owner; group read is what
-            # lets the non-root process read the keys.
+            {{- /* fsGroup makes the release's gid the group owner; group read is what
+                   lets the non-root process read the keys. */}}
             defaultMode: 0440
         - name: data
           persistentVolumeClaim:
