@@ -15,8 +15,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// prefsFixture is Preferences.xml the way Plex writes it: one element, its
-// attributes quoted, a path with a space, an escaped ampersand and a list.
+// prefsFixture is Preferences.xml as Plex writes it: one element, quoted
+// attributes, a space, an escaped ampersand and a list.
 const prefsFixture = `<?xml version="1.0" encoding="utf-8"?>
 <Preferences MachineIdentifier="synthetic-machine" TranscoderTempDirectory="/srv/apps/plex/transcode" ButlerDatabaseBackupPath="/srv/plex/Backups" customCertificatePath="/srv/plex/a&amp;b.p12" CinemaTrailersPrerollID="/srv/media/preroll/one.mp4, /srv/media/preroll/two.mp4" iTunesLibraryXmlPath="/srv/media/iTunes Library.xml" ProcessedMachineIdentifier="synthetic-processed" />
 `
@@ -55,8 +55,8 @@ apps:
         to: /data/media
 `
 
-// fakeRunner stands in for the pinned image: it answers the read script with
-// dbRows and records every script it is given.
+// fakeRunner stands in for the image: it answers with dbRows and records each
+// script.
 type fakeRunner struct {
 	rows   string
 	reads  [][]byte
@@ -123,8 +123,7 @@ func TestRewritesPreferencesAndLibrary(t *testing.T) {
 	if rep.Blocked() {
 		t.Fatalf("Blocked: uncovered %v, unclassified %v", rep.Uncovered, rep.Unclassified)
 	}
-	// The read is one script, and directories.path is not in it: it is relative
-	// to the section root.
+	// One script, and no directories.path: it is relative to the section root.
 	if len(runner.reads) != 1 {
 		t.Fatalf("Check ran %d read scripts, want 1", len(runner.reads))
 	}
@@ -161,15 +160,14 @@ func TestRewritesPreferencesAndLibrary(t *testing.T) {
 			t.Errorf("the write script is missing %q:\n%s", want, script)
 		}
 	}
-	// A URI that is not a file path, and a GUID Plex matched by itself, are
-	// left alone.
+	// A non-file URI and a GUID Plex matched itself are left alone.
 	for _, unwanted := range []string{"id = 22;", "id = 23;", "id = 31;"} {
 		if strings.Contains(script, unwanted) {
 			t.Errorf("the write script touched %s:\n%s", unwanted, script)
 		}
 	}
 
-	// Preferences.xml: the path attributes moved, the rest is byte for byte.
+	// The path attributes moved; the rest is byte for byte.
 	raw, err := os.ReadFile(filepath.Join(in.Dir, filepath.FromSlash(supportDir), prefsName))
 	if err != nil {
 		t.Fatal(err)
@@ -189,9 +187,8 @@ func TestRewritesPreferencesAndLibrary(t *testing.T) {
 		}
 	}
 
-	// A second Check reports the same rows, because the fake shell does not
-	// apply the UPDATEs it is handed; that the written database then has
-	// nothing left to do is what the gated docker test proves.
+	// A second Check reports the same rows, since the fake shell applies nothing;
+	// the gated docker test proves a written database has nothing left to do.
 }
 
 func TestCheckWritesNothing(t *testing.T) {
@@ -208,9 +205,8 @@ func TestCheckWritesNothing(t *testing.T) {
 	}
 }
 
-// TestRelativeMediaFileIsUncovered: Plex's evidence is that media_parts.file is
-// absolute; a relative value is the pathology, and it is a gap rather than a
-// path whose root is guessed.
+// TestRelativeMediaFileIsUncovered: a relative media_parts.file is the pathology,
+// a gap rather than a guessed root.
 func TestRelativeMediaFileIsUncovered(t *testing.T) {
 	ctx := context.Background()
 	rows := strings.Replace(dbRows,
@@ -235,7 +231,7 @@ func TestRelativeMediaFileIsUncovered(t *testing.T) {
 	}
 }
 
-// TestUncoveredRootPathBlocks: a library folder outside every rule is a gap.
+// TestUncoveredRootPathBlocks: a folder outside every rule is a gap.
 func TestUncoveredRootPathBlocks(t *testing.T) {
 	ctx := context.Background()
 	rows := strings.Replace(dbRows, "@section_locations|2|/srv/media/TV",
@@ -265,8 +261,7 @@ func TestUncoveredPreferenceBlocks(t *testing.T) {
 	}
 }
 
-// TestNeedsTheRunner: the database is only writable with Plex's own shell, and a
-// Check that cannot run it has to say so rather than report nothing to do.
+// TestNeedsTheRunner: a Check that cannot run Plex's shell must say so.
 func TestNeedsTheRunner(t *testing.T) {
 	ctx := context.Background()
 	in, _ := setup(t, prefsFixture, dbRows, true)
@@ -294,8 +289,8 @@ func TestNoPlexHomeIsRefused(t *testing.T) {
 	}
 }
 
-// TestDatabaseInTheDataDir: a source that mounts Plex's data directory itself
-// has Preferences.xml at the config root.
+// TestDatabaseInTheDataDir: a source mounting the data directory itself has
+// Preferences.xml at the config root.
 func TestDatabaseInTheDataDir(t *testing.T) {
 	ctx := context.Background()
 	in, runner := setup(t, "", dbRows, false)
@@ -320,8 +315,7 @@ func TestDatabaseInTheDataDir(t *testing.T) {
 	}
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()
@@ -355,10 +349,8 @@ func treeHash(t *testing.T, dir string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestFollowsTheLibrarysCategory: the section roots and every file under them
-// follow the library directory the source named onto the category box lays out,
-// because the plan's rule for that directory is more specific than the
-// library's.
+// TestFollowsTheLibrarysCategory: the plan's rule for the library directory is more
+// specific than the library's, so roots and files follow it onto the category.
 func TestFollowsTheLibrarysCategory(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, filepath.FromSlash(supportDir))
@@ -418,8 +410,7 @@ apps:
 	for _, want := range []string{
 		"UPDATE section_locations SET root_path = '/data/media/movies' WHERE id = 1;",
 		"UPDATE media_parts SET file = '/data/media/movies/Example Film (2020)/Example Film (2020).mkv' WHERE id = 10;",
-		// The section the source named TV keeps its directory: only the one
-		// the plan maps is renamed.
+		// The source's TV keeps its directory; only the mapped one is renamed.
 		"UPDATE section_locations SET root_path = '/data/media/TV' WHERE id = 2;",
 	} {
 		if !strings.Contains(script, want) {

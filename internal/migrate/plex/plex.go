@@ -1,27 +1,14 @@
-// Package plex rewrites the paths a Plex Media Server install stored: the ones
-// in Preferences.xml and the ones in its library database.
-//
-// Plex is the one app in the catalog whose database migrate may not write with
-// a stock SQLite. Its schema creates full-text tables with tokenizers compiled
-// into Plex's own libsqlite3 (`tokenize=collating 'root@colStrength=primary;...'`
-// and an `icu` tokenizer), so a stock shell can open the file, read it and
-// update a plain column, but every write that fires a metadata trigger, every
-// FTS maintenance statement and `pragma integrity_check` fail with "unknown
-// tokenizer: collating". Plex says the same thing in its own repair article:
-// the shipped interpreter is the only one that can touch the database. So every
-// read and write here goes through `Plex SQLite` in the pinned image, through
-// rewrite.Input.Run, and this package never opens the file itself.
-//
-// The columns are the four the community's move scripts and Plex's own queries
-// agree on: section_locations.root_path, media_parts.file, media_streams.url
-// (only the file:// values) and metadata_items.guid (only file://).
-// directories.path is deliberately left: it is relative to the section root,
-// which is what root_path carries.
-//
-// The database has to be closed when it is written -- Plex keeps a connection
-// pool, -wal and -shm beside it and caches pages -- which is why migrate runs
-// before the target's first start. The staged copy's -wal and -shm are part of
-// the database and are left where they are; the shell writes through them.
+// Package plex rewrites the paths a Plex install stored in Preferences.xml and its
+// library database. Plex's schema uses tokenizers compiled into its own libsqlite3
+// (`tokenize=collating ...`, an `icu` tokenizer), so stock SQLite fails on any
+// write that fires a metadata trigger, on FTS maintenance and on
+// integrity_check, as Plex's own repair article says. Every read and write goes
+// through `Plex SQLite` in the pinned image (rewrite.Input.Run); this package never
+// opens the file. The columns are section_locations.root_path, media_parts.file,
+// media_streams.url and metadata_items.guid (file:// only); directories.path is
+// relative to root_path. The database must be closed to be written, which is why
+// migrate runs before the target's first start, and its -wal and -shm travel with
+// it.
 package plex
 
 import (
@@ -50,8 +37,8 @@ const (
 	// pinned image (usr/lib/plexmediaserver/Plex SQLite).
 	sqliteBin = "/usr/lib/plexmediaserver/Plex SQLite"
 	// supportDir is where the image keeps Plex's home: the entrypoint reads
-	// Preferences.xml from $PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR, which
-	// the image sets to /config/Library/Application Support.
+	// $PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR, set to /config/Library/Application
+	// Support.
 	supportDir = "Library/Application Support/Plex Media Server"
 	// prefsName is the settings file Plex rewrites on every upgrade.
 	prefsName = "Preferences.xml"
@@ -59,15 +46,14 @@ const (
 	dbRel = "Plug-in Support/Databases/com.plexapp.plugins.library.db"
 )
 
-// supportCandidates are the layouts a staged Plex config can have: the image's
-// own (Plex's home under Library/Application Support), the data directory
-// itself mounted at /config, and a Plex home one level down.
+// supportCandidates are the layouts a staged config can have: the image's, the
+// data directory at /config, and a Plex home one level down.
 var supportCandidates = []string{supportDir, "", "Plex Media Server"}
 
 type rewriter struct{}
 
-// Check reads Preferences.xml and queries the library database, writing
-// nothing: the queries it sends are SELECTs, and the shell is the image's.
+// Check reads Preferences.xml and queries the database with SELECTs, writing
+// nothing.
 func (rewriter) Check(ctx context.Context, in rewrite.Input) (rewrite.Report, error) {
 	return run(ctx, in, false)
 }
@@ -157,8 +143,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rewrite.Report, err
 	return rep, nil
 }
 
-// supportDirIn is the directory inside the staged config that holds Plex's
-// home, as a slash path relative to it.
+// supportDirIn is the directory holding Plex's home, a slash path relative to the
+// config root.
 func supportDirIn(dir string) (string, error) {
 	var found []string
 	for _, rel := range supportCandidates {
@@ -187,16 +173,14 @@ func looksLikePlexHome(dir string) bool {
 	return false
 }
 
-// displayPath is a file's name relative to the staged config, the way a report
-// names a file.
+// displayPath is a file's name relative to the staged config.
 func displayPath(support, name string) string {
 	return path.Join(filepath.ToSlash(support), name)
 }
 
 func displayDBPath(support string) string { return displayPath(support, dbRel) }
 
-// planPrefs is Preferences.xml: every attribute that holds a path, and the one
-// that holds a list of them.
+// planPrefs is every path attribute and the one holding a list.
 func planPrefs(in rewrite.Input, f *prefsFile, file string, t tally, rep *rewrite.Report) []prefEdit {
 	var edits []prefEdit
 	for _, name := range prefsPaths {
@@ -251,8 +235,8 @@ type dbRow struct {
 	value         string
 }
 
-// planDB decides each row's new value. A gap in a live column is reported; a
-// value that is not a path at all (a library:// or metadata:// URI) is not.
+// planDB decides each row's value; a library:// or metadata:// URI is not a path
+// and is left alone.
 func planDB(in rewrite.Input, rows []dbRow, file string, t tally, rep *rewrite.Report) []dbRow {
 	var moved []dbRow
 	for _, r := range rows {
@@ -272,8 +256,7 @@ func planDB(in rewrite.Input, rows []dbRow, file string, t tally, rep *rewrite.R
 	return moved
 }
 
-// rewriteRow is one stored value's rewrite: the absolute path in it, or a gap
-// when the value is one the rules cannot map.
+// rewriteRow is one value's rewrite, or a gap when no rule can map it.
 func rewriteRow(in rewrite.Input, r dbRow) (value string, gap *string, changed bool) {
 	v := r.value
 	if v == "" {
@@ -291,9 +274,8 @@ func rewriteRow(in rewrite.Input, r dbRow) (value string, gap *string, changed b
 		return moved, nil, moved != v
 
 	case r.table == "media_parts" && r.column == "file":
-		// A relative file follows the save path the app is given, but Plex's
-		// evidence is that this column is absolute and a scanner-relative value
-		// is the pathology: refuse rather than point the app at nothing.
+		// Plex's evidence is that this column is absolute, so a relative value is
+		// the pathology: a gap, not a guessed root.
 		if !path.IsAbs(v) {
 			return v, &v, false
 		}
@@ -309,10 +291,8 @@ func rewriteRow(in rewrite.Input, r dbRow) (value string, gap *string, changed b
 	return v, nil, false
 }
 
-// rewriteFileURL rewrites the path inside a file:// value, keeping the URI's
-// own shape: a triple slash, or a file://localhost/ form, or a file:// name
-// with the absolute path after it. Anything that is not a file:// URL is not a
-// filesystem path and is left alone.
+// rewriteFileURL rewrites the path inside a file:// value, keeping the URI's shape
+// (triple slash, localhost form); anything else is not a filesystem path.
 func rewriteFileURL(in rewrite.Input, v string) (string, *string, bool) {
 	const scheme = "file://"
 	if !strings.HasPrefix(v, scheme) {
@@ -321,8 +301,7 @@ func rewriteFileURL(in rewrite.Input, v string) (string, *string, bool) {
 	rest := v[len(scheme):]
 	host := ""
 	if !strings.HasPrefix(rest, "/") {
-		// file://localhost/path names this host; anything else is another
-		// machine's filesystem, which no rule can map.
+		// localhost names this host; anything else is another machine's filesystem.
 		switch {
 		case strings.HasPrefix(rest, "localhost/"):
 			host, rest = "localhost", rest[len("localhost"):]
@@ -343,8 +322,7 @@ func rewriteFileURL(in rewrite.Input, v string) (string, *string, bool) {
 	return scheme + host + moved, nil, true
 }
 
-// splitList splits a comma- or semicolon-separated list and keeps the
-// separators, so it goes back together exactly as it came apart.
+// splitList keeps the separators, so the list goes back exactly as it came apart.
 func splitList(s string) (items, seps []string) {
 	start := 0
 	for i := 0; i < len(s); i++ {

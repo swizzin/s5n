@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// snapshotTree writes a Plex config directory the way the image makes one: its
-// state under Plex's home, its library beside it, and the caches a full carry
-// leaves out.
+// snapshotTree writes a Plex config directory as the image makes one: state, the
+// library, and the caches.
 func snapshotTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -42,16 +41,15 @@ func snapshotTree(t *testing.T) string {
 	return dir
 }
 
-// TestSizeIsTheTreeAFullCarryWouldTake: the number the space decision is made
-// from is the tree minus the caches, per the same list a full carry leaves out.
+// TestSizeIsTheTreeAFullCarryWouldTake: the tree minus the caches.
 func TestSizeIsTheTreeAFullCarryWouldTake(t *testing.T) {
 	dir := snapshotTree(t)
 	got, err := Size(dir)
 	if err != nil {
 		t.Fatalf("size %s: %v", dir, err)
 	}
-	// What a full carry writes: preferences, the databases and the -wal, the
-	// artwork, the .bif thumbnails, the agents' data and the schema notes.
+	// What a full carry writes: prefs, databases and -wal, artwork, .bif
+	// thumbnails, agent data and schema notes.
 	want := int64(len("<Preferences/>\n") + len("sqlite\n")*2 + len("wal\n") +
 		len("jpeg\n") + len("bif\n") + len("notes\n") + len("ini\n"))
 	if got != want {
@@ -59,16 +57,15 @@ func TestSizeIsTheTreeAFullCarryWouldTake(t *testing.T) {
 	}
 }
 
-// TestSizeOfADirectoryPlexIsNotIn: a config directory box cannot find Plex's home
-// in is a refusal, not a size of nothing that fits anywhere.
+// TestSizeOfADirectoryPlexIsNotIn: no Plex home is a refusal, not a size of zero.
 func TestSizeOfADirectoryPlexIsNotIn(t *testing.T) {
 	if _, err := Size(t.TempDir()); err == nil {
 		t.Fatal("sizing a directory that holds no Plex home was answered")
 	}
 }
 
-// TestSnapshotNamesWhatIsDisposableAndWhy: the two scopes are the tree less what
-// Plex rebuilds, and the state with the sentence about what it leaves behind.
+// TestSnapshotNamesWhatIsDisposableAndWhy: the tree less what Plex rebuilds, and
+// the state with its sentence.
 func TestSnapshotNamesWhatIsDisposableAndWhy(t *testing.T) {
 	full := Snapshot(true)
 	if !full.Full || len(full.Files) != 0 || len(full.Skip) == 0 {
