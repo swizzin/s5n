@@ -1348,33 +1348,50 @@ for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
     { echo "Jellyfin has no library over ${dir}: the Job's library step did not run"; fail=1; }
 done
 
-# KnownProxies. Through the Gateway the app's peer is the proxy's pod, whose
-# address is in the cluster's pod network, so a server that trusts nothing reads
-# every request as coming from its own network and answers the endpoints marked
-# LocalAccessOrRequiresElevation to it with no credential at all.
+# KnownProxies. Through the Gateway the app's peer is the proxy's *pod*, whose
+# address is in the cluster's pod network, so a server that trusts nothing
+# ignores X-Forwarded-For entirely and records *that* address as the client:
+# every request then reads as coming from the app's own network, and the
+# endpoints Jellyfin answers a local caller without a credential are open to
+# whoever reaches the Gateway.
 #
-# The app reads the list at startup only, so the proof is its own answer about
-# this request: IsInNetwork=false is only possible because the person's address
-# arrived in X-Forwarded-For from a peer the app was told to trust.
+# The proof is the address the server itself recorded for this person's session
+# (SessionInfo.RemoteEndPoint): with the list honoured it is the test host's,
+# outside the proxy network it was told to trust; without it, it would be a
+# proxy pod's address, inside it. The list is read rather than toggled because
+# the app reads it at startup only.
 jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
-python3 - "$WORK/jf-network.json" <<'PYNET' || fail=1
-import json, sys
+jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/Sessions" >"$WORK/jf-sessions.json" || true
+python3 - "$WORK/jf-network.json" "$WORK/jf-sessions.json" "$APP_LOGIN" <<'PYNET' || fail=1
+import ipaddress, json, sys
 try:
-    doc = json.load(open(sys.argv[1]))
+    network = json.load(open(sys.argv[1]))
+    sessions = json.load(open(sys.argv[2]))
 except Exception as exc:
-    print("  Jellyfin's network configuration did not parse: %s" % exc)
+    print("  Jellyfin's own report did not parse: %s" % exc)
     sys.exit(1)
-proxies = doc.get("KnownProxies") or doc.get("knownProxies") or []
+proxies = network.get("KnownProxies") or network.get("knownProxies") or []
 if not proxies:
     print("  KnownProxies is empty: the app is not told whose address to trust")
     sys.exit(1)
-print("  KnownProxies: %s" % ", ".join(proxies))
+trusted = [ipaddress.ip_network(p, strict=False) for p in proxies]
+rows = [s for s in sessions if (s.get("UserName") or s.get("userName")) == sys.argv[3]]
+if not rows:
+    print("  the app has no session for %s: nothing recorded the client's address" % sys.argv[3])
+    sys.exit(1)
+row = max(rows, key=lambda s: s.get("DateCreated") or s.get("dateCreated") or "")
+remote = (row.get("RemoteEndPoint") or row.get("remoteEndPoint") or "").rsplit(":", 1)[0]
+if not remote:
+    print("  the session has no RemoteEndPoint")
+    sys.exit(1)
+addr = ipaddress.ip_address(remote)
+if any(addr in net for net in trusted):
+    print("  the server recorded the client as %s, inside the proxy network it trusts (%s): the forwarded address was ignored"
+          % (remote, ", ".join(proxies)))
+    sys.exit(1)
+print("  KnownProxies: %s; the client it recorded: %s (outside them)" % (", ".join(proxies), remote))
 PYNET
-jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
-grep -q '"IsInNetwork":false' "$WORK/jf-endpoint.json" ||
-  { echo "Jellyfin counts a request through the Gateway as coming from its own network ($(cat "$WORK/jf-endpoint.json")): the forwarded address is ignored"; fail=1; }
-echo "a request through the Gateway is not in the app's network, so the person's address arrived"
 
 # The first-run window, last because it moves the server's own setting. Until
 # the wizard is complete Jellyfin answers anyone on the endpoints that create

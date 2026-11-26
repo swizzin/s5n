@@ -3131,21 +3131,42 @@ except Exception: print("")' || true
   [ -z "$(jf_token intruder intruder-password)" ] ||
     { echo "an outsider claimed Jellyfin through the Gateway"; fail=1; }
   # The forwarded address. Through the Gateway the peer is the proxy's pod, so
-  # an app that trusts nothing sees every request as local -- and the endpoints
-  # a local caller reaches without a credential are then open to the internet.
+  # an app that trusts nothing records that pod's address as the client and
+  # reads every request as its own network -- and the endpoints Jellyfin answers
+  # a local caller without a credential are then open to the internet. The
+  # proof is the address the app recorded for this person's session: outside the
+  # proxy network it was told to trust.
   jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
-  python3 -c 'import json,sys
-d=json.load(open("'"$WORK"'/jf-network.json")); p=d.get("KnownProxies") or d.get("knownProxies") or []
-print("  KnownProxies: %s" % p)
-sys.exit(0 if p and any("10.244." in x or "/" in x for x in p) else 1)' ||
-    { echo "Jellyfin's KnownProxies is empty: it ignores the Gateway's forwarded address"; fail=1; }
-  # IsInNetwork is the app's own verdict on where the request came from: the
-  # Gateway's proxy pod is on the same pod subnet as the app, so a request it
-  # does not trust reads as "my network". False means the person's address
-  # arrived, which only a trusted peer's X-Forwarded-For can do.
-  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
-  grep -q '"IsInNetwork":false' "$WORK/jf-endpoint.json" ||
-    { echo "Jellyfin counts a request through the Gateway as coming from its own network ($(cat "$WORK/jf-endpoint.json"))"; fail=1; }
+  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/Sessions" >"$WORK/jf-sessions.json" || true
+  python3 - "$WORK/jf-network.json" "$WORK/jf-sessions.json" "$LOGIN" <<'PYNET' || fail=1
+import ipaddress, json, sys
+try:
+    network = json.load(open(sys.argv[1]))
+    sessions = json.load(open(sys.argv[2]))
+except Exception as exc:
+    print("  Jellyfin's own report did not parse: %s" % exc)
+    sys.exit(1)
+proxies = network.get("KnownProxies") or network.get("knownProxies") or []
+if not proxies:
+    print("  KnownProxies is empty: the app is not told whose address to trust")
+    sys.exit(1)
+trusted = [ipaddress.ip_network(p, strict=False) for p in proxies]
+rows = [s for s in sessions if (s.get("UserName") or s.get("userName")) == sys.argv[3]]
+if not rows:
+    print("  the app has no session for %s: nothing recorded the client's address" % sys.argv[3])
+    sys.exit(1)
+row = max(rows, key=lambda s: s.get("DateCreated") or s.get("dateCreated") or "")
+remote = (row.get("RemoteEndPoint") or row.get("remoteEndPoint") or "").rsplit(":", 1)[0]
+if not remote:
+    print("  the session has no RemoteEndPoint")
+    sys.exit(1)
+addr = ipaddress.ip_address(remote)
+if any(addr in net for net in trusted):
+    print("  the server recorded the client as %s, inside the proxy network it trusts (%s): the forwarded address was ignored"
+          % (remote, ", ".join(proxies)))
+    sys.exit(1)
+print("  KnownProxies: %s; the client it recorded: %s (outside them)" % (", ".join(proxies), remote))
+PYNET
 
   # ---- a renewal, with the redirect and the narrowed listener in place -------
   # The renewal is triggered the way `cmctl renew` does: the Certificate's
