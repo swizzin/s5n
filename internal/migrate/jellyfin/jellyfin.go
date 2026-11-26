@@ -1,33 +1,12 @@
-// Package jellyfin rewrites the media paths a migrated Jellyfin install stored,
-// before box's release takes its config over.
-//
-// Unlike every other app in the catalog, Jellyfin's paths are not in an XML
-// file: they are rows in data/jellyfin.db. The columns are taken from the pinned
-// tag's own entity classes (v12.4), not guessed from a 10.x schema:
-//
-//   - BaseItems.Path — Jellyfin.Database/Jellyfin.Database.Implementations/
-//     Entities/BaseItemEntity.cs: `public string? Path`, the absolute path of
-//     every item it has indexed (a film's file, a collection folder's own
-//     directory).
-//   - BaseItems.Data — the same class's `public string? Data`: the JSON blob
-//     that carries what the entity has no column for, and where a library's
-//     roots live (MediaBrowser.Model/Configuration/LibraryOptions.cs,
-//     PathInfos, and a media source's Path). It is rewritten as JSON, string by
-//     string, because the blob's shape is the app's and a rewriter that named
-//     one key would miss the next.
-//
-// There is no Libraries table in v12.4's database: the entity exists in the
-// source tree but is not mapped, and a library is a CollectionFolder BaseItems
-// row. That was checked against the schema a 12.4 image creates, which is the
-// test fixture this package ships.
-//
-// A path under the app's own data directory (/config, and the cache and temp
-// trees it uses) is not a media path: it is where Jellyfin keeps its database,
-// its library view and its transcodes. Those are left exactly as they are and
-// are not reported as gaps, because no plan rule can or should map them.
-//
-// Check opens the database read-only and writes nothing anywhere. Write makes
-// exactly the changes the Check before it reported, in one transaction.
+// Package jellyfin rewrites the media paths a migrated Jellyfin stored. Its paths
+// are rows in data/jellyfin.db, not XML, taken from the pinned tag's own entity
+// classes (v12.4): BaseItems.Path (Entities/BaseItemEntity.cs) and
+// BaseItems.Data, the JSON blob holding a library's roots
+// (MediaBrowser.Model/Configuration/LibraryOptions.cs, PathInfos). There is no
+// Libraries table in v12.4: a library is a CollectionFolder row, as the shipped
+// fixture (a real 12.4 schema) shows. Paths under the app's own /config, /cache
+// and /tmp are its state, left alone and not gaps. Check writes nothing; Write
+// makes exactly what Check reported, in one transaction.
 package jellyfin
 
 import (
@@ -49,12 +28,10 @@ func init() {
 }
 
 const (
-	// dbFile is the database, relative to the app's config directory. The
-	// image's JELLYFIN_DATA_DIR is /config and the file is data/jellyfin.db
-	// inside it.
+	// dbFile is the database relative to the config directory, whose
+	// JELLYFIN_DATA_DIR is /config.
 	dbFile = "data/jellyfin.db"
-	// baseItems is the one table this package writes. Its name is the entity's
-	// (BaseItemEntity.cs is mapped to BaseItems by the model builder).
+	// baseItems is the entity's own mapped table name (BaseItemEntity.cs).
 	baseItems = "BaseItems"
 	// pathColumn and dataColumn are the two columns it writes, named as the
 	// entity's properties are.
@@ -62,11 +39,9 @@ const (
 	dataColumn = "Data"
 )
 
-// internalPrefixes are the directories inside the app that hold its own state.
-// A stored path under one of them is not media: the root folder row is
-// /config/root, a playlist is under %AppDataPath%, and transcodes go to the
-// cache. Mapping them through a plan rule would be wrong even if a rule
-// happened to cover them, so they are skipped before the plan is asked.
+// internalPrefixes hold the app's own state (the root folder row is
+// /config/root, transcodes go to the cache): not media, so skipped before the
+// plan is asked, even if a rule would cover them.
 var internalPrefixes = []string{"/config", "/cache", "/tmp"}
 
 type rewriter struct{}
@@ -109,9 +84,8 @@ func (r rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, 
 	if err != nil {
 		return rewrite.Report{}, err
 	}
-	// A gap means the plan does not say where a path goes. Writing the rows it
-	// does say and leaving the rest would be a database that disagrees with
-	// itself about where the library is, so nothing is written at all.
+	// A gap means the plan does not say where a path goes; writing the rest would
+	// leave a database that disagrees with itself, so nothing is written.
 	if len(a.uncover) > 0 {
 		return a.report(), fmt.Errorf("%s: %d stored paths have no rule in the plan; nothing was written", dbFile, len(a.uncover))
 	}
@@ -121,8 +95,8 @@ func (r rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, 
 	return a.report(), nil
 }
 
-// analyseRows reads every row once and decides what to write. It is the same
-// code in both passes, so a Write can only make what a Check reported.
+// analyseRows reads every row once and decides what to write, the same code in
+// both passes, so Write can only make what Check reported.
 func analyseRows(ctx context.Context, in rewrite.Input, db *sql.DB) (*analysis, error) {
 	a := &analysis{app: in.App, changes: map[string]int{}}
 	rows, err := db.QueryContext(ctx, "SELECT Id, "+pathColumn+", "+dataColumn+" FROM "+baseItems)
@@ -159,8 +133,8 @@ func analyseRows(ctx context.Context, in rewrite.Input, db *sql.DB) (*analysis, 
 	return a, nil
 }
 
-// rewritePath maps one stored path. ok is false when the path is not media (it
-// is internal, relative or empty) or when a rule already leaves it as it is.
+// rewritePath maps one stored path; ok is false when it is not media (internal,
+// relative, empty) or already where the rule wants it.
 func rewritePath(in rewrite.Input, a *analysis, where, stored string) (string, bool) {
 	if strings.TrimSpace(stored) == "" || !filepath.IsAbs(stored) {
 		return stored, false
@@ -181,15 +155,12 @@ func rewritePath(in rewrite.Input, a *analysis, where, stored string) (string, b
 	return next, true
 }
 
-// rewriteJSON walks a JSON document and rewrites every string that is an
-// absolute path. The value's own JSON shape is kept: only the strings change,
-// and the document is re-encoded with the app's own nesting, because the app is
-// the only reader.
+// rewriteJSON rewrites every string in a JSON document that is an absolute path,
+// keeping the document's shape: only the strings change.
 func rewriteJSON(in rewrite.Input, a *analysis, where, document string) (string, bool, error) {
 	var doc any
 	if err := json.Unmarshal([]byte(document), &doc); err != nil {
-		// A column that is not JSON is not this rewriter's business; the app
-		// reads it as data it wrote, and nothing here can improve it.
+		// A column that is not JSON is the app's own data, not this package's.
 		return document, false, nil
 	}
 	changed := false
@@ -243,7 +214,7 @@ func (a *analysis) report() rewrite.Report {
 }
 
 // apply writes the rows in one transaction: half a rewrite is a database whose
-// items and whose library disagree about where the media is.
+// items and library disagree.
 func (a *analysis) apply(ctx context.Context, db *sql.DB) error {
 	if len(a.pathEdits)+len(a.dataEdits) == 0 {
 		return nil

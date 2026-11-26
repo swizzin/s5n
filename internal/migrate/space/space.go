@@ -1,13 +1,8 @@
-// Package space is the two numbers a migration's one large decision is made
-// from: how many bytes a directory takes, and how much room a filesystem has
-// left. `box migrate` copies a source's configs into a snapshot and then into a
-// seedbox, and Plex's config directory is a whole library: on a real box that is
-// tens of gigabytes, so the copy is only made where it fits.
-//
-// The walk is a du: one stat per entry, the entry's own size for a regular file,
-// and nothing read. The free space is statfs's unprivileged count (Bavail), the
-// same number df reports as available, because root's reserve is not room a
-// migration may count on.
+// Package space is the two numbers a migration's one large decision is made from:
+// how many bytes a directory takes and how much room a filesystem has left,
+// because Plex's config is a whole library. The walk is a du (one stat per entry,
+// nothing read); free space is statfs's unprivileged Bavail, what df calls
+// available, since root's reserve is not room a migration may count on.
 package space
 
 import (
@@ -21,18 +16,13 @@ import (
 	"syscall"
 )
 
-// marginFloor is the least room a copy leaves free beside itself: a filesystem
-// with no bytes left cannot be written to at all, and the app's own directories
-// above the tree take a little.
+// marginFloor is the least room a copy leaves free beside itself: an empty
+// filesystem cannot be written to at all.
 const marginFloor = 256 << 20
 
-// Size is the bytes of the regular files under dir, skipping any directory whose
-// slash path relative to dir is in skip and everything beneath it. It is a
-// walk with one stat per entry and no reads, so it is the quick answer a
-// decision before a copy can afford.
-//
-// A symlink counts as nothing: the archive and the staging copy carry it as a
-// link, so its target's bytes are not written again.
+// Size is the bytes of the regular files under dir, skipping any directory in
+// skip (slash path relative to dir) and everything beneath it. A symlink counts as
+// nothing: it is carried as a link, so its target's bytes are not written.
 func Size(dir string, skip []string) (int64, error) {
 	_, bytes, err := Tally(dir, skip)
 	return bytes, err
@@ -56,13 +46,10 @@ type counter struct {
 	bytes int64
 }
 
-// entry is one entry the walk met. A name that is gone by the time the walk asks
-// what it is is not counted and is not a failure: a migration is read off a
-// source that is still running, and a running app rewrites its settings through a
-// temporary file and a rename -- Plex's Preferences.xml.tmp.7133... exists in a
-// directory listing and is gone a moment later. The bytes are no longer there to
-// copy, so there is nothing to size. The tree itself, and a directory the walk
-// cannot read, are still refusals.
+// entry is one entry the walk met. A name gone by the time the walk asks what it
+// is counts nothing and is not a failure: the source is still running, and an app
+// rewriting its settings through a temporary file makes one. The tree itself, and
+// a directory the walk cannot read, are still refusals.
 func (c *counter) entry(p string, d fs.DirEntry, err error) error {
 	if err != nil {
 		if p != c.dir && errors.Is(err, fs.ErrNotExist) {
@@ -87,9 +74,8 @@ func (c *counter) entry(p string, d fs.DirEntry, err error) error {
 	if !d.Type().IsRegular() {
 		return nil
 	}
-	// The entry's own stat, taken once by the walk: a Plex tree is a million
-	// small files, and a second syscall each is what makes this slow enough to
-	// notice.
+	// The walk's own stat: a second syscall per file is what makes a million-file
+	// tree slow enough to notice.
 	info, err := d.Info()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -102,8 +88,8 @@ func (c *counter) entry(p string, d fs.DirEntry, err error) error {
 	return nil
 }
 
-// skipSet is the paths a Size walk does not go into, cleaned so a caller's
-// spelling of one matches the walk's.
+// skipSet is the paths a Size walk does not enter, cleaned to the walk's
+// spelling.
 func skipSet(skip []string) map[string]bool {
 	if len(skip) == 0 {
 		return nil
@@ -117,10 +103,9 @@ func skipSet(skip []string) map[string]bool {
 	return out
 }
 
-// Free is the bytes a filesystem has left for an unprivileged writer at path.
-// A path that is not there yet is the path it would be created at, so the walk
-// goes up to the nearest directory that exists: an app's config directory is
-// created by the install, and the question is asked before it is.
+// Free is the bytes a filesystem has left for an unprivileged writer at path; a
+// path not there yet is answered by its nearest existing directory, because an
+// install creates the config directory after the question is asked.
 func Free(path string) (int64, error) {
 	at, err := existing(path)
 	if err != nil {
@@ -152,10 +137,9 @@ func existing(path string) (string, error) {
 	}
 }
 
-// Same reports whether two paths are on one filesystem, asked the way Free asks
-// it: a path that is not there yet is its nearest existing directory's. A run
-// that writes the snapshot and the seedbox's copy on one filesystem needs the
-// room for both.
+// Same reports whether two paths are on one filesystem, a missing one answered by
+// its nearest existing directory: one filesystem holding both copies needs room
+// for both.
 func Same(a, b string) (bool, error) {
 	da, err := device(a)
 	if err != nil {
@@ -185,8 +169,7 @@ func device(path string) (uint64, error) {
 	return uint64(st.Dev), nil
 }
 
-// Margin is the room a copy leaves spare beside the tree it writes: a tenth of
-// the tree, and never less than 256 MiB.
+// Margin is the room a copy leaves spare: a tenth of the tree, at least 256 MiB.
 func Margin(size int64) int64 {
 	if tenth := size / 10; tenth > marginFloor {
 		return tenth
@@ -194,18 +177,16 @@ func Margin(size int64) int64 {
 	return marginFloor
 }
 
-// Place is one filesystem a run writes a tree to, and how many copies of it land
-// there: a host that is both ends of a migration writes the snapshot and the
-// seedbox's copy on one filesystem, so the room has to be there twice.
+// Place is one filesystem a run writes a tree to, and how many copies land there:
+// a host that is both ends writes both on one filesystem.
 type Place struct {
 	Path   string
 	Free   int64
 	Copies int
 }
 
-// Disk is where a run asks about room: how many bytes a filesystem has left, and
-// whether two paths are on one. Real is the host box runs on; a test hands over
-// its own answers so a short disk, or two of them, is a case it can build.
+// Disk is where a run asks about room. Real is the host box runs on; a test hands
+// over its own answers to build a short disk.
 type Disk interface {
 	Free(path string) (int64, error)
 	Same(a, b string) (bool, error)
@@ -230,9 +211,8 @@ type Verdict struct {
 // Fits reports whether every place can hold the copies it is asked for.
 func (v Verdict) Fits() bool { return v.Short == nil }
 
-// Choose is the decision: a tree of size bytes fits when every place has room
-// for the copies of it that land there. A Short place names where it does not,
-// with the numbers a report says.
+// Choose fits a tree of size bytes when every place has room for the copies that
+// land there; a Short place names where it does not.
 func Choose(size int64, places []Place) Verdict {
 	need := size + Margin(size)
 	v := Verdict{Need: need}

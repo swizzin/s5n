@@ -14,14 +14,12 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// fixtureDB is the database a 12.4 image creates: the real schema, with the
-// three rows its first start writes and nothing else. A test copies it and adds
-// the rows a source with a library would have, so the rewrite runs against the
-// pinned tag's own column set rather than a table this package made up.
+// fixtureDB is a 12.4 image's real schema, so the rewrite runs against the pinned
+// tag's own columns rather than a table this package made up.
 const fixtureDB = "testdata/jellyfin-12.4.db"
 
-// planFor is a source whose library sits under /srv/media on the host and will
-// sit under /data/media on the box. Every path in it is invented.
+// planFor: the library under /srv/media, becoming /data/media. Paths are
+// invented.
 func planFor(t *testing.T) *plan.Plan {
 	t.Helper()
 	p, err := plan.Parse([]byte(`version: 2
@@ -47,8 +45,7 @@ apps:
 	return p
 }
 
-// stage copies the fixture into a temp config directory, which is what apply
-// hands a rewriter: a private copy of the app's /config.
+// stage copies the fixture into a temp config directory, as apply does.
 func stage(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -65,10 +62,8 @@ func stage(t *testing.T) string {
 	return dir
 }
 
-// addRows inserts the two shapes a source with a library has: an item whose
-// Path is a media file, and a collection folder whose library roots are in its
-// Data blob (LibraryOptions.PathInfos). The folder's own Path is under /config,
-// which is the app's own tree and must never be rewritten.
+// addRows inserts what a source with a library has: an item whose Path is a media
+// file and a collection folder whose roots are in its Data blob.
 func addRows(t *testing.T, dir string, rows ...row) {
 	t.Helper()
 	db, err := sqlitedb.OpenReadWrite(context.Background(), filepath.Join(dir, dbFile))
@@ -77,8 +72,7 @@ func addRows(t *testing.T, dir string, rows ...row) {
 	}
 	defer db.Close()
 	for _, r := range rows {
-		// The columns a 12.4 database declares NOT NULL with no default; the
-		// rest of the row is the app's to fill.
+		// The NOT NULL columns with no default; the app fills the rest.
 		if _, err := db.ExecContext(context.Background(),
 			"INSERT INTO BaseItems (Id, Type, Name, Path, Data, IsFolder, IsInMixedFolder, IsLocked, IsMovie, IsRepeat, IsSeries, IsVirtualItem) VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0)",
 			r.id, r.typ, r.name, nullString(r.path), nullString(r.data)); err != nil {
@@ -116,10 +110,8 @@ func input(t *testing.T, dir string) rewrite.Input {
 	return rewrite.Input{App: "jellyfin", Dir: dir, Plan: planFor(t)}
 }
 
-// TestTheRewriteMovesTheDatabasePaths: the paths a Jellyfin library holds are
-// rows, not settings. The item's file path, the library's roots inside the JSON
-// blob beside them, and the app's own /config tree are the three shapes the
-// pass has to tell apart -- the third is not media and must not be touched.
+// TestTheRewriteMovesTheDatabasePaths: the item path, the roots in the JSON blob
+// and the app's own /config tree are the three shapes the pass tells apart.
 func TestTheRewriteMovesTheDatabasePaths(t *testing.T) {
 	ctx := context.Background()
 	dir := stage(t)
@@ -173,8 +165,7 @@ func TestTheRewriteMovesTheDatabasePaths(t *testing.T) {
 	if len(doc.PathInfos) != 1 || doc.PathInfos[0].Path != "/data/media/movies" {
 		t.Fatalf("library roots = %+v", doc.PathInfos)
 	}
-	// Every other field of the blob survives: it is the app's JSON, and the
-	// rewrite only owns the paths in it.
+	// The blob's other fields survive: only the paths are the rewrite's.
 	if !strings.Contains(data, `"EnableRealtimeMonitor":true`) {
 		t.Fatalf("the blob lost a setting: %s", data)
 	}
@@ -189,9 +180,8 @@ func TestTheRewriteMovesTheDatabasePaths(t *testing.T) {
 	}
 }
 
-// TestAPathNoRuleCoversStopsTheWrite: a plan that does not say where a library
-// lives is a migration that would leave a film unplayable, so the rewrite names
-// the path and writes nothing at all -- not the rows it did understand.
+// TestAPathNoRuleCoversStopsTheWrite: the rewrite names the path and writes
+// nothing at all, not even the rows it understood.
 func TestAPathNoRuleCoversStopsTheWrite(t *testing.T) {
 	ctx := context.Background()
 	dir := stage(t)
@@ -214,9 +204,8 @@ func TestAPathNoRuleCoversStopsTheWrite(t *testing.T) {
 	}
 }
 
-// TestAnInternalPathIsNotAGap: the root folder row and the playlists folder are
-// under /config, which is the app's own data directory. Leaving them is the
-// decision, not a missing rule: no plan maps the inside of the app.
+// TestAnInternalPathIsNotAGap: leaving the app's /config tree is the decision,
+// not a missing rule.
 func TestAnInternalPathIsNotAGap(t *testing.T) {
 	ctx := context.Background()
 	dir := stage(t)
@@ -232,9 +221,8 @@ func TestAnInternalPathIsNotAGap(t *testing.T) {
 	}
 }
 
-// TestTheDatabaseIsTheTagsOwnSchema pins the tables and columns the rewriter
-// writes against the fixture, which a 12.4 image produced. A source version that
-// moved a path somewhere else fails here rather than migrating nothing.
+// TestTheDatabaseIsTheTagsOwnSchema pins the tables and columns against a 12.4
+// image's schema, so a source version that moved a path fails here.
 func TestTheDatabaseIsTheTagsOwnSchema(t *testing.T) {
 	path, err := filepath.Abs(fixtureDB)
 	if err != nil {
@@ -264,8 +252,8 @@ func TestTheDatabaseIsTheTagsOwnSchema(t *testing.T) {
 	if !columns["Id"] || !columns[pathColumn] || !columns[dataColumn] {
 		t.Fatalf("%s has %v; the rewriter writes Id, %s and %s", baseItems, columns, pathColumn, dataColumn)
 	}
-	// The entity's own mapped name, and the absence of a table a 10.x-era
-	// reader would look for: library roots are in BaseItems.Data.
+	// The absence of a table a 10.x-era reader would look for: roots are in
+	// BaseItems.Data.
 	var libs int
 	if err := db.QueryRowContext(context.Background(),
 		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Libraries'").Scan(&libs); err != nil {

@@ -1,32 +1,11 @@
 // Package lock proves a rehearsal box's egress lock before any app starts.
-//
-// A NetworkPolicy is an instruction to the CNI, not something the API server
-// enforces. A cluster whose CNI ignores egress rules would run a rehearsal as
-// the live box — announcing to trackers, querying indexers with the source's
-// keys, joining IRC — and every other part of the lock would still look right.
-// So box proves it: after the release is installed locked with every app
-// switched off, and before adoption switches any on, it runs two pods in the
-// seedbox's namespace.
-//
-//   - the control pod carries no release label, so no policy of the release
-//     selects it, and it must reach an in-cluster address outside the
-//     namespace (a DNS pod's metrics port, which the release's egress policy
-//     does not admit);
-//   - the probe pod carries the release's instance label, so the egress
-//     policy selects it, and it must fail to reach the same address.
-//
-// The control is what makes the probe's failure mean something. A namespace
-// with a stricter policy of its own, or a network that cannot reach the target,
-// fails the control too, and box refuses saying the proof could not run — never
-// "the lock works", which would be a lie in the one direction that matters.
-// A second check dials a public address from the labelled pod: it must not
-// reach it either, but a host with no internet looks identical, so the
-// in-cluster control is the proof and the public check only ever adds a
-// failure (the lock is absent) or a note.
-//
-// Both pods use the s5n image the release already runs, which is the image the
-// chart's blessed-image policy admits; they carry the Pod Security "restricted"
-// security context every app does; and they are deleted whatever happens.
+// A NetworkPolicy is enforced by the CNI, not the API server, so box runs two
+// pods: an unlabelled control that must reach an in-cluster address outside the
+// namespace, and one carrying the release's label that must not reach it. A
+// stricter namespace policy or a dead route fails the control too, and box then
+// refuses saying the proof could not run, never that the lock works. A public
+// dial only adds a failure or a note. Both pods run the release's image with the
+// restricted context and are deleted whatever happens.
 package lock
 
 import (
@@ -45,9 +24,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// The exit codes `s5n probe` reports (cmd/s5n/probe.go). They are the contract
-// between this package and the binary, so they are named once on each side and
-// the probe's test pins its half.
+// The exit codes `s5n probe` reports (cmd/s5n/probe.go), the contract between
+// this package and the binary, pinned from both sides.
 const (
 	exitAsAsked  = 0
 	exitOpposite = 3
@@ -78,31 +56,25 @@ func (t Target) String() string {
 	return net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
 }
 
-// Options is what the proof needs to know. Everything the pods run comes from
-// the release being applied: the namespace it lives in, its instance label and
-// the image it already pulls.
+// Options is what the proof needs, all of it from the release being applied.
 type Options struct {
-	// Namespace is the seedbox's own namespace: the pods run there, so the
-	// release's policy is the one that selects the probe.
+	// Namespace is the seedbox's own namespace, so the release's policy selects
+	// the probe.
 	Namespace string
-	// Release is the Helm release name the chart labels every pod with
-	// (app.kubernetes.io/instance). The probe carries it; the control does not.
+	// Release is the Helm release name (app.kubernetes.io/instance); the probe
+	// carries it, the control does not.
 	Release string
-	// Image is the s5n image the release runs (the wiring Job's), by tag and
-	// digest as the chart resolves it.
+	// Image is the s5n image the release runs, by tag and digest.
 	Image string
-	// Target is the in-cluster address the lock must deny. It is outside the
-	// seedbox's namespace and outside its policy's DNS and pod rules.
+	// Target is the in-cluster address the lock must deny.
 	Target Target
-	// Internet is a public address to check as well. A zero port skips it.
+	// Internet is a public address to check as well; a zero port skips it.
 	Internet Target
-	// Timeout bounds each pod, from create to a terminated state. It must
-	// outlast Settle.
+	// Timeout bounds each pod, create to terminated; it must outlast Settle.
 	Timeout time.Duration
-	// Settle is how long a probe pod keeps dialling for its answer to hold
-	// (s5n probe --settle). A CNI programs a new pod's policy a moment after
-	// the pod starts, so one dial at start-up would read an enforcing cluster
-	// as one that ignores the policy. Zero dials once.
+	// Settle is how long a probe pod keeps dialling (s5n probe --settle): a CNI
+	// programs a new pod's policy a moment after it starts, so one dial would
+	// read an enforcing cluster as one that ignores policy. Zero dials once.
 	Settle time.Duration
 	// Poll is how often the pod's status is read.
 	Poll time.Duration
@@ -110,25 +82,22 @@ type Options struct {
 
 // Report is what the proof saw, for the receipt and for a test.
 type Report struct {
-	// ControlReached is true when an unlabelled pod in the namespace reached
-	// Target: the address is reachable, so the probe's failure below means
-	// something.
+	// ControlReached is true when an unlabelled pod reached Target, so the
+	// probe's failure means something.
 	ControlReached bool
-	// ProbeReached is true when a pod carrying the release's label reached
-	// Target: the lock is not enforced, and Prove returned an error.
+	// ProbeReached is true when a labelled pod reached Target: the lock is not
+	// enforced, and Prove returned an error.
 	ProbeReached bool
 	// Target is the address both pods dialled.
 	Target Target
 	// InternetChecked says the public check ran.
 	InternetChecked bool
-	// InternetReached is true when the labelled pod reached the public
-	// address: the lock is absent, and Prove returned an error.
+	// InternetReached is true when the labelled pod reached the public address.
 	InternetReached bool
-	// Note is one line the caller may print: what a host without internet
-	// looks like, or why the public check did not run.
+	// Note is one line the caller may print.
 	Note string
-	// CNI is the network implementation box could name from the cluster, empty
-	// when it could not. It only ever appears in a refusal.
+	// CNI is the network implementation box could name, empty when it could not;
+	// it only ever appears in a refusal.
 	CNI string
 }
 
@@ -170,12 +139,10 @@ func (c Cluster) Services(ctx context.Context, namespace string) (*corev1.Servic
 	return c.Client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
 }
 
-// Prove runs the control, the probe and, when asked, the public check.
-//
-// A nil error means the lock is in place: the control reached the target and
-// the labelled probe did not. Every other answer is a refusal that names what
-// box actually saw, because "could not prove it" and "it is not enforced" are
-// different facts and only one of them is about this cluster's CNI.
+// Prove runs the control, the probe and, when asked, the public check. A nil
+// error means the lock is in place: the control reached the target and the
+// labelled probe did not. Every other answer names what box saw, because "could
+// not prove it" and "not enforced" are different facts.
 func Prove(ctx context.Context, client pods, o Options) (Report, error) {
 	rep := Report{Target: o.Target}
 	if err := o.check(); err != nil {
@@ -247,8 +214,7 @@ func Prove(ctx context.Context, client pods, o Options) (Report, error) {
 	return rep, nil
 }
 
-// check refuses an options set that cannot describe a proof, before any pod is
-// created.
+// check refuses options that cannot describe a proof, before any pod exists.
 func (o Options) check() error {
 	var missing []string
 	if strings.TrimSpace(o.Namespace) == "" {
@@ -269,13 +235,12 @@ func (o Options) check() error {
 	return nil
 }
 
-// dialTimeout is one connection attempt's limit. A denied connection is
-// usually dropped rather than refused, so this is how long each "closed" takes.
+// dialTimeout is one attempt's limit: a denied connection is usually dropped, not
+// refused, so this is how long a "closed" takes.
 const dialTimeout = 2 * time.Second
 
-// probePod is one probe: the image the release already runs, the Pod Security
-// "restricted" context every app has, and the label that decides whether the
-// release's policy selects it.
+// probePod is one probe: the release's image, the restricted context every app
+// has, and the label deciding whether the policy selects it.
 func probePod(o Options, role string, labels map[string]string, target Target, want string) *corev1.Pod {
 	all := map[string]string{"s5n.io/rehearsal-probe": role}
 	for k, v := range labels {
@@ -322,8 +287,7 @@ func probePod(o Options, role string, labels map[string]string, target Target, w
 	}
 }
 
-// result is one probe pod's answer: its name, and the exit code its one
-// container ended with.
+// result is one probe pod's answer: its name and its container's exit code.
 type result struct {
 	name    string
 	exit    int32
@@ -337,9 +301,9 @@ func resultDetail(r result) string {
 	return "no message"
 }
 
-// runPod creates one probe pod and waits for it to finish. A pod that never
-// runs — a bad image, a namespace that refuses it — is an error rather than an
-// answer, because a proof needs both pods to have had their say.
+// runPod creates one probe pod and waits for it to finish. A pod that never runs
+// (a bad image, a refusing namespace) is an error: a proof needs both pods to
+// have had their say.
 func runPod(ctx context.Context, client pods, o Options, pod *corev1.Pod) (result, error) {
 	out, err := client.Create(ctx, pod)
 	if err != nil {
@@ -386,9 +350,8 @@ type exit struct {
 }
 
 // finished reports whether a pod has ended, and with what. A pod that cannot
-// start (an image that will not pull, a sandbox that cannot be created) is a
-// usable answer here only as a failure: box would otherwise wait a whole
-// timeout for something that will never run.
+// start is a failure, or box waits a whole timeout for something that never
+// runs.
 func finished(pod *corev1.Pod) (exit, bool) {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Terminated != nil {
@@ -410,15 +373,13 @@ func permanent(reason string) bool {
 	return false
 }
 
-// instanceSelector is the label pair the chart selects a release's pods by, as
-// a refusal says it.
+// instanceSelector is the label pair the chart selects a release's pods by.
 func instanceSelector(release string) string {
 	return "app.kubernetes.io/instance=" + release
 }
 
-// cniName names the network implementation from the pods it runs in
-// kube-system, when the names are ones box recognises. It is only ever used in
-// a refusal, so empty ("box cannot name it") is a fine answer.
+// cniName names the network implementation from its kube-system pods, when box
+// recognises them; only used in a refusal, so empty is fine.
 func cniName(ctx context.Context, client pods) string {
 	list, err := client.List(ctx, "kube-system")
 	if err != nil {
@@ -452,17 +413,14 @@ func cniSuffix(name string) string {
 	return " (" + name + ")"
 }
 
-// dnsPort is the cluster DNS Service's metrics port (CoreDNS's prometheus
-// listener, which kubeadm's and k0s's kube-dns Service both expose). The
-// release's egress policy admits the DNS pods on 53 only, so this is an address
-// every cluster has, that answers a pod the policy does not select, and that
-// the lock must deny.
+// dnsPort is CoreDNS's prometheus listener, which kube-dns exposes everywhere.
+// The release's egress policy admits DNS on 53 only, so this is an address every
+// cluster has that answers an unselected pod and that the lock must deny.
 const dnsPort = 9153
 
-// DNSTarget is the in-cluster address the lock must deny: the kube-dns
-// Service's metrics port. The Service's address, not a CoreDNS pod's: the
-// per-pod gate dials it for the life of the box, and a pod IP that went away
-// would read as a closed connection and wave an app through.
+// DNSTarget is the in-cluster address the lock must deny: the kube-dns Service's
+// metrics port. The Service's address, not a CoreDNS pod's: the per-pod gate dials
+// it for the life of the box, and a pod IP that went away would read as closed.
 func DNSTarget(ctx context.Context, client pods) (Target, error) {
 	list, err := client.Services(ctx, "kube-system")
 	if err != nil {
