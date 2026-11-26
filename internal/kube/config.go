@@ -95,11 +95,11 @@ func WithRequestTimeout(flags *genericclioptions.ConfigFlags, timeout time.Durat
 	return flags
 }
 
-// quiet installs box's warning policy on one config: client-go prints the API
-// server's deprecation and admission warnings through klog, a raw `warnings.go`
-// line in box's own output, and box is the whole interface (docs/box.md). It
-// goes on the config, never through rest.SetDefaultWarningHandler: a
-// process-wide switch is only correct if the first client to run installs it.
+// quiet installs box's warning policy on one config: client-go writes the API
+// server's deprecation and admission warnings through klog, a line nobody can
+// act on in the run log, and box is the whole interface (docs/box.md). It goes
+// on the config, never through rest.SetDefaultWarningHandler: a process-wide
+// switch is only correct if the first client to run installs it.
 func quiet(cfg *rest.Config) *rest.Config {
 	cfg.WarningHandler = rest.NoWarnings{}
 	return cfg

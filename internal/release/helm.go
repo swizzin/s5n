@@ -71,7 +71,7 @@ func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.
 		releaseName = ReleaseName
 	}
 	// Helm builds its clients from this getter, so kube.Flags carries box's
-	// warning policy: client-go deprecations would print through klog.
+	// warning policy: client-go deprecations would reach the run log.
 	flags := kube.Flags(kubeconfig, namespace)
 	if timeout > 0 {
 		flags = kube.WithRequestTimeout(flags, timeout)

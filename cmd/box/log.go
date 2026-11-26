@@ -20,6 +20,19 @@ func openRunLog(command string) *runlog.Log {
 	return lg
 }
 
+// atStart is main's first step: client-go logs through klog, whose default is
+// stderr, so klog writes nowhere until a command opens its run log (newOutput).
+// A read like status opens none, and keeps none of the 20 logs' places.
+func atStart() { pointClientLogs(nil) }
+
+// startLog opens this command's transcript and gives client-go's klog its output.
+func startLog() {
+	if runLog == nil {
+		runLog = openRunLog(logName())
+	}
+	pointClientLogs(runLog)
+}
+
 // logPath is the transcript's path, or "".
 func logPath(l *runlog.Log) string {
 	if l == nil {

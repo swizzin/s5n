@@ -39,14 +39,14 @@ users:
 }
 
 // On the config, so a client built from it cannot be the one that forgot:
-// client-go's deprecation notices otherwise go through klog into box's output.
+// client-go's deprecation notices otherwise go through klog into the run log.
 func TestConfigInstallsTheWarningHandler(t *testing.T) {
 	cfg, err := Config(writeKubeconfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.WarningHandler == nil {
-		t.Fatal("Config returned a config with no warning handler: client-go warnings would print")
+		t.Fatal("Config returned a config with no warning handler: client-go warnings would reach the run log")
 	}
 	if _, ok := cfg.WarningHandler.(rest.NoWarnings); !ok {
 		t.Fatalf("warning handler = %T, want rest.NoWarnings", cfg.WarningHandler)

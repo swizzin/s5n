@@ -71,6 +71,7 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	atStart()
 	switch os.Args[1] {
 	case "bootstrap":
 		runBootstrap(ctx, os.Args[2:])
@@ -153,7 +154,7 @@ func terminalSet(plain bool) tui.Terminal {
 // newOutput picks the renderer: a form-capable terminal gets the live reporter;
 // --plain, TERM=dumb or a piped stdout gets the plain transcript.
 func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
-	runLog = openRunLog(logName())
+	startLog()
 	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
 		r := tui.NewReporter(tui.ReporterOptions{

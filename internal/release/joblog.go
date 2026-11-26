@@ -30,8 +30,8 @@ const stopGrace = 5 * time.Second
 // line for the run log, read once in the background into memory.
 //
 // Nothing here cancels a request it made: client-go logs a cancelled body read
-// to klog, and a klog line in box's output is what its policy exists to prevent.
-// A wait that ends closes the stream instead.
+// through klog, and the run log is a transcript of what box did, not of what
+// client-go retried. A wait that ends closes the stream instead.
 type jobLog struct {
 	open func(context.Context, bool) (io.ReadCloser, error)
 	poll time.Duration
