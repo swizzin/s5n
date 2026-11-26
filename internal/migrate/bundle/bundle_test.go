@@ -1,11 +1,7 @@
 package bundle
 
-// bundle_test.go proves the three things the package exists for: a snapshot's
-// name says what it is and when it was taken, a snapshot written and opened
-// gives apply the same plan and the same config trees, and the newest snapshot
-// a run finds is the newest one that can be applied. Everything here is
-// invented: example.com paths, a synthetic config, a plan with no source behind
-// it.
+// bundle_test.go: a snapshot's name, its round trip through apply's reader, and
+// which snapshot a run picks. Everything is invented.
 
 import (
 	"errors"
@@ -34,8 +30,7 @@ apps:
 
 const testReport = "plan: a read of the source\napp: sonarr (from sonarr, config /srv/apps/sonarr)\n"
 
-// tree builds one app's config directory with a file and a directory, the way a
-// real one has both.
+// tree builds a config directory with a file and a directory.
 func tree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -51,9 +46,6 @@ func tree(t *testing.T) string {
 	return dir
 }
 
-// TestFileNameSaysWhatItIsAndWhen: the name is what an operator reads in the
-// directory listing, so it carries the time in UTC and the mode, and nothing a
-// shell would have to quote.
 func TestFileNameSaysWhatItIsAndWhen(t *testing.T) {
 	at := time.Date(2026, 11, 17, 9, 5, 3, 0, time.UTC)
 	for _, mode := range []archive.Mode{archive.ModeSurvey, archive.ModeRehearsal, archive.ModeFinal} {
@@ -63,17 +55,13 @@ func TestFileNameSaysWhatItIsAndWhen(t *testing.T) {
 			t.Errorf("FileName(%q) = %q, want %q", mode, got, want)
 		}
 	}
-	// A time in another zone is the same instant in UTC: two hosts must not
-	// name one snapshot two ways.
+	// Another zone is the same instant in UTC.
 	other := time.Date(2026, 11, 17, 10, 5, 3, 0, time.FixedZone("elsewhere", 3600))
 	if got, want := FileName(archive.ModeFinal, other), "migrate-20261117T090503Z-final.tar.gz"; got != want {
 		t.Errorf("FileName of the same instant in another zone = %q, want %q", got, want)
 	}
 }
 
-// TestWriteThenOpenGivesBackTheSameSnapshot is the round trip: what apply needs
-// out of a snapshot is the plan's bytes, the report, the source's manifests and
-// one directory per planned app.
 func TestWriteThenOpenGivesBackTheSameSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
@@ -130,9 +118,6 @@ func TestWriteThenOpenGivesBackTheSameSnapshot(t *testing.T) {
 	}
 }
 
-// TestASurveyIsWrittenWithoutConfigs: the survey mode exists so discover can
-// record a read without copying gigabytes of config, and apply refuses it
-// because there is nothing in it to rewrite.
 func TestASurveyIsWrittenWithoutConfigs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName(archive.ModeSurvey, time.Now()))
@@ -154,9 +139,6 @@ func TestASurveyIsWrittenWithoutConfigs(t *testing.T) {
 	}
 }
 
-// TestWriteRefusesWhatItCannotCarry: a snapshot is the whole of what apply
-// runs, so a half-written one is worse than none. Every refusal leaves no file
-// behind for the next run to mistake for a snapshot.
 func TestWriteRefusesWhatItCannotCarry(t *testing.T) {
 	tests := []struct {
 		name string
@@ -185,9 +167,6 @@ func TestWriteRefusesWhatItCannotCarry(t *testing.T) {
 	}
 }
 
-// TestNewestSkipsASurvey: `box migrate apply` with no file takes the newest
-// snapshot in the directory, and a survey is not one it can apply. A newer
-// survey must not shadow the final snapshot behind it.
 func TestNewestSkipsASurvey(t *testing.T) {
 	dir := t.TempDir()
 	final := filepath.Join(dir, "migrate-20261117T090000Z-final.tar.gz")
@@ -205,9 +184,7 @@ func TestNewestSkipsASurvey(t *testing.T) {
 			t.Fatalf("write %s: %v", filepath.Base(path), err)
 		}
 	}
-	// A rehearsal is refused by apply for its own reason, but it is still a
-	// snapshot apply reads: the newest one that is not a survey is the answer,
-	// so a newer survey does not shadow the snapshot behind it.
+	// A rehearsal is refused later; a survey never shadows a snapshot.
 	got, err := Newest(dir)
 	if err != nil {
 		t.Fatalf("Newest: %v", err)
@@ -215,7 +192,7 @@ func TestNewestSkipsASurvey(t *testing.T) {
 	if got != rehearsal {
 		t.Errorf("Newest = %q, want %q", filepath.Base(got), filepath.Base(rehearsal))
 	}
-	// With the rehearsal gone, the final snapshot is what a run picks up.
+	// With the rehearsal gone, the final snapshot is the answer.
 	if err := os.Remove(rehearsal); err != nil {
 		t.Fatal(err)
 	}
@@ -227,9 +204,6 @@ func TestNewestSkipsASurvey(t *testing.T) {
 	}
 }
 
-// TestWriteNeverOverwritesASnapshot: two reads of one source are two snapshots,
-// and the second must not quietly replace the first: the file is the operator's
-// rollback for a source that is about to be reset.
 func TestWriteNeverOverwritesASnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "migrate-20261117T090000Z-final.tar.gz")
@@ -252,9 +226,6 @@ func TestWriteNeverOverwritesASnapshot(t *testing.T) {
 	}
 }
 
-// TestWriteLeavesTheOperatorsDirectoryAlone: --out can name a file in a
-// directory the operator made, and a snapshot's mode is the file's. Changing
-// the mode of a directory box was pointed at would be a change nobody asked for.
 func TestWriteLeavesTheOperatorsDirectoryAlone(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
@@ -271,7 +242,7 @@ func TestWriteLeavesTheOperatorsDirectoryAlone(t *testing.T) {
 	if info.Mode().Perm() != 0o755 {
 		t.Errorf("the directory is %04o, want the 0755 it was", info.Mode().Perm())
 	}
-	// A directory box makes itself is 0700: it holds the source's secrets.
+	// A directory box makes is 0700: it holds the source's secrets.
 	fresh := filepath.Join(t.TempDir(), "snapshots")
 	if _, err := Write(filepath.Join(fresh, "migrate-20261117T090000Z-final.tar.gz"), Snapshot{Mode: archive.ModeFinal, Plan: []byte(testPlan)}); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -285,9 +256,6 @@ func TestWriteLeavesTheOperatorsDirectoryAlone(t *testing.T) {
 	}
 }
 
-// TestNewestSaysWhenThereIsNone: an empty directory is a refusal that names the
-// two commands that write one, because "apply" with no file is the documented
-// way to finish a cutover.
 func TestNewestSaysWhenThereIsNone(t *testing.T) {
 	_, err := Newest(t.TempDir())
 	if err == nil {
@@ -300,8 +268,6 @@ func TestNewestSaysWhenThereIsNone(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesASnapshotItCannotTrust: the file format's guarantees are
-// internal/archive's, and this package's job is to say which file was wrong.
 func TestOpenRefusesASnapshotItCannotTrust(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "migrate-20261117T090000Z-final.tar.gz")
@@ -324,8 +290,6 @@ func TestOpenRefusesASnapshotItCannotTrust(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesAPlanlessSnapshot: apply runs a plan, so a snapshot without
-// one is refused here rather than one step later.
 func TestOpenRefusesAPlanlessSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.tar.gz")
@@ -340,14 +304,13 @@ func TestOpenRefusesAPlanlessSnapshot(t *testing.T) {
 	if len(got.Plan) == 0 {
 		t.Fatal("the opened snapshot has no plan")
 	}
-	// The file is there under its own name; what this package promises is that
-	// a caller finds it by the constant, not by guessing a path.
+	// A caller finds it by the constant, not by a guessed path.
 	if _, err := os.Stat(filepath.Join(out, archive.PlanName)); err != nil {
 		t.Errorf("the opened snapshot holds no %s: %v", archive.PlanName, err)
 	}
 }
 
-// keys is a map's keys, sorted by the map itself, for a failure message.
+// keys is a map's keys, sorted, for a failure message.
 func keys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -356,9 +319,8 @@ func keys[V any](m map[string]V) []string {
 	return out
 }
 
-// plexTree builds the config directory a real Plex keeps: the two files a
-// migration needs, a -wal beside one database, and the Metadata tree of covers
-// and bundles Plex rebuilds from the data it is given.
+// plexTree is a real Plex config: the two files a migration needs, a -wal, and
+// the Metadata tree Plex rebuilds.
 func plexTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -391,8 +353,7 @@ func plexTree(t *testing.T) string {
 	return dir
 }
 
-// plexCarry is what a snapshot carries out of a Plex config directory: the
-// preferences and the databases, never the metadata tree.
+// plexCarry is the preferences and databases, never the metadata tree.
 func plexCarry() []File {
 	const where = "Library/Application Support/Plex Media Server/"
 	return []File{
@@ -403,11 +364,6 @@ func plexCarry() []File {
 	}
 }
 
-// TestASnapshotCarriesOnlyTheFilesAConfigNames: an app whose config holds a
-// library's worth of covers beside the state it needs travels as the state. The
-// archive holds the named files and the directories above them, modes intact,
-// and nothing of Metadata or Cache; a companion a database writes only while
-// it is open may be absent, and the snapshot is still written.
 func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
@@ -451,7 +407,7 @@ func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the snapshot holds\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
-	// The state comes back out of it, and what Plex rebuilds does not.
+	// The state comes back; what Plex rebuilds does not.
 	opened, err := Open(path, filepath.Join(dir, "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -466,10 +422,6 @@ func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
 	}
 }
 
-// TestASnapshotLeavesOutWhatAFullCarryRebuilds: a full carry of Plex's config
-// directory is its tree -- Metadata and Media included, which is the artwork and
-// the preview thumbnails -- with the caches and records Plex rebuilds left out of
-// it, and the directories above them kept.
 func TestASnapshotLeavesOutWhatAFullCarryRebuilds(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
@@ -516,9 +468,6 @@ func TestASnapshotLeavesOutWhatAFullCarryRebuilds(t *testing.T) {
 	}
 }
 
-// TestASnapshotRefusesALeftOutPathItCannotPlace: a directory a caller says to
-// leave out has to be one inside the tree: a spelling that names nothing would
-// silently carry a library somebody decided against.
 func TestASnapshotRefusesALeftOutPathItCannotPlace(t *testing.T) {
 	tree := tree(t)
 	for _, c := range []Config{
@@ -539,11 +488,6 @@ func TestASnapshotRefusesALeftOutPathItCannotPlace(t *testing.T) {
 	}
 }
 
-// TestASnapshotRefusesARequiredFileItCannotCarry: Preferences.xml and the
-// library database are the state Plex cannot start without, so a snapshot
-// missing one is a refusal that names the path, and it leaves no file behind.
-// The -wal and -shm are not required: they exist only while Plex has the
-// database open.
 func TestASnapshotRefusesARequiredFileItCannotCarry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.tar.gz")
@@ -565,9 +509,6 @@ func TestASnapshotRefusesARequiredFileItCannotCarry(t *testing.T) {
 	}
 }
 
-// TestWriteRefusesCarriedFilesThatAreNotInsideTheConfig is checkConfigs' half
-// of the same rule: a name a snapshot carries is one path inside the config
-// directory, and a list cannot name one file twice.
 func TestWriteRefusesCarriedFilesThatAreNotInsideTheConfig(t *testing.T) {
 	tree := tree(t)
 	tests := []struct {

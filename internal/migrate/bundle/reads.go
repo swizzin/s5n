@@ -1,15 +1,10 @@
 package bundle
 
-// reads.go lists the snapshots a directory holds with the plan each one carries.
-//
-// It exists for one question: was this source read before? A cutover compares its
-// own read against the newest earlier read of the same source, because an app the
-// operator deleted before the earlier read is invisible now, and only a read taken
-// while the source was whole can say it was ever there (docs/box.md, "migrate").
-//
-// Only plan.yaml is read out of each file (archive.ReadEntry), so a directory of
-// final snapshots -- each one a config tree's worth of bytes -- is answered
-// without extracting any of them.
+// reads.go lists the snapshots a directory holds with the plan each carries, for
+// one question: was this source read before? A cutover compares its read against
+// the newest earlier read of the same source, because an app deleted since is
+// invisible now (docs/box.md, "migrate"). Only plan.yaml is read, so a directory
+// of final snapshots is answered without extracting any.
 
 import (
 	"errors"
@@ -34,14 +29,9 @@ type Read struct {
 	Plan []byte
 }
 
-// Reads lists every snapshot in dir, newest first by the time its name carries,
-// with the plan each one holds.
-//
-// A file that is not a snapshot is left alone, and one that cannot be read is
-// stepped over rather than being the directory's answer: a broken copy stays
-// where it is for the operator to look at, as Newest already does. A missing dir
-// is no snapshots at all -- the first run on a host has none, and that is not an
-// error.
+// Reads lists every snapshot, newest first, with its plan. A file that is not a
+// snapshot is left alone and an unreadable one stepped over, as Newest does. A
+// missing dir is no snapshots, which is not an error.
 func Reads(dir string) ([]Read, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

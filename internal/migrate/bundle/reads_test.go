@@ -1,7 +1,6 @@
 package bundle
 
-// reads_test.go covers listing a directory's snapshots with the plan each one
-// carries: the search `box migrate cutover` runs for the read already on record.
+// reads_test.go covers the search cutover runs for the read already on record.
 
 import (
 	"os"
@@ -15,7 +14,7 @@ import (
 func TestReadsListsNewestFirstWithEachPlan(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC)
-	// Written oldest first, so the order cannot come from the order of writes.
+	// Written oldest first, so order cannot come from the writes.
 	var names []string
 	for _, at := range []struct {
 		at   time.Time
@@ -37,8 +36,7 @@ func TestReadsListsNewestFirstWithEachPlan(t *testing.T) {
 		}
 		names = append(names, path)
 	}
-	// A stray file, and a file that is named like a snapshot and is not one: both
-	// are left alone rather than being the directory's answer.
+	// A stray file and a false snapshot name are both left alone.
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("mine\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +68,6 @@ func TestReadsListsNewestFirstWithEachPlan(t *testing.T) {
 	}
 }
 
-// TestReadsOfAMissingDirectoryIsNoReads: a host that has never been read has no
-// snapshot directory, which is not an error on the way to its first read.
 func TestReadsOfAMissingDirectoryIsNoReads(t *testing.T) {
 	reads, err := Reads(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {
