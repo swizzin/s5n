@@ -3111,7 +3111,10 @@ except Exception: print("")' || true
   # on the pod's port, where the box's key belongs.
   jf_status=$($K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.status\.json}' 2>/dev/null || true)
   echo "$jf_status" >"$WORK/jf-status.json"
-  if python3 - "$WORK/jf-status.json" <<'PYLIBS'
+  # The receipt is code the Job wrote, so a read that cannot parse is one line
+  # and a failed scenario, never a silent pass: a Python test that never ran is
+  # the same as no test.
+  python3 - "$WORK/jf-status.json" <<'PYLIBS' || { echo "the receipt's Jellyfin library rows could not be read"; fail=1; }
 import json, sys
 try:
     steps = json.load(open(sys.argv[1])).get("steps") or []
@@ -3119,16 +3122,11 @@ except Exception as exc:
     print("  the Job published no receipt to read: %s" % exc)
     sys.exit(1)
 byName = {s.get("name"): s for s in steps}
-missing = [n for n in ("sonarr", "radarr", "lidarr") when byName.get("jellyfin/library/" + n, {}).get("result") != "ok"]
+missing = [n for n in ("sonarr", "radarr", "lidarr") if byName.get("jellyfin/library/" + n, {}).get("result") != "ok"]
 if missing:
     print("  the receipt has no ok row for %s: the Job built no library for them" % ", ".join(missing))
     sys.exit(1)
 PYLIBS
-  then
-    :
-  else
-    fail=1
-  fi
   jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
   grep -q '"AppName":"s5n"' "$WORK/jf-keys.json" ||
     { echo "the Job minted no API key named s5n"; fail=1; }
