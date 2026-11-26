@@ -1,19 +1,11 @@
-// Package runlog is box's run log: the plain transcript of one command.
+// Package runlog is box's run log: the plain transcript of one command, every
+// line timestamped. It is bounded, because a box that checks every fifteen
+// minutes would otherwise fill /var/log: a run prunes the directory to the
+// newest KeepFiles and KeepBytes, and one file stops at MaxFile. Registered
+// secrets are replaced before they reach it.
 //
-// Every command writes one, because the screen is a summary and the log is the
-// record: object names, revisions, digests, the reasoning behind a decision, and
-// every line the screen showed, with a timestamp on each. A failed run names its
-// log last, so the operator has somewhere to look that is not their scrollback.
-//
-// It is bounded, and it has to be: a box that checks every fifteen minutes
-// would otherwise fill /var/log. A run prunes the directory first -- the newest
-// KeepFiles logs and at most KeepBytes in total, oldest first -- and one run's
-// file stops at MaxFile with a line saying so. Secrets are registered before
-// they can be written and are replaced where they would have gone.
-//
-// Nothing here can fail a command. A directory that cannot be written, a full
-// disk, a log that does not exist: each is one line at start or one silenced
-// write, never an exit code.
+// Nothing here can fail a command: an unwritable directory or a full disk is
+// one line, never an exit code.
 package runlog
 
 import (
@@ -37,13 +29,12 @@ const (
 	MaxFile = 16 << 20
 	// RootDir is where root's logs go.
 	RootDir = "/var/log/box"
-	// DirEnv names a directory in place of the default. It is box's own (the
-	// e2e points it under its work directory) and is never set by box.
+	// DirEnv names a directory in place of the default; the e2e sets it.
 	DirEnv = "BOX_LOG_DIR"
 	// Redacted is what a secret becomes.
 	Redacted = "<redacted>"
-	// TimerCommand is the name an update timer's wake logs under, so the prune
-	// can tell a wake from a run a person started.
+	// TimerCommand names an update timer's wake, so the prune can tell it from
+	// a run a person started.
 	TimerCommand = "update-timer"
 	// KeepTimer is how many of the KeepFiles a timer's wakes may hold, this
 	// wake's included.
@@ -80,11 +71,8 @@ func (l *Log) limit() int64 {
 	return MaxFile
 }
 
-// OpenAt starts a command's log in dir, pruning it first.
-//
-// A log that cannot be opened is still returned, disabled, with the reason: the
-// caller says one line and the command runs as it would have. It never returns a
-// nil Log, so no caller has to check.
+// OpenAt starts a command's log in dir, pruning it first. A log that cannot be
+// opened is still returned, disabled, so no caller has to check for nil.
 func OpenAt(dir, command string) (*Log, error) {
 	l := &Log{now: time.Now}
 	_, statErr := os.Stat(dir)
@@ -108,9 +96,8 @@ func OpenAt(dir, command string) (*Log, error) {
 	return l, nil
 }
 
-// create makes this run's log file. Two runs of one command in the same second
-// are two runs -- box applies, checks and hands over faster than that -- so a
-// taken name gets a suffix rather than costing one of them its transcript.
+// create makes this run's log file; two runs in one second get distinct names
+// rather than one losing its transcript.
 func create(dir, command string, now time.Time) (string, *os.File, error) {
 	stamp := now.UTC().Format(fileStamp)
 	for i := 1; i <= 99; i++ {
@@ -139,9 +126,8 @@ func Open(command string) (*Log, error) {
 	return OpenAt(dir, command)
 }
 
-// Dir is where this run's log goes: DirEnv when it is set, root's own directory
-// for root, and the user's state directory otherwise -- root's box writes to
-// /var/log, and a user's box must not need it.
+// Dir is where this run's log goes: DirEnv, root's /var/log/box, or the user's
+// state directory. A user's box must not need root's directory.
 func Dir() (string, error) {
 	return dirFor(os.Geteuid() == 0, os.Getenv, os.UserHomeDir)
 }
@@ -175,8 +161,7 @@ func (l *Log) Path() string {
 	return l.path
 }
 
-// Register names a value that must never reach the file. It is called for every
-// secret box handles -- a password, a token, an API key -- before the line that
+// Register names a value that must never reach the file, before the line that
 // might carry it.
 func (l *Log) Register(secret string) {
 	if l == nil || len(secret) < 3 {
@@ -194,10 +179,8 @@ func (l *Log) Register(secret string) {
 	sort.Slice(l.secrets, func(i, j int) bool { return len(l.secrets[i]) > len(l.secrets[j]) })
 }
 
-// Write is the io.Writer both renderers hand their finished lines to: every
-// line gets the timestamp, the secrets are taken out, and the file stops at its
-// cap. A write that fails is the end of the log; it is never an error the
-// command sees.
+// Write timestamps and redacts each finished line, then stops the file at its
+// cap. A failed write is never an error the command sees.
 func (l *Log) Write(p []byte) (int, error) {
 	if l == nil {
 		return len(p), nil
@@ -235,14 +218,13 @@ func (l *Log) line(line string) {
 	n, err := io.WriteString(l.f, out)
 	l.written += int64(n)
 	if err != nil {
-		// A full disk is the log's own problem: the command carries on with
-		// the screen, which is still going somewhere.
+		// A full disk is the log's problem; the screen carries on.
 		l.full = true
 	}
 }
 
-// redact takes the registered values and the colour out: the log is plain text,
-// and a secret is never part of it.
+// redact takes the registered secrets and the colour out: the log is plain
+// text.
 func (l *Log) redact(line string) string {
 	line = escape.ReplaceAllString(line, "")
 	for _, secret := range l.secrets {
@@ -254,8 +236,7 @@ func (l *Log) redact(line string) string {
 // escape matches the colour and cursor sequences a live renderer writes.
 var escape = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
 
-// Close finishes the file: the line that was still being written, then the
-// file. Closing twice is safe.
+// Close finishes the half-written line, then the file; closing twice is safe.
 func (l *Log) Close() error {
 	if l == nil {
 		return nil
@@ -274,9 +255,9 @@ func (l *Log) Close() error {
 	return f.Close()
 }
 
-// ownName is the name box gives a log: the command, the UTC second, and the
-// suffix a second run in that second takes. Nothing else in the directory is
-// box's to remove: BOX_LOG_DIR can name a directory other programs log into.
+// ownName is box's log name: command, UTC second, and a second run's suffix.
+// Nothing else in the directory is box's to remove, because BOX_LOG_DIR can
+// name a directory other programs log into.
 var ownName = regexp.MustCompile(`^[A-Za-z0-9._-]+-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.log$`)
 
 // logFile is one of box's logs as the prune sees it.
@@ -287,12 +268,9 @@ type logFile struct {
 	timer bool
 }
 
-// prune makes room for this run's log: an update timer's wakes keep the newest
-// KeepTimer-1 of their own first, so fifteen-minute checks never push out a run a
-// person started, and then the directory keeps the newest KeepFiles-1 of box's
-// logs and at most KeepBytes of them, oldest first. This run's log is the
-// KeepFiles-th at most, and the directory never outgrows the cap by more than one
-// run. command is this run's, so a wake makes room for itself among the wakes.
+// prune makes room for this run's log. A timer's wakes keep the newest
+// KeepTimer-1 of their own first, so fifteen-minute checks never push out a run
+// a person started; then the newest KeepFiles-1 and KeepBytes survive.
 func prune(dir, command string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
