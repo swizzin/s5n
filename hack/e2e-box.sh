@@ -1763,6 +1763,11 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
     "https://${DOMAIN}${base}"* | "${base}"*) : ;;
     *) echo "the callback sent the browser to ${location}, not back into the app"; fail=1 ;;
   esac
+  # The app's session is in the jar the callback wrote, and OIDC_JAR is the one
+  # a caller gets: the flow's second arm dropped the portal's cookie from it and
+  # the first factor put it back, so this jar is signed in at both -- which is
+  # what a browser that signed in once holds.
+  cp "$expired" "$jar"
 
   # 6. An endpoint only the app's own session opens. It answers with the
   #    account the provider issued the token for, and with the method that
@@ -3190,15 +3195,21 @@ for r in items:
     401 | 403) : ;;
     *) echo "the app's API answered ${fb_api_code} to the edge's cookie alone: the chart's own login is not standing"; fail=1 ;;
   esac
+  # The app's readiness path, asked the way a person's browser asks it: the
+  # edge's login is in front of every path on this host, so the portal's cookie
+  # is what reaches the app at all -- and the app serves this one without a
+  # login of its own, which is what makes it a readiness probe (the probe
+  # itself dials the pod, past the edge).
   fb_health=$(curl -sS -o "$WORK/filebrowser-health.json" -w '%{http_code}' \
-    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${DOMAIN}/filebrowser/health" 2>/dev/null || true)
-  echo "  GET /filebrowser/health: ${fb_health}"
+  echo "  GET /filebrowser/health with the session: ${fb_health}"
   [ "$fb_health" = 200 ] ||
     { echo "/filebrowser/health answered ${fb_health}: the chart's readiness path is not the one the app serves"; fail=1; }
   # The index is built in the background after start, so the poll waits for the
-  # first scan instead of racing it. The jar is the one the sign-in above left:
-  # this app's API is not the edge's to open.
+  # first scan instead of racing it. The jar is the one oidc_login leaves as
+  # OIDC_JAR -- signed in at the app as well as the edge -- because this app's
+  # API is not the edge's to open.
   fb_items=""
   for _ in $(seq 1 60); do
     fb_items=$(curl -sS -b "$WORK/oidc-filebrowser-jar.txt" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
