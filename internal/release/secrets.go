@@ -12,23 +12,15 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 )
 
-// SecretName is the Secret the chart renders for one release
-// (charts/s5n/templates/secret.yaml): every credential the apps and the wiring
-// Job read, generated or preserved across upgrades by `lookup`.
-//
-// It is the chart's name for release `s5n` in its own namespace, and box is the
-// only thing that writes into it: the keys the chart generates are rendered
-// from an empty Secret, so a key box fills in is one the chart then keeps.
+// SecretName is the chart's Secret for release `s5n` (secret.yaml): every
+// credential, generated or preserved by `lookup`. Box only adds keys the chart
+// then keeps.
 func SecretName() string { return ReleaseName + "-keys" }
 
-// SecretKeys is the release Secret, as one data key at a time.
-//
-// apply reads and, when Plex has been claimed since the install, writes one key
-// of it (plextoken.go). The implementation decodes on the way in and encodes on
-// the way out, so a caller only ever handles the value, and nothing here prints
-// one.
+// SecretKeys is the release Secret key by key; the implementation decodes and
+// encodes, and nothing prints a value.
 type SecretKeys interface {
-	// Get returns one data key's value, "" when the key is absent.
+	// Get returns one key's value, "" when absent.
 	Get(ctx context.Context, key string) (string, error)
 	// Set writes one data key's value.
 	Set(ctx context.Context, key, value string) error
@@ -63,10 +55,8 @@ func NewSecretFor(namespace string, cs kubernetes.Interface) *KubeSecret {
 	return &KubeSecret{namespace: namespace, name: SecretName(), cs: cs}
 }
 
-// Get reads one key. The Secret's data is plain base64 of the value, which is
-// what corev1.Secret already holds decoded. A Secret that is not there yet is
-// an absent key, not a failed read: apply asks an app's key before the release
-// that creates it exists.
+// Get reads one key; a missing Secret is an absent key, because apply asks
+// before the release that creates it exists.
 func (s *KubeSecret) Get(ctx context.Context, key string) (string, error) {
 	sec, err := s.secret(ctx)
 	if apierrors.IsNotFound(err) {
@@ -78,9 +68,8 @@ func (s *KubeSecret) Get(ctx context.Context, key string) (string, error) {
 	return string(sec.Data[key]), nil
 }
 
-// Set writes one key and leaves every other key as it was. The object is read
-// first, so the update carries its resourceVersion: a concurrent writer is
-// refused rather than overwritten.
+// Set writes one key and leaves others; the read first carries a
+// resourceVersion, so a concurrent writer is refused rather than overwritten.
 func (s *KubeSecret) Set(ctx context.Context, key, value string) error {
 	sec, err := s.secret(ctx)
 	if err != nil {

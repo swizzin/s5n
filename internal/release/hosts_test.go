@@ -10,34 +10,26 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// fakeHosts is the per-host TLS step: the read and the write apply makes around
-// its own, recorded in the shared event log so a test can prove where the step
-// landed relative to the release.
+// fakeHosts records where the per-host step landed relative to the release.
 type fakeHosts struct {
-	// missing is what Missing answers: the names the cluster has no listener
-	// for.
+	// missing is what Missing answers.
 	missing []string
 	missErr error
-	// ensureErr fails the step, the way a DNS mismatch or a user's kubeconfig
-	// does.
+	// ensureErr fails the step, as a DNS mismatch does.
 	ensureErr error
 
 	asks    []HostPlan
 	ensured []HostPlan
 	events  *[]string
 
-	// mayWrite is LoginAccess' first answer: true for root's step, false for a
-	// seedbox user's, whose kubeconfig cannot write the login at all.
+	// mayWrite is true for root, false for a user who cannot write the login.
 	mayWrite bool
-	// registered is the client Secret the seedbox's namespace holds, by app
-	// name: the second answer's read.
+	// registered is the client Secret each app holds.
 	registered map[string]bool
-	// clients records every app ClientRegistered was asked about.
+	// clients records every ClientRegistered question.
 	clients []string
 
-	// The login's half of the same step, which root's value also implements:
-	// loginPending is what Pending answers, so a fake left at false models a
-	// login that is already the one the values name.
+	// loginPending is what Login.Pending answers; false is already right.
 	loginPending bool
 	pendingErr   error
 	reconErr     error
@@ -48,8 +40,7 @@ type fakeHosts struct {
 	// stale is what Stale answers; staleErr fails it.
 	stale    []string
 	staleErr error
-	// staleFor reads the plan Stale was handed, for the tests that prove the
-	// decision reaches it. It wins over stale when set.
+	// staleFor reads the plan Stale was handed; it wins over stale.
 	staleFor func(HostPlan) []string
 }
 
@@ -75,19 +66,16 @@ func (f *fakeHosts) Reconcile(_ context.Context, plan HostPlan) error {
 // MayWrite is LoginAccess' first answer.
 func (f *fakeHosts) MayWrite(context.Context) (bool, error) { return f.mayWrite, nil }
 
-// ClientRegistered is its second: whether the app's Secret is in the
-// namespace. It records the question so a test can prove the refusal read it.
+// ClientRegistered reports the app's Secret and records the question.
 func (f *fakeHosts) ClientRegistered(_ context.Context, _, app string) (bool, error) {
 	f.clients = append(f.clients, app)
 	return f.registered[app], nil
 }
 
-// The compile-time half: root's step answers both of the release's questions.
+// Root's step answers both of the release's questions.
 var _ LoginAccess = (*fakeHosts)(nil)
 
-// hostsForUser is the step a user's apply gets: it serves the names it is
-// allowed to, and it has no login half at all -- a seedbox user's kubeconfig
-// cannot write the login, so the page everyone signs in on is never theirs.
+// hostsForUser serves its names and has no login half: a user cannot write it.
 type hostsForUser struct{ missing []string }
 
 func (h *hostsForUser) Missing(context.Context, HostPlan) ([]string, error) {
@@ -96,8 +84,7 @@ func (h *hostsForUser) Missing(context.Context, HostPlan) ([]string, error) {
 
 func (h *hostsForUser) Ensure(context.Context, HostPlan) error { return nil }
 
-// The compile-time half of the claim above: it is a Hosts and it is not a
-// Login, so an apply handed this value has no page to reconcile.
+// The user's step is a Hosts and not a Login.
 var _ Hosts = (*hostsForUser)(nil)
 
 func (f *fakeHosts) Missing(_ context.Context, plan HostPlan) ([]string, error) {
@@ -108,8 +95,7 @@ func (f *fakeHosts) Missing(_ context.Context, plan HostPlan) ([]string, error) 
 	return f.missing, nil
 }
 
-// Stale is the optional half init asks: hosts that answer already but whose
-// Certificate is not the one this run would issue.
+// Stale is init's optional half: answering hosts with the wrong Certificate.
 func (f *fakeHosts) Stale(_ context.Context, plan HostPlan) ([]string, error) {
 	f.stales = append(f.stales, plan)
 	if f.staleErr != nil {
@@ -132,12 +118,6 @@ func (f *fakeHosts) Ensure(_ context.Context, plan HostPlan) error {
 	return nil
 }
 
-// TestTheBoxsOwnHostIsServedBeforeTheRelease: the per-host step is the apply's,
-// on init as much as on a bare apply, and the box's own name is one of the
-// hosts it serves. That is not cosmetic: an app that signs in through the login
-// dials https://<host>/auth, the Gateway answers 443 only on a listener with
-// that name's Certificate, and Helm's wait holds the apply open for the app --
-// so a step that ran after the release was a deadlock, not a late write.
 func TestTheBoxsOwnHostIsServedBeforeTheRelease(t *testing.T) {
 	f := newFakes(t)
 	f.hosts = &fakeHosts{
@@ -167,22 +147,15 @@ func TestTheBoxsOwnHostIsServedBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// TestInitPlansAroundTheLoginItInstalls: on a first init nothing in the cluster
-// holds the login yet -- init installs it after the confirm -- so the plan pass
-// must not read one and refuse. It shows the login as work this run does, the
-// login lands after the answer, and the hosts follow it: a host's rule is
-// written into the login, and there is no login to write into before that.
 func TestInitPlansAroundTheLoginItInstalls(t *testing.T) {
 	f := newFakes(t)
-	// The step init hands over: its Pending answers "yes" for a cluster that
-	// has no login yet, because this run installs one.
+	// Pending says yes for a cluster with no login; this run installs one.
 	f.hosts = &fakeHosts{
 		missing:      []string{"box.example.com", "radarr.box.example.com"},
 		loginPending: true,
 		events:       &f.events,
 	}
-	// The login install is init's own step, after the confirm: the fake's
-	// ordering marker stands in for it.
+	// The marker stands in for init's login install after the confirm.
 	f.events = append(f.events, "login-install")
 
 	res, err := f.apply(t)
@@ -209,12 +182,6 @@ func TestInitPlansAroundTheLoginItInstalls(t *testing.T) {
 	}
 }
 
-// TestInitServesEveryHostItDecided: a second init finds every host answering
-// already, and hands them all to the step anyway. That is not churn: a host
-// issued self-signed before its name resolved has to be re-issued under the box
-// root, and only a run that walks every name can notice. The plan still shows
-// only the missing ones, so a run with nothing new says so, and the release
-// installs after the step either way.
 func TestInitServesEveryHostItDecided(t *testing.T) {
 	f := newFakes(t)
 	enableRadarrInGrant(t, f.grantPath)
@@ -239,11 +206,6 @@ func TestInitServesEveryHostItDecided(t *testing.T) {
 	}
 }
 
-// TestInitServesAHostWhoseCertificateIsStale: the per-host plan counts a host
-// whose Certificate the issuer changed under as work -- it answers, and with
-// something the box root never signed -- so init writes it, and writes it
-// before the release. The release has nothing to do: a certificate is not a
-// revision.
 func TestInitServesAHostWhoseCertificateIsStale(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -275,13 +237,6 @@ func TestInitServesAHostWhoseCertificateIsStale(t *testing.T) {
 	}
 }
 
-// TestInitReissuesAHostTheDNSDecisionMoved: init decides each name's issuer
-// before it hands over, and that decision -- not tls.issuer, which is empty
-// here because DNS decided -- is what the plan compares an existing Certificate
-// with. A host on s5n-selfsigned that this run would now write with
-// s5n-letsencrypt is plan work, so the confirm shows it and the step re-issues
-// it before the release moves. The anchor follows the same decision: a public
-// certificate needs nothing carried, so its removal is planned too.
 func TestInitReissuesAHostTheDNSDecisionMoved(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -326,9 +281,6 @@ func TestInitReissuesAHostTheDNSDecisionMoved(t *testing.T) {
 	}
 }
 
-// TestAnInitWithEveryHostRightChangesNothing: the same run with nothing stale
-// and nothing missing is the idempotent one -- it says so, and it asks the
-// per-host step nothing.
 func TestAnInitWithEveryHostRightChangesNothing(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -365,9 +317,7 @@ func TestAnInitWithEveryHostRightChangesNothing(t *testing.T) {
 	}
 }
 
-// enableRadarrInGrant is "root edited the grant": the one way an app is
-// switched on for a seedbox, appended to the fixture grant's apps section.
-// Radarr is the fixture chart's one app served at a host of its own.
+// enableRadarrInGrant is root editing the grant to switch on a hosted app.
 func enableRadarrInGrant(t *testing.T, grantPath string) {
 	t.Helper()
 	entry := "  radarr:\n    enabled: true\n"
@@ -381,7 +331,7 @@ func enableRadarrInGrant(t *testing.T, grantPath string) {
 	}
 }
 
-// eventIndex is the position of one event in the shared log, or -1.
+// eventIndex is one event's position, or -1.
 func eventIndex(events []string, want string) int {
 	for i, got := range events {
 		if got == want {
@@ -391,9 +341,6 @@ func eventIndex(events []string, want string) int {
 	return -1
 }
 
-// An apply that turns on an app served at a host of its own runs the per-host
-// step before the release moves, so the route the release creates always has a
-// listener under it.
 func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	f := newFakes(t)
 	enableRadarrInGrant(t, f.grantPath)
@@ -410,17 +357,14 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if ask.Domain != "box.example.com" {
 		t.Fatalf("the step was told the domain %q, want the grant's box.example.com", ask.Domain)
 	}
-	// The box's own name is planned first: the login is served on it, and its
-	// listener is what answers 443 at all.
+	// The box's own name is planned first: its listener answers 443.
 	if len(ask.Hosts) != 2 || ask.Hosts[0] != "box.example.com" || ask.Hosts[1] != "radarr.box.example.com" {
 		t.Fatalf("the step was asked about %v, want the box's own name and the one hosted app's", ask.Hosts)
 	}
 	if len(f.hosts.ensured) != 1 || len(f.hosts.ensured[0].Hosts) != 1 || f.hosts.ensured[0].Hosts[0] != "radarr.box.example.com" {
 		t.Fatalf("the step wrote %v, want radarr's host", f.hosts.ensured)
 	}
-	// The step carries the login's inputs too: a host is served when its rule
-	// exists, and the rule is the one init writes -- the grant's account, the
-	// document the release renders, and the release's own login image.
+	// The step carries the login's rule inputs, as init writes them.
 	rule := f.hosts.ensured[0].Rule
 	if rule.Login != "alice" {
 		t.Fatalf("the rule names %q, want the grant's login", rule.Login)
@@ -428,8 +372,7 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr" {
 		t.Fatalf("hosted apps = %v, want radarr", rule.Hosted)
 	}
-	// The catalog says radarr signs its own users in, and that list reaches the
-	// rule write: the per-host step renders the login from it.
+	// The catalog's own-login list reaches the rule write.
 	if len(rule.OwnLogin) != 1 || rule.OwnLogin[0] != "radarr" {
 		t.Fatalf("own-login apps = %v, want the catalog's radarr", rule.OwnLogin)
 	}
@@ -454,8 +397,6 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// A box whose hosted app already has its listener has nothing for the step to
-// do, and apply does not call it.
 func TestApplyLeavesAnAppHostThatIsAlreadyServed(t *testing.T) {
 	f := newFakes(t)
 	enableRadarrInGrant(t, f.grantPath)
@@ -475,9 +416,6 @@ func TestApplyLeavesAnAppHostThatIsAlreadyServed(t *testing.T) {
 	}
 }
 
-// No app is served at a host of its own: the only name apply asks about is the
-// box's own, which the cluster already serves, so a chart without a hosted app
-// costs this path one read and no write.
 func TestApplyAsksAboutNoHostWhenTheAppsStayOnPaths(t *testing.T) {
 	f := newFakes(t)
 	f.hosts = &fakeHosts{events: &f.events}
@@ -493,8 +431,6 @@ func TestApplyAsksAboutNoHostWhenTheAppsStayOnPaths(t *testing.T) {
 	}
 }
 
-// A stop in the per-host step is a stop before the release: nothing was
-// installed, and no storage or namespace was written either.
 func TestAFailedHostStepLeavesTheReleaseAlone(t *testing.T) {
 	f := newFakes(t)
 	enableRadarrInGrant(t, f.grantPath)
@@ -522,8 +458,6 @@ func TestAFailedHostStepLeavesTheReleaseAlone(t *testing.T) {
 	}
 }
 
-// A certificate that is the only work left does not churn the release: the
-// revision users would roll back to stays where it is.
 func TestServingAHostDoesNotMakeAReleaseRevision(t *testing.T) {
 	f := newFakes(t)
 	enableRadarrInGrant(t, f.grantPath)
@@ -580,10 +514,6 @@ func settled(t *testing.T, f *fakes) {
 	f.store.existing["testbox-s5n-config"] = true
 }
 
-// A theme change is the login's work and nobody else's. The values file names
-// the palette, so the page everyone signs in on is re-rendered in it -- and no
-// name is DNS-checked, given a listener or re-certified for that, because a
-// palette is not a host.
 func TestAThemeChangeReconcilesTheLoginAlone(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -633,10 +563,6 @@ func TestAThemeChangeReconcilesTheLoginAlone(t *testing.T) {
 	}
 }
 
-// A login alone is not a release revision. The page the values already name was
-// hand-edited or drawn by an older box: the re-render is work, and the revision
-// users would roll back to stays where it is, exactly as a certificate that is
-// the only work does not move it.
 func TestReconcilingTheLoginDoesNotMakeAReleaseRevision(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -660,9 +586,6 @@ func TestReconcilingTheLoginDoesNotMakeAReleaseRevision(t *testing.T) {
 	}
 }
 
-// An apply with nothing to change leaves the login alone: it asks, is told the
-// page in the cluster is the one the values name, and stops before it asks the
-// operator anything.
 func TestAnApplyWithNothingToChangeLeavesTheLoginAlone(t *testing.T) {
 	f := newFakes(t)
 	settled(t, f)
@@ -686,10 +609,6 @@ func TestAnApplyWithNothingToChangeLeavesTheLoginAlone(t *testing.T) {
 	}
 }
 
-// A user's apply never touches the login: their kubeconfig cannot write it, so
-// the step they are given has no login half and apply reconciles nothing. The
-// assertion below is the whole guard -- a value that implemented Login would be
-// one a user's run could write the page everyone signs in on with.
 func TestAnApplyWithoutALoginHalfNeverTouchesThePage(t *testing.T) {
 	if _, ok := any(&hostsForUser{}).(Login); ok {
 		t.Fatal("the user's step implements Login: their apply would write root's page")

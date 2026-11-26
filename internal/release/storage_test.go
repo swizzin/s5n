@@ -21,9 +21,6 @@ var testVolumes = []seedbox.Volume{
 	{Kind: "config", Path: "/srv/s5n/config", Claim: "testbox-s5n-config"},
 }
 
-// TestKubeStoragePlansAndWritesTheStaticVolume is the real shape of what box
-// creates: a hostPath PV bound to exactly one claim, and a claim pinned to it.
-// Both carry no storage class, and the size is the nominal one.
 func TestKubeStoragePlansAndWritesTheStaticVolume(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -98,9 +95,6 @@ func TestKubeStoragePlansAndWritesTheStaticVolume(t *testing.T) {
 	}
 }
 
-// TestKubeStorageRefusesAnotherPath: a PV of box's name that backs a different
-// directory is never re-pointed. The error names both paths, and Plan wrote
-// nothing -- including the claim for the volume it did not refuse.
 func TestKubeStorageRefusesAnotherPath(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -133,8 +127,6 @@ func TestKubeStorageRefusesAnotherPath(t *testing.T) {
 	}
 }
 
-// TestKubeStorageRefusesAnotherClaim: the volume is bound to someone else's
-// claim, so it is not box's to reuse.
 func TestKubeStorageRefusesAnotherClaim(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -162,8 +154,6 @@ func TestKubeStorageRefusesAnotherClaim(t *testing.T) {
 	}
 }
 
-// TestKubeStorageRefusesABoundClaim: a claim that already names another volume
-// is never rebound; box names the claim it creates and nothing else.
 func TestKubeStorageRefusesABoundClaim(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -184,8 +174,6 @@ func TestKubeStorageRefusesABoundClaim(t *testing.T) {
 	}
 }
 
-// TestKubeStorageDeletesOnlyAVolumeItWouldRemove: undo is narrow on purpose. A
-// volume goes; a claim is refused rather than guessed at.
 func TestKubeStorageDeletesOnlyAVolumeItWouldRemove(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -211,8 +199,6 @@ func TestKubeStorageDeletesOnlyAVolumeItWouldRemove(t *testing.T) {
 	}
 }
 
-// TestKubeStorageDeletingAGoneVolumeIsNotAnError: a volume someone removed
-// between the write and the failure is already the state box wants.
 func TestKubeStorageDeletingAGoneVolumeIsNotAnError(t *testing.T) {
 	ctx := context.Background()
 	if err := NewStorageFor("testbox", fake.NewClientset()).Delete(ctx,
@@ -223,9 +209,7 @@ func TestKubeStorageDeletingAGoneVolumeIsNotAnError(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-// reviewAnswers answers the access review with one verdict. The TypeMeta is
-// what the API server sends back; the fake tracker needs it to decode the
-// object it returns.
+// reviewAnswers answers the access review; the tracker needs the TypeMeta.
 func reviewAnswers(cs *fake.Clientset, allowed bool) {
 	cs.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, &authv1.SelfSubjectAccessReview{
@@ -235,13 +219,9 @@ func reviewAnswers(cs *fake.Clientset, allowed bool) {
 	})
 }
 
-// allowNamespaceCreate answers the access review the way root's kubeconfig
-// does.
+// allowNamespaceCreate answers as root's kubeconfig does.
 func allowNamespaceCreate(cs *fake.Clientset) { reviewAnswers(cs, true) }
 
-// TestKubeStorageCreatesTheNamespaceItNeeds: a fresh cluster has no namespace,
-// so box asks whether it may create one, creates it with the restricted labels
-// and its own managed-by label, and then plans the namespace as present.
 func TestKubeStorageCreatesTheNamespaceItNeeds(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -286,9 +266,6 @@ func TestKubeStorageCreatesTheNamespaceItNeeds(t *testing.T) {
 	}
 }
 
-// TestKubeStorageWillNotCreateANamespaceWithoutPermission: the access review is
-// the gate, and a denial is a plain answer -- no error, nothing created. This
-// is a user's kubeconfig, which is namespace-scoped.
 func TestKubeStorageWillNotCreateANamespaceWithoutPermission(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -307,9 +284,6 @@ func TestKubeStorageWillNotCreateANamespaceWithoutPermission(t *testing.T) {
 	}
 }
 
-// TestKubeStorageReportsAWeakNamespaceAndLeavesItAlone: enforce is what admits
-// a pod, so a namespace enforcing baseline is weaker than the chart assumes.
-// Planning it changes nothing; the labels are still the admin's.
 func TestKubeStorageReportsAWeakNamespaceAndLeavesItAlone(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
@@ -339,8 +313,6 @@ func TestKubeStorageReportsAWeakNamespaceAndLeavesItAlone(t *testing.T) {
 	}
 }
 
-// TestKubeStorageReportsANamespaceWithNoEnforceLabel: an unlabelled namespace
-// admits anything, so it is weaker too and apply warns.
 func TestKubeStorageReportsANamespaceWithNoEnforceLabel(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()

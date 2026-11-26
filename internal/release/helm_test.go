@@ -18,8 +18,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-// helmWithReleases is a Helm client over an in-memory release store: the real
-// accessor and the real storage code, with no API server.
+// helmWithReleases is a client over the real accessor and storage, in memory.
 func helmWithReleases(t *testing.T) *Helm {
 	t.Helper()
 	cs := k8sfake.NewClientset()
@@ -29,7 +28,7 @@ func helmWithReleases(t *testing.T) *Helm {
 	return &Helm{Namespace: "testbox", Release: ReleaseName, cfg: cfg, cs: cs}
 }
 
-// storedRelease writes one release record at a revision with a status.
+// storedRelease writes one record at a revision with a status.
 func storedRelease(t *testing.T, h *Helm, revision int, status common.Status, chartVersion string) {
 	t.Helper()
 	rel := &v1release.Release{
@@ -48,10 +47,6 @@ func storedRelease(t *testing.T, h *Helm, revision int, status common.Status, ch
 	}
 }
 
-// TestHelmStateNamesTheInstalledChart: an update moves from the chart version
-// the release was deployed with, and rolls back to the revision recorded before
-// its step. Both come from Helm's own record, never from the newest published
-// release or from box's idea of what it installed.
 func TestHelmStateNamesTheInstalledChart(t *testing.T) {
 	h := helmWithReleases(t)
 
@@ -73,8 +68,6 @@ func TestHelmStateNamesTheInstalledChart(t *testing.T) {
 	}
 }
 
-// TestHelmStateRefusesAFailedRelease: a release left failed is not one an
-// update may step, the same way apply refuses to install over it.
 func TestHelmStateRefusesAFailedRelease(t *testing.T) {
 	h := helmWithReleases(t)
 	storedRelease(t, h, 2, common.StatusFailed, "0.4.0")
@@ -85,9 +78,6 @@ func TestHelmStateRefusesAFailedRelease(t *testing.T) {
 	}
 }
 
-// TestHelmRollbackRefusesARevisionItCannotTrust: a zero revision is Helm's
-// "one back", which is not what update recorded; a cancelled run must not
-// start a rollback it cannot stop.
 func TestHelmRollbackRefusesARevisionItCannotTrust(t *testing.T) {
 	h := helmWithReleases(t)
 	if err := h.Rollback(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "not a revision") {
@@ -101,11 +91,6 @@ func TestHelmRollbackRefusesARevisionItCannotTrust(t *testing.T) {
 	}
 }
 
-// TestNewHelmWithTimeoutBoundsEveryRequest: `box status` reads the deployed
-// release without a wait of its own, and a context deadline bounds nothing
-// inside Helm, whose release storage reads with context.Background(). The
-// handle for that read therefore carries client-go's per-request timeout, and
-// every other handle leaves it at client-go's default.
 func TestNewHelmWithTimeoutBoundsEveryRequest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kubeconfig")
 	kubeconfig := `apiVersion: v1

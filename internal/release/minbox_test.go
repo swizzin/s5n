@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestCheckMinBox is the whole rule as a table: a chart declares the oldest box
-// that may install it, and box refuses below that, before any write. "dev" is
-// not a version, so a box built without one skips the check rather than
-// pretending to meet a floor.
 func TestCheckMinBox(t *testing.T) {
 	chart := func(minBox string) Chart {
 		c := Chart{Name: "s5n", Version: "0.4.0"}
@@ -61,9 +57,6 @@ func TestCheckMinBox(t *testing.T) {
 	}
 }
 
-// TestACheckoutIsNotExemptFromTheFloor: where a chart came from does not
-// decide whether this box may install it. The fixture loader refuses for the
-// same reason the registry path does.
 func TestACheckoutIsNotExemptFromTheFloor(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join("..", "..", "charts", "s5n")

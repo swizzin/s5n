@@ -8,32 +8,22 @@ import (
 )
 
 const (
-	// MinBoxAnnotation is the Chart.yaml annotation naming the oldest box that
-	// may install a chart release (docs/box.md, "A minimum box version"). It
-	// goes up only when one of the interfaces box and the chart share changes
-	// in a way an older box would get wrong — a renamed grant key, a status
-	// field whose meaning changed, a new kind of setup question — never for a
-	// new app, a digest bump or an optional values key.
+	// MinBoxAnnotation names the oldest box that may install a release
+	// (docs/box.md, "A minimum box version"). It rises only when a shared
+	// interface changes, never for an app, digest or optional key.
 	MinBoxAnnotation = "box.s5n/min-box"
-	// UpgradeFromAnnotation is the oldest release the chart can be upgraded
-	// from. box carries it; `box update`, which steps through intermediate
-	// releases, is what will act on it.
+	// UpgradeFromAnnotation is the oldest release this chart can be upgraded
+	// from; `box update` acts on it.
 	UpgradeFromAnnotation = "box.s5n/upgrade-from"
 
-	// DevVersion is the version of a box built without -X main.version. It
-	// cannot be compared with a chart's floor, so it skips the check and says
-	// so once; a release build always has one.
+	// DevVersion is a box built without -X main.version; it skips min-box and
+	// says so once.
 	DevVersion = "dev"
 )
 
-// CheckMinBox refuses a chart release whose box.s5n/min-box is newer than this
-// box. It is a pure function over the chart's annotations and two version
-// strings, so the refusal is table-tested without a registry or a cluster.
-//
-// It runs before anything is written: box loads and checks its chart before it
-// opens a cluster client, so a refusal here cannot have created a namespace, a
-// volume or a release. A chart with no annotation is accepted — the annotation
-// is chart-owned, and a chart that predates it has no floor to meet.
+// CheckMinBox refuses a release whose min-box is newer than this box. It runs
+// before a cluster client exists, so a refusal cannot have created anything. A
+// chart with no annotation is accepted: it has no floor to meet.
 func CheckMinBox(boxVersion string, chart Chart) error {
 	minBox := strings.TrimSpace(chart.Annotations[MinBoxAnnotation])
 	if minBox == "" {
@@ -59,9 +49,8 @@ func CheckMinBox(boxVersion string, chart Chart) error {
 	return nil
 }
 
-// IsDevVersion reports whether box was built without a version. Such a box
-// skips the min-box check, because "dev" is not a version anything can be
-// compared against.
+// IsDevVersion reports a box built without a version; "dev" cannot be
+// compared with a floor.
 func IsDevVersion(v string) bool {
 	v = strings.TrimSpace(v)
 	return v == "" || v == DevVersion

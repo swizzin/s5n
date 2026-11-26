@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// tokenKey is the values path the tests treat as transient. It is the real
-// chart's: the Plex claim token is the only answer that cannot live in a file.
+// tokenKey is the real Plex claim path, the one answer that cannot live in a
+// file.
 const tokenKey = "secrets.plexClaimToken"
 
 const token = "claim-SECRET-do-not-print"
@@ -18,8 +18,7 @@ type confirmFunc func(string) (bool, error)
 
 func (f confirmFunc) Ask(q string, _ bool) (bool, error) { return f(q) }
 
-// withTransient is one apply as `box init` runs it: the same files, the same
-// chart, plus the hook the claim token comes through.
+// withTransient is init's apply, plus the claim-token hook.
 func (f *fakes) withTransient(t *testing.T, extra map[string]any, events *[]string) (Result, error) {
 	t.Helper()
 	opts := Options{
@@ -65,8 +64,6 @@ func sameFiles(t *testing.T, before map[string]string) {
 	}
 }
 
-// TestTransientIsAskedAfterTheConfirm: the answer arrives after the operator
-// said yes, reaches the release, and is not written to either file.
 func TestTransientIsAskedAfterTheConfirm(t *testing.T) {
 	f := newFakes(t)
 	before := fileContents(t, f.grantPath, f.values)
@@ -101,10 +98,6 @@ func TestTransientIsAskedAfterTheConfirm(t *testing.T) {
 	sameFiles(t, before)
 }
 
-// TestTransientIsNeverInALaterDiff: Helm stores what it rendered with, so the
-// next run's diff compares the stored answer with the file's empty default.
-// That change is dropped, which is what keeps the secret out of the output and
-// a re-run a no-op.
 func TestTransientIsNeverInALaterDiff(t *testing.T) {
 	f := newFakes(t)
 	if _, err := f.withTransient(t, map[string]any{tokenKey: token}, nil); err != nil {
@@ -134,8 +127,6 @@ func TestTransientIsNeverInALaterDiff(t *testing.T) {
 	}
 }
 
-// TestTransientCannotSetAGrantKey: the manifest refuses a grant key, but an
-// answer is still an answer, and the grant is root's whichever way it arrives.
 func TestTransientCannotSetAGrantKey(t *testing.T) {
 	f := newFakes(t)
 	before := fileContents(t, f.grantPath, f.values)
@@ -150,8 +141,6 @@ func TestTransientCannotSetAGrantKey(t *testing.T) {
 	sameFiles(t, before)
 }
 
-// TestTransientAskerFailureWritesNothing: a claim token that never arrives stops
-// the apply before the storage or the release is written.
 func TestTransientAskerFailureWritesNothing(t *testing.T) {
 	f := newFakes(t)
 	opts := Options{
@@ -172,8 +161,6 @@ func TestTransientAskerFailureWritesNothing(t *testing.T) {
 	}
 }
 
-// TestTransientEmptyAnswerIsSkipped: an optional question pressed enter on is
-// not a value; the chart sees its own default.
 func TestTransientEmptyAnswerIsSkipped(t *testing.T) {
 	f := newFakes(t)
 	res, err := f.withTransient(t, map[string]any{tokenKey: "  "}, nil)

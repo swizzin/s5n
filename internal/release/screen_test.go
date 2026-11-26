@@ -11,12 +11,9 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// These are the screens the wiring wait and its receipt produce, from fakes: a
-// receipt whose checks all passed, one with checks a person still has to clear,
-// one that failed, and a wait that ran out of time. docs/output.md is the
-// rulebook behind them.
+// The wiring screens docs/output.md describes, from fakes.
 
-// checkSteps is a receipt with n checks that all passed.
+// checkSteps is a receipt of n passing checks.
 func checkSteps(n int) []Step {
 	steps := make([]Step, 0, n)
 	for i := 0; i < n; i++ {
@@ -25,9 +22,7 @@ func checkSteps(n int) []Step {
 	return steps
 }
 
-// receiptScreen runs one wait and then renders its receipt, which is what an
-// apply does: the wait says nothing itself, and the receipt is the row. It
-// returns the screen and the run log separately.
+// receiptScreen runs a wait and renders its receipt, returning screen and log.
 func receiptScreen(t *testing.T, rec Receipt, setUp func(*fakes)) (string, string) {
 	t.Helper()
 	f := newFakes(t)
@@ -46,12 +41,9 @@ func receiptScreen(t *testing.T, rec Receipt, setUp func(*fakes)) (string, strin
 	return screen.String(), logf.String()
 }
 
-// rehearsalOfValue is the rehearsal flag the fake values carry, which no test
-// sets: a scene about a rehearsal says so itself.
+// rehearsalOfValue is the fake values' flag; a rehearsal scene sets its own.
 func rehearsalOfValue(*fakes) bool { return false }
 
-// TestEveryCheckPassedIsOneRow: the wiring that worked is one row -- what it
-// checked and how long the Job took -- and each check is a line in the run log.
 func TestEveryCheckPassedIsOneRow(t *testing.T) {
 	screen, logf := receiptScreen(t, Receipt{
 		Status:    "ok",
@@ -69,7 +61,7 @@ func TestEveryCheckPassedIsOneRow(t *testing.T) {
 	if screen != want {
 		t.Fatalf("screen:\n%s\nwant:\n%s", screen, want)
 	}
-	// The Job's own log, and every check it folded away, are in the log.
+	// The Job's log and every folded check are in the run log.
 	for _, want := range []string{
 		"wiring Job log:",
 		"  s5n wiring: 2 Arr instance(s), qBittorrent=true, Prowlarr=true",
@@ -85,9 +77,6 @@ func TestEveryCheckPassedIsOneRow(t *testing.T) {
 	}
 }
 
-// TestAFastReceiptStillSaysHowLong: an empty box's wiring finishes inside a
-// second, and the row still has its duration rather than a gap where every
-// other receipt has a number.
 func TestAFastReceiptStillSaysHowLong(t *testing.T) {
 	screen, logf := receiptScreen(t, Receipt{
 		Status:    "ok",
@@ -104,9 +93,6 @@ func TestAFastReceiptStillSaysHowLong(t *testing.T) {
 	}
 }
 
-// TestAPendingRowWaitsOnAPerson: a check a person still has to clear is a row
-// of its own, marked !, with the state in its column and the reason -- the URL
-// or the command -- hanging under it.
 func TestAPendingRowWaitsOnAPerson(t *testing.T) {
 	screen, logf := receiptScreen(t, Receipt{
 		Status:    "ok",
@@ -136,9 +122,6 @@ func TestAPendingRowWaitsOnAPerson(t *testing.T) {
 	}
 }
 
-// TestAFailedCheckIsOneCrossRow: the check that failed is the row, and the
-// reason hangs under it. The command's own error says nothing more, so the
-// apply's caller prints the run log's path and not a second copy.
 func TestAFailedCheckIsOneCrossRow(t *testing.T) {
 	f := newFakes(t)
 	f.rel.receipt = Receipt{
@@ -156,8 +139,7 @@ func TestAFailedCheckIsOneCrossRow(t *testing.T) {
 		t.Fatalf("error = %v, want the rows the flow already drew", err)
 	}
 	out := f.out.String()
-	// One block, one name column: the longer check's name widens it, and the
-	// pending row after it keeps the same column rather than its own.
+	// One block, one name column: a longer check widens it for every row.
 	for _, want := range []string{
 		"✗ sonarr/downloadclient  failed",
 		"the API refused the client",
@@ -170,9 +152,6 @@ func TestAFailedCheckIsOneCrossRow(t *testing.T) {
 	}
 }
 
-// TestARehearsalSaysItsPendingRowsAreTheRealRuns: a rehearsal box has no
-// internet, so a claim or a sign-in is not for that box to clear. The rows say
-// where they are cleared instead of pointing at a URL on a disposable box.
 func TestARehearsalSaysItsPendingRowsAreTheRealRuns(t *testing.T) {
 	var out bytes.Buffer
 	r := &say.Plain{W: &out}
@@ -196,9 +175,6 @@ func TestARehearsalSaysItsPendingRowsAreTheRealRuns(t *testing.T) {
 	}
 }
 
-// TestATimedOutWaitIsOneCrossRowAndTheCommand: a Job that never reports is one
-// ✗ row saying what box was waiting for -- the Job's newest line -- and the
-// command that runs it again. The Job's whole log is in the run log.
 func TestATimedOutWaitIsOneCrossRowAndTheCommand(t *testing.T) {
 	f := newFakes(t)
 	var screen, logf bytes.Buffer
@@ -235,10 +211,6 @@ func TestATimedOutWaitIsOneCrossRowAndTheCommand(t *testing.T) {
 	}
 }
 
-// TestTheWaitIsNotHeldByAJobWithNoLog: the read is a pod's log, and a pod that
-// is not there -- or one that is up and quiet -- is not an error the wait
-// reports. The budget alone ends the wait, so a cluster that cannot answer
-// `pods/log` costs the wait nothing.
 func TestTheWaitIsNotHeldByAJobWithNoLog(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

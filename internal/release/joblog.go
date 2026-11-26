@@ -11,43 +11,27 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// JobLogs is what a ReleaseClient may also offer: the wiring Job's log. A
-// client that does not offer it still waits for the receipt; the wait just has
-// no line to show.
-//
-// The Job is a Helm hook, so it is not a release resource and Helm knows
-// nothing about its pod. An implementation finds the pod itself, which is why
-// this is the client's job and not the wait's.
+// JobLogs is what a ReleaseClient may also offer: the wiring Job's log, so the
+// wait has a live line. The Job is a hook, not a release resource, so the client
+// finds its pod itself.
 type JobLogs interface {
-	// JobLog returns the wiring Job's log: followed from the beginning when
-	// follow is set, so box reads each line once as the Job writes it, or as it
-	// stands and then the end, which is what a copy taken afterwards reads. An
-	// error means there is nothing to read (yet): the pod does not exist, or
-	// has not started.
+	// JobLog follows from the beginning when follow is set, else reads what
+	// stands. An error means nothing to read yet.
 	JobLog(ctx context.Context, follow bool) (io.ReadCloser, error)
 }
 
-// maxJobLogLines bounds what one wait keeps of the Job's log for the run log. A
-// wiring run prints some fifty lines, so a bound this wide is a runaway log
-// rather than a wiring run.
+// maxJobLogLines bounds what a wait keeps; a wiring run prints about fifty.
 const maxJobLogLines = 4000
 
-// stopGrace bounds how long a wait's end waits for the log reader, so a pod
-// that stopped answering cannot hold the command open.
+// stopGrace bounds the log reader's stop, so a silent pod cannot hold box open.
 const stopGrace = 5 * time.Second
 
-// jobLog is the wiring Job's log while box waits for its receipt: the newest
-// line for the live line, and every line kept for the run log.
+// jobLog is the wiring Job's log while box waits: the newest line live, every
+// line for the run log, read once in the background into memory.
 //
-// The stream is opened once, in the background, and read into memory: the
-// newest line is a field, not a request, so a pod that is not there, is
-// restarting, or is gone costs the screen nothing, and a wait's budget is never
-// spent on a log.
-//
-// Nothing here cancels a request it made. A wait that ends closes the stream it
-// is reading instead, because client-go logs a cancelled read of a response
-// body to klog, and a klog line in the middle of box's output is the one thing
-// box's own warning policy exists to prevent.
+// Nothing here cancels a request it made: client-go logs a cancelled body read
+// to klog, and a klog line in box's output is what its policy exists to prevent.
+// A wait that ends closes the stream instead.
 type jobLog struct {
 	open func(context.Context, bool) (io.ReadCloser, error)
 	poll time.Duration
@@ -63,9 +47,8 @@ type jobLog struct {
 	once sync.Once
 }
 
-// startJobLog follows the wiring Job's log for one wait. A client that cannot
-// follow one gets nil, which every method here tolerates: the wait is the same
-// wait, and silence is what box had before.
+// startJobLog follows the Job's log for one wait; a client that cannot gets
+// nil, which every method tolerates.
 func startJobLog(ctx context.Context, client ReleaseClient, poll time.Duration) *jobLog {
 	src, ok := client.(JobLogs)
 	if !ok {
@@ -85,8 +68,7 @@ func startJobLog(ctx context.Context, client ReleaseClient, poll time.Duration) 
 	return j
 }
 
-// newest is the newest line the Job has written, for the live line. It reads
-// memory and never a pod.
+// newest is the newest line, read from memory, never a pod.
 func (j *jobLog) newest() string {
 	if j == nil {
 		return ""
@@ -99,9 +81,8 @@ func (j *jobLog) newest() string {
 	return j.lines[len(j.lines)-1]
 }
 
-// follow reads the Job's log until it ends or the wait stops it. A pod that is
-// not there yet is not a fault: the Job may still be scheduling, and the wait's
-// budget is what says how long box gives it.
+// follow reads until the log ends or the wait stops it; no pod yet is not a
+// fault, only the budget decides.
 func (j *jobLog) follow() {
 	defer close(j.done)
 	for {
@@ -116,8 +97,8 @@ func (j *jobLog) follow() {
 			continue
 		}
 		j.setStream(rc)
-		// A wait that ended while the stream was opening has nothing more to
-		// read: closing it here is what ends this read rather than a context.
+		// A wait that ended while opening closes the stream instead of a
+		// context.
 		if !j.running() {
 			j.clearStream(rc)
 			_ = rc.Close()
@@ -126,10 +107,8 @@ func (j *jobLog) follow() {
 		j.read(rc)
 		j.clearStream(rc)
 		_ = rc.Close()
-		// The pod that wrote the log box was waiting on has finished. A Job
-		// that retried starts another pod, and the receipt -- not the log -- is
-		// what this wait is for; following the same pod again would only add the
-		// lines already read, so the reading stops here.
+		// The pod finished. A retried Job starts another; the receipt is what the
+		// wait is for, and following again would repeat lines.
 		return
 	}
 }
@@ -175,9 +154,7 @@ func (j *jobLog) clearStream(rc io.ReadCloser) {
 	}
 }
 
-// read appends every line the stream carries. A line is trimmed of the padding
-// the Job's own columns add on the right, because this text goes into box's
-// lines, not into a table of the Job's.
+// read appends every line, trimmed of the Job's right padding.
 func (j *jobLog) read(rc io.ReadCloser) {
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -196,11 +173,9 @@ func (j *jobLog) read(rc io.ReadCloser) {
 	}
 }
 
-// stop ends the reader and waits for it: the run log's copy of the Job's log is
-// then the whole log, not the part that happened to arrive. A wait can end in
-// the same breath it began -- a receipt that was published before the wait
-// started -- and the reader may not have been scheduled at all, so a log that
-// was never read is read once here, in one request that ends at the log's end.
+// stop ends the reader and waits for it, so the run log gets the whole log. A
+// wait can end at once, before the reader ran, so an unread log is read once
+// here.
 func (j *jobLog) stop() {
 	if j == nil {
 		return
@@ -219,9 +194,7 @@ func (j *jobLog) stop() {
 	if !j.empty() {
 		return
 	}
-	// The wait's own context is over by now, and a followed log would wait for a
-	// line that may never come: this read is its own, not followed, and still
-	// bounded.
+	// The wait's context is over: read once, not followed, and still bounded.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(j.ctx), stopGrace)
 	defer cancel()
 	rc, err := j.open(ctx, false)
@@ -239,8 +212,8 @@ func (j *jobLog) empty() bool {
 	return len(j.lines) == 0
 }
 
-// logTo writes the Job's log into the run log. The screen showed one line at a
-// time; this is what a person reads when that line stopped moving.
+// logTo writes the Job's log into the run log, where a person reads it after
+// the live line stopped moving.
 func (j *jobLog) logTo(r say.Reporter) {
 	if j == nil || r == nil {
 		return

@@ -8,19 +8,13 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// screen is what `box apply` prints, in the layout every command is being
-// converted to: a heading with what the run is about, the diff that is the
-// review, one question, and one row per thing that happened. The revision, the
-// namespace and the values it renders are the log's.
 func TestTheApplyScreenIsARowPerThingThatHappened(t *testing.T) {
 	f := newFakes(t)
-	// The box is installed, so this run is a change rather than a first
-	// install: one value moves, the review is the diff, and the rest is one row
-	// each.
+	// Installed: one value moves, the diff is the review, one row each after.
 	f.install(t)
 	f.rel.chartVersion = "0.0.1"
 	f.out.Reset()
-	// One value changes: the review is the diff, and the rest is one row each.
+	// One value changes: the diff is the review.
 	f.writeValues(t, "wiring:\n  timeoutSeconds: 600\n")
 
 	if _, err := f.apply(t); err != nil {
@@ -41,8 +35,7 @@ func TestTheApplyScreenIsARowPerThingThatHappened(t *testing.T) {
 			t.Fatalf("line %d = %q, want it to start %q:\n%s", i+1, lines[i], line, f.out)
 		}
 	}
-	// The release is one row named by what it now runs, and the plumbing is
-	// not on the screen at all.
+	// The release is one row; the plumbing is not on screen.
 	release := lineWith(lines, "✓ s5n ")
 	if release == "" {
 		t.Fatalf("the release has no row:\n%s", f.out)
@@ -57,7 +50,6 @@ func TestTheApplyScreenIsARowPerThingThatHappened(t *testing.T) {
 	}
 }
 
-// Nothing to change is one note: a run that wrote nothing has no rows to read.
 func TestAnUnchangedApplyIsOneNote(t *testing.T) {
 	f := newFakes(t)
 	f.install(t)
@@ -73,9 +65,6 @@ func TestAnUnchangedApplyIsOneNote(t *testing.T) {
 	}
 }
 
-// A refusal is a ✗ row and its one reason: the values file is checked before a
-// cluster client exists, so the screen says what is wrong with the file rather
-// than what box was about to do.
 func TestARefusedApplyIsOneCrossRow(t *testing.T) {
 	f := newFakes(t)
 	f.writeValues(t, readFile(t, f.values)+"\nstorage:\n  data:\n    existingClaim: mine\n")
@@ -97,7 +86,7 @@ func TestARefusedApplyIsOneCrossRow(t *testing.T) {
 	}
 }
 
-// install runs the first apply, so the next one is a change against it.
+// install runs the first apply, so the next is a change against it.
 func (f *fakes) install(t *testing.T) {
 	t.Helper()
 	if _, err := f.apply(t); err != nil {
@@ -105,7 +94,7 @@ func (f *fakes) install(t *testing.T) {
 	}
 }
 
-// readFile is one fixture file, for a test that changes a copy of it.
+// readFile is one fixture file.
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := readFileBytes(path)
@@ -115,7 +104,7 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
-// lineWith is the first line that starts with prefix, or "".
+// lineWith is the first line starting with prefix, or "".
 func lineWith(lines []string, prefix string) string {
 	for _, line := range lines {
 		if strings.HasPrefix(line, prefix) {
@@ -125,6 +114,5 @@ func lineWith(lines []string, prefix string) string {
 	return ""
 }
 
-// readFileBytes is os.ReadFile, kept behind one name so a test reads a fixture
-// the same way the code reads a file.
+// readFileBytes is os.ReadFile behind one name.
 func readFileBytes(path string) ([]byte, error) { return os.ReadFile(path) }

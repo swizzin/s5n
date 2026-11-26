@@ -16,16 +16,14 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// fakeRelease stands in for the Helm client. It records what box asked it to
-// do, which is how the tests prove that a refusal reached the cluster nowhere.
+// fakeRelease records what box asked, proving a refusal wrote nothing.
 type fakeRelease struct {
 	values      map[string]any
 	exists      bool
 	deployedErr error
 	upgradeErr  error
 
-	// chartVersion is the chart release the fake has deployed: what State
-	// reports, and what Upgrade keeps current.
+	// chartVersion is what State reports and Upgrade keeps.
 	chartVersion string
 
 	upgrades int
@@ -35,10 +33,7 @@ type fakeRelease struct {
 	receipt    Receipt
 	receiptErr error
 
-	// job is the wiring Job's log as the fake release hands it to a wait: the
-	// lines a run wrote, or an error when the pod is not there. jobHang makes
-	// the stream stay open with nothing in it, which is a pod whose log box can
-	// read and which writes nothing.
+	// job is the Job's log; jobHang keeps it open and empty, a quiet pod.
 	job     []string
 	jobErr  error
 	jobHang bool
@@ -53,8 +48,7 @@ func (f *fakeRelease) Deployed(context.Context) (map[string]any, bool, error) {
 	return f.values, f.exists, nil
 }
 
-// State is what the fake release is deployed as: the chart version the last
-// Upgrade installed, or the one a test pinned to stand for an older release.
+// State is the chart version Upgrade installed or a test pinned.
 func (f *fakeRelease) State(context.Context) (ReleaseState, error) {
 	if f.deployedErr != nil {
 		return ReleaseState{}, f.deployedErr
@@ -84,9 +78,7 @@ func (f *fakeRelease) Receipt(context.Context) (Receipt, error) {
 	return f.receipt, nil
 }
 
-// JobLog is the fake's wiring Job log: the lines the test wrote, a stream that
-// says nothing until the wait ends when it is followed, and the lines as they
-// stand when it is read once.
+// JobLog serves the test's lines, or a quiet stream when followed.
 func (f *fakeRelease) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
 	if f.jobErr != nil {
 		return nil, f.jobErr
@@ -97,9 +89,7 @@ func (f *fakeRelease) JobLog(ctx context.Context, follow bool) (io.ReadCloser, e
 	return io.NopCloser(strings.NewReader(strings.Join(f.job, "\n") + "\n")), nil
 }
 
-// hangReader is a log stream with no lines in it: it reads nothing until its
-// context ends or its body is closed, which is what a pod that is up and quiet
-// looks like.
+// hangReader is a quiet pod's log: it reads nothing until closed or cancelled.
 type hangReader struct {
 	ctx    context.Context
 	closed chan struct{}
@@ -119,13 +109,9 @@ func (h *hangReader) Close() error {
 	return nil
 }
 
-// fakeStorage is a tiny cluster of storage objects: a namespace and its claims
-// exist or they do not, and Apply records the order box wrote things in. It
-// shares the event log with fakeRelease, so a test can prove the namespace and
-// the storage land before the release.
+// fakeStorage records the order namespace, claims and release were written.
 type fakeStorage struct {
-	// nsExists starts false: a fake cluster is a fresh one, which is the case
-	// that used to fail. nsCanCreate is what the access review answers.
+	// nsExists starts false (a fresh cluster); nsCanCreate is the review's answer.
 	nsExists    bool
 	nsCanCreate bool
 	nsEnforce   string
@@ -137,13 +123,12 @@ type fakeStorage struct {
 	planErr  error
 	plans    int
 	applied  []StorageObject
-	// applyErr fails the write of applyErrOn ("Kind/Name"), or any write when
-	// it is empty: the failure that used to strand a volume.
+	// applyErr fails applyErrOn ("Kind/Name"), or any write when empty.
 	applyErr   error
 	applyErrOn string
 	deleteErr  error
 	deleted    []StorageObject
-	// deleteBounded records, per Delete, whether its context had a deadline.
+	// deleteBounded records whether each Delete had a deadline.
 	deleteBounded []bool
 	events        *[]string
 }
@@ -200,8 +185,7 @@ func (f *fakeStorage) Apply(_ context.Context, obj StorageObject) error {
 }
 
 func (f *fakeStorage) Delete(ctx context.Context, obj StorageObject) error {
-	// A real client's request fails on a cancelled context; a fake that ignored
-	// it would pass an undo that cannot work after Ctrl-C.
+	// A real request fails on a cancelled context; undo must too.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -235,31 +219,22 @@ type fakes struct {
 	dataPath    string
 	configPath  string
 	hosts       *fakeHosts
-	// hostIssuers is init's per-name decision, handed to the plan so each
-	// Certificate is compared with the issuer this run would write for it.
+	// hostIssuers is init's per-name decision.
 	hostIssuers map[string]string
-	// otherHosts replaces the per-host step with any other value, the way a
-	// user's apply hands apply a step that has no login half.
+	// otherHosts replaces the per-host step, as a user's apply does.
 	otherHosts Hosts
 	anchor     *fakeAnchor
-	// anchorIssuer is the issuer this run writes the box's own host
-	// Certificate with: init's answer, which the anchor follows.
+	// anchorIssuer is init's answer, which the anchor follows.
 	anchorIssuer string
-	// hostsAll is init's apply: every name it decided goes to the per-host
-	// step, served or not.
+	// hostsAll is init's apply: every decided name goes to the step.
 	hostsAll bool
-	// chart is the release this run applies, for a test that stands for a
-	// release other than the fixture: nil is the fixture itself.
+	// chart is the applied release; nil is the fixture.
 	chart *Chart
-	// runHooks is Options.RunHooks: the release's hooks are this run's work,
-	// so the apply installs even when nothing about the release changed.
+	// runHooks makes the apply install even with nothing changed.
 	runHooks bool
-	// snaps is the snapshot step, when the test is about where in the apply
-	// it runs rather than what it copies.
+	// snaps is the snapshot step, for tests about when it runs.
 	snaps *fakeSnapshots
-	// secret is the release Secret, when the test is about a credential apply
-	// reads from it; nil leaves the applier with no handle on it, which is
-	// every test about something else.
+	// secret is the release Secret; nil for tests about something else.
 	secret SecretKeys
 }
 
@@ -268,9 +243,7 @@ func newFakes(t *testing.T) *fakes {
 	dir := t.TempDir()
 	f := &fakes{
 		rel: &fakeRelease{
-			// The release Helm has is the chart these tests apply, so an
-			// apply of the same chart is a no-op and one of another version
-			// is a step. A test that stands for an older release sets this.
+			// The deployed chart: same is a no-op, another version is a step.
 			chartVersion: testChart(t).Version,
 			receipt: Receipt{
 				Status:    "ok",
@@ -286,8 +259,7 @@ func newFakes(t *testing.T) *fakes {
 	copyFile(t, "testdata/grant.yaml", f.grantPath)
 	copyFile(t, "testdata/values.yaml", f.values)
 
-	// The grant's paths are real directories in the test's own temp dir: box
-	// stats them, and the refusal it can make is about a path that is missing.
+	// The grant's paths are real temp directories: box stats them.
 	data := filepath.Join(dir, "data")
 	config := filepath.Join(dir, "config")
 	for _, d := range []string{data, config} {
@@ -353,8 +325,7 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	return f.app.Apply(context.Background(), opts)
 }
 
-// rewrite replaces fixed strings in a file, so a fixture can name paths the
-// test can actually create.
+// rewrite lets a fixture name paths the test can create.
 func rewrite(t *testing.T, path string, repl map[string]string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -420,8 +391,7 @@ func TestFirstApplyInstallsWithTheGrantInCharge(t *testing.T) {
 	if on("radarr") {
 		t.Fatalf("radarr is enabled although the grant never mentions it: %v", apps)
 	}
-	// The claims are box's: named from the grant's namespace, not from either
-	// file, and not from the chart's defaults.
+	// Claims are named from the grant's namespace, not the files or chart.
 	if got := vals["storage"].(map[string]any)["data"].(map[string]any)["existingClaim"]; got != "testbox-s5n-data" {
 		t.Fatalf("storage.data.existingClaim = %v, want testbox-s5n-data", got)
 	}
@@ -455,12 +425,6 @@ func TestSecondApplyIsANoOp(t *testing.T) {
 	}
 }
 
-// TestANewerReleaseWithTheSameValuesIsApplied: every digest bump ships as a new
-// chart release with the values the installed box already has, and installing
-// it is the only thing that moves a pod. Reading that as "nothing to change"
-// left the box on the old release while `box update` reported the new one: the
-// step made no Helm revision, so nothing the step rolled back or health-checked
-// was ever installed.
 func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	f := newFakes(t)
 	if _, err := f.apply(t); err != nil {
@@ -468,8 +432,7 @@ func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	}
 	upgrades := f.rel.upgrades
 
-	// The next release: the same chart, another version, which is what a bump
-	// of one image inside variants.yaml publishes.
+	// The same chart at another version, as a variants.yaml bump publishes.
 	next := testChart(t)
 	next.Version = "0.0.2"
 	f.chart = &next
@@ -494,12 +457,6 @@ func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	}
 }
 
-// TestAnUnchangedReleaseIsInstalledForItsHooks: `box update`'s step moves the
-// release with the chart's hooks off, judges the moved apps, and applies the same
-// release once more with the hooks on. That apply has nothing else to change --
-// the release is deployed at that version and its values are the ones it has --
-// so without RunHooks it reads as "nothing to change" and the chart's wiring Job
-// never runs at all.
 func TestAnUnchangedReleaseIsInstalledForItsHooks(t *testing.T) {
 	f := newFakes(t)
 	if _, err := f.apply(t); err != nil {
@@ -624,8 +581,7 @@ func TestDeclinedPromptWritesNothing(t *testing.T) {
 
 func TestNoTTYWithoutYesRefuses(t *testing.T) {
 	f := newFakes(t)
-	// No reader: this is a stdin that is not a terminal, which is the case a
-	// pipe and /dev/null both are.
+	// No reader: stdin is not a terminal, as a pipe or /dev/null.
 	f.app.Confirm = &say.Plain{W: f.out}
 	_, err := f.apply(t)
 	if err == nil || !strings.Contains(err.Error(), "not a terminal") {
@@ -652,8 +608,6 @@ func TestWiringFailureFailsTheApply(t *testing.T) {
 	}
 }
 
-// TestTheReceiptIsOneRowAndTheRestIsTheLog: a healthy receipt is a count, and
-// every check behind it is in the run log rather than on the screen.
 func TestTheReceiptIsOneRowAndTheRestIsTheLog(t *testing.T) {
 	f := newFakes(t)
 	f.rel.receipt = Receipt{
@@ -699,8 +653,7 @@ func TestNoChartIsRefused(t *testing.T) {
 	}
 }
 
-// recordingChartSource records the reference apply asks for, so the mapping
-// from Options to the source is asserted from this side too.
+// recordingChartSource records the reference apply asks for.
 type recordingChartSource struct {
 	ref   ChartRef
 	chart Chart
@@ -711,10 +664,6 @@ func (r *recordingChartSource) Load(_ context.Context, ref ChartRef) (Chart, err
 	return r.chart, nil
 }
 
-// TestApplyAsksItsSourceForTheOptionsRef: apply loads its chart inside the
-// Applier, after both files are read. A --chart-repo or --chart-version that
-// stops at Options would silently pull the default release instead of the one
-// the operator named, which is what the flag tests in cmd/box cannot see.
 func TestApplyAsksItsSourceForTheOptionsRef(t *testing.T) {
 	f := newFakes(t)
 	src := &recordingChartSource{chart: testChart(t)}
@@ -736,9 +685,6 @@ func TestApplyAsksItsSourceForTheOptionsRef(t *testing.T) {
 	}
 }
 
-// TestFirstApplyCreatesStorageBeforeTheRelease: the claims are not release
-// objects, so box writes them itself, before Helm runs. The order matters: a
-// pod cannot schedule against a claim that appears after it.
 func TestFirstApplyCreatesStorageBeforeTheRelease(t *testing.T) {
 	f := newFakes(t)
 	res, err := f.apply(t)
@@ -768,9 +714,6 @@ func TestFirstApplyCreatesStorageBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// TestStorageConflictRefusesBeforeAnyWrite: a PV of box's name that backs
-// another path is a refusal, and it names both paths. Nothing is written -- not
-// the release and not the other volume's objects.
 func TestStorageConflictRefusesBeforeAnyWrite(t *testing.T) {
 	f := newFakes(t)
 	f.store.planErr = errors.New("PersistentVolume testbox-s5n-data already backs /srv/old, but storage.data.path is /srv/new: box never changes a volume's path in place")
@@ -790,9 +733,6 @@ func TestStorageConflictRefusesBeforeAnyWrite(t *testing.T) {
 	}
 }
 
-// TestFirstInstallCreatesTheMissingNamespaceFirst: on a fresh cluster nothing
-// exists, and the namespace has to be box's first write -- before the PV, which
-// is cluster-scoped and used to be left behind when the claim failed.
 func TestFirstInstallCreatesTheMissingNamespaceFirst(t *testing.T) {
 	f := newFakes(t)
 	res, err := f.apply(t)
@@ -813,10 +753,6 @@ func TestFirstInstallCreatesTheMissingNamespaceFirst(t *testing.T) {
 	}
 }
 
-// TestMissingNamespaceWithoutCreatePermissionRefusesBeforeAnyWrite: the gate
-// fires before side effects. A user's kubeconfig is namespace-scoped, so it
-// cannot create the namespace and apply says whose job that is; nothing --
-// namespace, PV, claim or release -- is written.
 func TestMissingNamespaceWithoutCreatePermissionRefusesBeforeAnyWrite(t *testing.T) {
 	f := newFakes(t)
 	f.store.nsCanCreate = false
@@ -839,9 +775,6 @@ func TestMissingNamespaceWithoutCreatePermissionRefusesBeforeAnyWrite(t *testing
 	}
 }
 
-// TestExistingNamespaceIsNeverRelabelled: root's or an admin's namespace wins,
-// even when it does not enforce restricted. box says so once and writes
-// nothing; a second apply says it again and still does not apply the namespace.
 func TestExistingNamespaceIsNeverRelabelled(t *testing.T) {
 	f := newFakes(t)
 	f.store.nsExists = true
@@ -864,8 +797,6 @@ func TestExistingNamespaceIsNeverRelabelled(t *testing.T) {
 	}
 }
 
-// TestExistingRestrictedNamespaceIsSilent: a namespace already at restricted is
-// not something to warn about, and it is not in the plan either.
 func TestExistingRestrictedNamespaceIsSilent(t *testing.T) {
 	f := newFakes(t)
 	f.store.nsExists = true
@@ -879,10 +810,6 @@ func TestExistingRestrictedNamespaceIsSilent(t *testing.T) {
 	}
 }
 
-// TestAFailedWriteRemovesTheVolumeThisRunCreated: the PV lands, the claim after
-// it fails, and the volume goes again. A claim is namespaced and left for the
-// next apply; a PV is cluster-scoped and is exactly the thing that used to be
-// stranded.
 func TestAFailedWriteRemovesTheVolumeThisRunCreated(t *testing.T) {
 	f := newFakes(t)
 	f.store.applyErr = errors.New("namespaces \"testbox\" not found")
@@ -913,9 +840,6 @@ func TestAFailedWriteRemovesTheVolumeThisRunCreated(t *testing.T) {
 	}
 }
 
-// TestAFailedReleaseRemovesTheVolumesThisRunCreated: the storage landed and Helm
-// did not, so the volumes go too. Without this, a first install that never got
-// a release leaves two cluster-scoped PVs behind.
 func TestAFailedReleaseRemovesTheVolumesThisRunCreated(t *testing.T) {
 	f := newFakes(t)
 	f.rel.upgradeErr = errors.New("apply s5n in testbox: release failed")
@@ -934,9 +858,6 @@ func TestAFailedReleaseRemovesTheVolumesThisRunCreated(t *testing.T) {
 	}
 }
 
-// TestAFailedApplyNeverDeletesAPreExistingVolume: a volume that was there
-// before this run is not box's to remove, even when the run fails after it.
-// Volume "config" exists; the data volume is created and its claim fails.
 func TestAFailedApplyNeverDeletesAPreExistingVolume(t *testing.T) {
 	f := newFakes(t)
 	f.store.existing["testbox-s5n-config"] = true
@@ -956,8 +877,6 @@ func TestAFailedApplyNeverDeletesAPreExistingVolume(t *testing.T) {
 	}
 }
 
-// TestAFailedUndoSaysTheVolumeIsStillThere: when the delete itself fails, the
-// operator gets both the cause and the leftover, by name.
 func TestAFailedUndoSaysTheVolumeIsStillThere(t *testing.T) {
 	f := newFakes(t)
 	f.rel.upgradeErr = errors.New("release failed")
@@ -974,9 +893,6 @@ func TestAFailedUndoSaysTheVolumeIsStillThere(t *testing.T) {
 	}
 }
 
-// TestMissingHostPathRefusesBeforeTheClusterIsOpened: a grant pointing at a
-// directory that is not there stops before box has a cluster client at all. The
-// message names `box init`, which is the command that creates the directory.
 func TestMissingHostPathRefusesBeforeTheClusterIsOpened(t *testing.T) {
 	f := newFakes(t)
 	gone := filepath.Join(t.TempDir(), "gone")
@@ -994,9 +910,6 @@ func TestMissingHostPathRefusesBeforeTheClusterIsOpened(t *testing.T) {
 	}
 }
 
-// TestPathsInNodeSkipsTheHostCheck: the e2e writes the directories inside the
-// kind node, where this host cannot see them, so it is the one caller allowed to
-// skip the stat. Nothing else changes: the objects still come from the grant.
 func TestPathsInNodeSkipsTheHostCheck(t *testing.T) {
 	f := newFakes(t)
 	f.pathsInNode = true
@@ -1015,8 +928,6 @@ func TestPathsInNodeSkipsTheHostCheck(t *testing.T) {
 	}
 }
 
-// Values box derives from the cluster are overlaid after both files and before
-// the diff, so the release Helm stores is the same document a re-run computes.
 func TestBoxValuesAreOverlaidOnTheEffectiveValues(t *testing.T) {
 	f := newFakes(t)
 	peers := []any{map[string]any{
@@ -1047,9 +958,6 @@ func TestBoxValuesAreOverlaidOnTheEffectiveValues(t *testing.T) {
 	}
 }
 
-// A derivation failure is a refusal before anything is opened or written: box
-// will not guess a NetworkPolicy peer, and it will not install a release whose
-// apps the Gateway cannot reach.
 func TestBoxValuesRefusalWritesNothing(t *testing.T) {
 	f := newFakes(t)
 	_, err := f.app.Apply(context.Background(), Options{
@@ -1070,10 +978,6 @@ func TestBoxValuesRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// A rollback hold reaches the release through apply: the values Helm gets must
-// name the image the app was rolled back to, or the upgrade would move it off
-// that image again. The callback is handed the seedbox apply already loaded, so
-// it reads the holds file beside the config root the grant names.
 func TestHoldsAreOverlaidOnTheEffectiveValues(t *testing.T) {
 	f := newFakes(t)
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1111,8 +1015,6 @@ func TestHoldsAreOverlaidOnTheEffectiveValues(t *testing.T) {
 	}
 }
 
-// A hold the chart's schema would refuse is a refusal before anything is opened:
-// box installs no release whose held app cannot render.
 func TestAHoldTheSchemaRefusesWritesNothing(t *testing.T) {
 	f := newFakes(t)
 	_, err := f.app.Apply(context.Background(), Options{
@@ -1135,10 +1037,6 @@ func TestAHoldTheSchemaRefusesWritesNothing(t *testing.T) {
 	}
 }
 
-// Undo is cleanup: a run cancelled after it wrote a volume must still take the
-// volume off, or the next apply refuses over a PV nobody's release owns. The
-// fake fails a Delete on a cancelled context the way a real client does, so
-// this test pins that undo does not hand the cancellation down.
 func TestUndoRunsAfterCancellation(t *testing.T) {
 	f := newFakes(t)
 	ctx, cancel := context.WithCancel(context.Background())
