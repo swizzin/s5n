@@ -327,8 +327,8 @@ func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
 	if plex.Login != LoginPortal {
 		t.Fatalf("apps.plex login = %q, want the explicit portal", plex.Login)
 	}
-	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "seerr" {
-		t.Fatalf("self-authenticating = %s, want seerr", got)
+	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "seerr,jellyfin" {
+		t.Fatalf("self-authenticating = %s, want seerr,jellyfin", got)
 	}
 }
 
@@ -575,10 +575,10 @@ func TestRealChartManifestLoads(t *testing.T) {
 	// The apps whose UI cannot live under a prefix (an absolute /api path, or
 	// assets built from the site root): the chart serves them at a host of their
 	// own, and box is what resolves and certifies those names.
-	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr,pbh" {
-		t.Fatalf("hosted apps = %s, want plex,seerr,pbh", got)
+	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr,jellyfin,pbh" {
+		t.Fatalf("hosted apps = %s, want plex,seerr,jellyfin,pbh", got)
 	}
-	for _, name := range []string{"plex", "seerr", "pbh"} {
+	for _, name := range []string{"plex", "seerr", "jellyfin", "pbh"} {
 		app, _ := cat.App(name)
 		if app.Exposure != ExposureHost {
 			t.Fatalf("apps.%s exposure = %q, want host", name, app.Exposure)
@@ -848,6 +848,7 @@ func TestRealChartSnapshots(t *testing.T) {
 		"autobrr":     "config.toml,autobrr.db,autobrr.db-wal,autobrr.db-shm",
 		"pbh":         "config.yml,persist/peerbanhelper-nt.db,persist/peerbanhelper-nt.db-wal,persist/peerbanhelper-nt.db-shm",
 		"maintainerr": "maintainerr.sqlite,maintainerr.sqlite-wal,maintainerr.sqlite-shm",
+		"jellyfin":    "config/*.xml,data/jellyfin.db,data/jellyfin.db-wal,data/jellyfin.db-shm",
 	}
 	for name, globs := range want {
 		app, ok := cat.App(name)

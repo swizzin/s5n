@@ -44,6 +44,7 @@ const (
 	appMaintainerr = "maintainerr"
 	appSabnzbd     = "sabnzbd"
 	appFilebrowser = "filebrowser"
+	appJellyfin    = "jellyfin"
 )
 
 // CatalogApp is the catalog app an instance name belongs to: "sonarr-4k" is
@@ -217,7 +218,9 @@ func urlBase(app, instance string) (string, bool) {
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true
-	case appQBittorrent, appPlex, appSeerr, appPBH:
+	// The apps the chart serves at a host of their own: their route matches the
+	// site root, so an address that points at one has no path to it.
+	case appQBittorrent, appPlex, appSeerr, appPBH, appJellyfin:
 		return "", true
 	}
 	return "", false

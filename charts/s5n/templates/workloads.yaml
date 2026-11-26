@@ -963,6 +963,15 @@ spec:
             - name: transcode
               mountPath: /transcode
             {{- end }}
+            {{- if eq $inst.app "jellyfin" }}
+            # Jellyfin's cache: transcode segments go here (JELLYFIN_CACHE_DIR),
+            # and its image writes nothing else outside /config, so the read-only
+            # root filesystem holds. It is an emptyDir, not the config claim:
+            # segments are the size of the media being watched and a restart
+            # loses nothing that cannot be made again.
+            - name: cache
+              mountPath: /cache
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -1009,6 +1018,10 @@ spec:
         {{- end }}
         {{- if eq $inst.app "plex" }}
         - name: transcode
+          emptyDir: {}
+        {{- end }}
+        {{- if eq $inst.app "jellyfin" }}
+        - name: cache
           emptyDir: {}
         {{- end }}
         {{- if eq $inst.app "qbittorrent" }}
@@ -1165,8 +1178,42 @@ spec:
               replaceFullPath: {{ printf "%s/" $urlBase }}
             statusCode: 301
     {{- end }}
-    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}
-    # The live task stream is a Server-Sent Events connection that has to stay
+    {{- if eq $inst.app "jellyfin" }}
+    # The first-run window, and the reason this app's host is safe to serve
+    # without the edge login.
+    #
+    # Until its wizard is complete Jellyfin's StartupController answers
+    # *anyone*: the controller carries
+    # [Authorize(Policy = Policies.FirstTimeSetupOrElevated)], and that policy's
+    # handler succeeds for every request while IsStartupWizardCompleted is
+    # false (Jellyfin.Api/Auth/FirstTimeSetupPolicy/FirstTimeSetupHandler.cs at
+    # v12.4). POST /Startup/User is where the first user -- the server's
+    # administrator -- is named and passworded, so whoever reached a fresh
+    # server first would own it. LibraryStructureController carries the same
+    # policy, so a fresh server also takes anonymous libraries.
+    #
+    # The job of naming the first user is the wiring Job's, and the Job reaches
+    # the app through its Service inside the cluster, where these rules do not
+    # apply. So the two anonymous prefixes are never served from the Gateway at
+    # all: a request for them is sent to the server's own page. The person can
+    # not lose a race they can not enter, and after the wizard both prefixes are
+    # administrator-only anyway, so nothing a signed-in person needs is lost.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /Startup
+        - path:
+            type: PathPrefix
+            value: /Library/VirtualFolders
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /
+            statusCode: 302
+    {{- end }}
+    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}    # The live task stream is a Server-Sent Events connection that has to stay
     # open, and Envoy's route timeout defaults to 15s, which would cut it: the
     # UI's log and task views would go quiet with nothing in the logs to say
     # why. It asks for no request timeout (Gateway API reads "0s" as "none"),

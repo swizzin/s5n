@@ -85,11 +85,14 @@ var GrantKeys = []Rule{
 
 	// login is the account the login in front of the Gateway is for: root's
 	// own identity on this box, written once at init and read back on every
-	// re-run. BoxOnly like the namespace, because it is box's record of who
-	// the box belongs to and never a chart value -- the chart knows nothing
-	// about Authelia, and a user editing this key would be renaming their own
-	// account behind root's back.
-	{Path: "login", BoxOnly: true, Why: "the account root's login creates: this box's own identity"},
+	// re-run. It is BoxOnly, because it is box's record of who the box belongs
+	// to and never a chart value a user edits -- the chart knows nothing about
+	// Authelia, and a user changing this key would be renaming their own
+	// account behind root's back. It is still handed to the release, because an
+	// app that keeps its own accounts (Jellyfin) names the person's first
+	// account after it; Effective writes it from the grant for a chart whose
+	// schema declares the key.
+	{Path: "login", BoxOnly: true, Why: "the account root's login creates: this box's own identity, and the name one app's own first account gets"},
 
 	// The chart ships no login; box is what puts one in front of every release,
 	// so no file may say otherwise. Fixed: box writes true rather than deriving

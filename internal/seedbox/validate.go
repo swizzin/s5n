@@ -154,6 +154,21 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	// The claim names are box's, from the volumes it creates: not the chart's
 	// defaults and not either file. Applied last so nothing can shadow them.
 	overlay(base, claims(vols), nil)
+	// login is the account root's login admits, and the one chart value that
+	// comes from it: an app that keeps its own accounts (Jellyfin) names the
+	// person's first account after it. Like auth.edge it is written only when
+	// the release being installed declares the key, because box reads every
+	// release back to the oldest it can upgrade from and those charts have no
+	// such value.
+	declaresLogin, err := Declares(c.Schema, "login")
+	if err != nil {
+		return nil, err
+	}
+	if declaresLogin {
+		if name, _ := s.Grant.data["login"].(string); strings.TrimSpace(name) != "" {
+			setPath(base, []string{"login"}, name)
+		}
+	}
 	if err := Validate(c.Schema, base); err != nil {
 		return nil, err
 	}

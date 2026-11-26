@@ -45,8 +45,41 @@ type Config struct {
 	Sabnzbd        *SabnzbdConfig     `json:"sabnzbd,omitempty"`
 	Autobrr        *AutobrrConfig     `json:"autobrr,omitempty"`
 	Pbh            *PbhConfig         `json:"pbh,omitempty"`
+	Jellyfin       *JellyfinConfig    `json:"jellyfin,omitempty"`
 	Instances      []Instance         `json:"instances"`
 	Bazarrs        []BazarrConfig     `json:"bazarrs,omitempty"`
+}
+
+// JellyfinConfig points at Jellyfin and carries what the Job needs to make the
+// server usable: the person's account, the automation account it signs in as,
+// the peers whose forwarded header the server honours, and the libraries the
+// release's Arrs write into.
+//
+// Unlike every other app here, none of this can be sealed into a file before
+// the app starts. Jellyfin's users, its API keys and its libraries are rows in
+// data/jellyfin.db, and its first-run wizard is an API, so the Job's first
+// conversation with a fresh server is the one that creates the first account.
+//
+// Username is the account root's login admits (the chart's `login`), so the
+// person's Jellyfin account carries the name they already use on the box.
+// UserPasswordFile and BoxPasswordFile are file references into the mounted
+// Secret; the second is never shown to anyone.
+type JellyfinConfig struct {
+	URL              string            `json:"url"`
+	Username         string            `json:"username"`
+	UserPasswordFile string            `json:"userPasswordFile"`
+	BoxPasswordFile  string            `json:"boxPasswordFile"`
+	KnownProxies     []string          `json:"knownProxies,omitempty"`
+	Libraries        []JellyfinLibrary `json:"libraries,omitempty"`
+}
+
+// JellyfinLibrary is one virtual folder: the Arr instance whose library
+// directory it holds, the collection type that Arr writes, and the directory
+// itself (the same one the data-contract step creates).
+type JellyfinLibrary struct {
+	Name           string `json:"name"`
+	CollectionType string `json:"collectionType"`
+	Path           string `json:"path"`
 }
 
 // QuiConfig points at qui's API. PasswordFile is the release Secret's
@@ -324,6 +357,26 @@ func (c *Config) validate() error {
 			fieldURL: c.Pbh.URL, fieldTokenFile: c.Pbh.TokenFile,
 		}); err != nil {
 			return err
+		}
+	}
+	if c.Jellyfin != nil {
+		if err := requireFields("jellyfin", map[string]string{
+			fieldURL: c.Jellyfin.URL, "username": c.Jellyfin.Username,
+			"userPasswordFile": c.Jellyfin.UserPasswordFile, "boxPasswordFile": c.Jellyfin.BoxPasswordFile,
+		}); err != nil {
+			return err
+		}
+		for i, l := range c.Jellyfin.Libraries {
+			if err := requireFields(fmt.Sprintf("jellyfin libraries[%d]", i), map[string]string{
+				"name": l.Name, "collectionType": l.CollectionType, "path": l.Path,
+			}); err != nil {
+				return err
+			}
+			switch l.CollectionType {
+			case "movies", "tvshows", "music":
+			default:
+				return fmt.Errorf("jellyfin libraries[%d] (%s): %q is not a collection type Jellyfin has (movies, tvshows, music)", i, l.Name, l.CollectionType)
+			}
 		}
 	}
 	for i, b := range c.Bazarrs {

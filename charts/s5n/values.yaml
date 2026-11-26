@@ -8,6 +8,16 @@
 # pins one, and values.schema.json lists every name internal/theme accepts.
 theme: s5n
 
+# The account root's login admits, written by box from the grant (it is that
+# grant key, not a chart value: a user's values file naming it is refused). The
+# chart renders no login, and nothing about the edge reads this; it is here
+# because an app that keeps its own accounts names the person's first account
+# after it -- Jellyfin's first user, which its players then sign in as -- so the
+# person has one name across the box. Empty on a plain `helm install`, which is
+# also a render failure if Jellyfin is switched on: that app's first account has
+# no name without it.
+login: ""
+
 global:
   # One uid/gid for every app, so every file on /data has one owner.
   puid: 1000
@@ -287,6 +297,40 @@ apps:
       variant: default
     port: 5055
     rewritePath: true
+    resources: {}
+    env: {}
+
+  # Opt-in: a second media server, and the one whose clients can transcode in
+  # software only until a GPU is a platform feature. It is served at
+  # jellyfin.<domain> because its players are configured with a server address
+  # and a path prefix breaks a subset of them, and it signs its players in
+  # itself, so that host bypasses the box's login (catalog.yaml). Its own
+  # first-run wizard is an API: the wiring Job completes it, and the chart
+  # serves no /Startup path at the edge, so nobody outside the cluster can name
+  # the server's first user (templates/workloads.yaml).
+  jellyfin:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8096
+    # No prefix is used: the catalog serves this app at its own host name, so
+    # the route matches its whole site root and nothing is stripped.
+    rewritePath: true
+    # The peers whose X-Forwarded-For Jellyfin honours. It accepts a subnet as
+    # well as a single address (Jellyfin.Server/Extensions/
+    # ApiServiceCollectionExtensions.cs, AddProxyAddresses), and with the list
+    # empty it ignores the header entirely (ConfigureForwardHeaders, same file):
+    # every request the Gateway proxies would then look like it came from the
+    # Gateway pod, which is a local address. That is not a cosmetic difference:
+    # the endpoints marked LocalAccessOrRequiresElevation answer a local caller
+    # without a credential, so an internet client behind the Gateway would get
+    # an anonymous restart, and every per-user remote-access rule would see
+    # "local". box writes the cluster's own pod network here on every apply
+    # (it is read from the Nodes' podCIDRs); a plain `helm install` sets the
+    # pod subnet its CNI hands out.
+    knownProxies: []
     resources: {}
     env: {}
 

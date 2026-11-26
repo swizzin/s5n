@@ -222,6 +222,46 @@ apps:
     snapshot: [settings.json, db/db.sqlite3, db/db.sqlite3-wal, db/db.sqlite3-shm]
     questions: []
 
+  # Opt-in: a second media server. Its players are configured with a server
+  # address, so it is served at jellyfin.<domain> rather than under a prefix,
+  # and it signs its players in itself (see below). It transcodes in software
+  # until a GPU is handed to the pod by a device plugin, which is a platform
+  # feature PLAN.md holds back for Plex and Jellyfin together.
+  jellyfin:
+    description: a media server your players talk to, with its own accounts
+    instances: false
+    default: false
+    # Its players are outside the release and nothing in it calls Jellyfin, so
+    # it names no peer and nothing needs to admit it: its ingress is the
+    # Gateway's and the wiring Job's alone. (Bazarr and Seerr grow an edge here
+    # the day they are wired to it; neither is today -- Seerr stays on Plex and
+    # Bazarr reads the Arrs.)
+    # Jellyfin's web client writes absolute asset paths, so it is served at
+    # jellyfin.<domain> rather than under /jellyfin.
+    exposure: host
+    # Every Jellyfin client authenticates against the server with its own
+    # token; a login page in front of it is a form no player can answer. Its
+    # host therefore bypasses the edge login, exactly as Plex's does, and the
+    # NetworkPolicy is what keeps the rest of the cluster out.
+    login: own
+    # The four configuration files a version rewrites, and the library
+    # database with the SQLite companions a running server writes beside it.
+    # data/metadata and data/trickplay are artwork and previews the server
+    # rebuilds from the media, and data/library is its own view of it: copying
+    # any of them would mean copying a library directory on every update.
+    # Jellyfin keeps those trees under JELLYFIN_DATA_DIR=/config and its
+    # settings under JELLYFIN_CONFIG_DIR=/config/config (the image's own
+    # environment).
+    #
+    # An account, an API key and a library's paths are rows in jellyfin.db, not
+    # in the XML, which is why a migrate rewriter has to edit the database.
+    snapshot:
+      - config/*.xml
+      - data/jellyfin.db
+      - data/jellyfin.db-wal
+      - data/jellyfin.db-shm
+    questions: []
+
   # Opt-in: a second UI for the same qBittorrent, not something a box should
   # have because it installed the defaults.
   qui:

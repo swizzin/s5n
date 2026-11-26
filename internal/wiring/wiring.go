@@ -797,6 +797,14 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, name, fmt.Sprintf("nlink=%d sameDevice=%v", check.Nlink, check.SameDevice))
 	}
 
+	// Jellyfin, before Plex: both are media servers, and this one's account is
+	// the only thing here that has to exist before a person can open the app.
+	if c.Jellyfin != nil {
+		if err := r.wireJellyfin(ctx, res, c.Jellyfin); err != nil {
+			return err
+		}
+	}
+
 	// Plex, then the two apps that attach to it (PLAN.md's catalog order).
 	// A missing or not-yet-successful claim token leaves Plex unclaimed —
 	// /identity still answers, so that alone is not a failure — and the media

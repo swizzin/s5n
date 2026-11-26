@@ -317,5 +317,11 @@ edge's login: the NetworkPolicy admits the Gateway and the wiring Job alone.
 {{ printf "/%s/api?mode=version&output=json" .name }}
 {{- else if eq .app "filebrowser" -}}
 {{ printf "/%s/health" .name }}
+{{- else if eq .app "jellyfin" -}}
+{{- /* /System/Info/Public carries no [Authorize] at v12.4
+       (Jellyfin.Api/Controllers/SystemController.cs) and there is no /health
+       route in that tag: the public info is what a client discovers a server
+       with, so it answers before the wizard is complete too. */ -}}
+/system/info/public
 {{- end -}}
 {{- end -}}

@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"encoding/xml"
 	"fmt"
 	"io/fs"
 	"path"
@@ -93,6 +94,14 @@ var catalogApps = map[string]appInfo{
 	"plex": {config: []string{configPath}, port: plexPort, scratch: []string{"/transcode"},
 		snapshot: plex.Snapshot},
 	"tautulli": {config: []string{configPath}, port: tautulliPort},
+	// Jellyfin keeps its settings, its database and its cache under the one
+	// config claim: the chart mounts /config, which is the image's own
+	// JELLYFIN_DATA_DIR, and its scratch is /cache (also mounted, as an
+	// emptyDir the chart does not carry). A source install's -cache directory
+	// is the same idea, and discovery maps it onto itself for the same reason
+	// Plex's /transcode is mapped.
+	"jellyfin": {config: []string{configPath}, port: jellyfinPort, scratch: []string{"/cache"},
+		aliases: []string{"emby"}},
 	// Seerr's images default CONFIG_DIRECTORY to /app/config, and the chart
 	// mounts its claim there (the one app whose config is not /config); the
 	// deployments Seerr documents set it to /config.
@@ -493,6 +502,28 @@ func peerBanHelperPort(_ string, fsys fs.FS, dir string, _ map[string]string) (i
 		return 0, false, err
 	}
 	return yamlBlockPort(data, "server", "http")
+}
+
+// jellyfinPort is Jellyfin's: NetworkConfiguration.InternalHttpPort in
+// config/network.xml, or its default (MediaBrowser.Common/Net/
+// NetworkConfiguration.cs at v12.4 sets DefaultHttpPort = 8096). The file is
+// XML and the element is the property's name: Jellyfin's configuration stores
+// are serialised whole.
+func jellyfinPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, bool, error) {
+	data, ok, err := readConfigFile(fsys, dir, "config/network.xml")
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	var conf struct {
+		InternalHttpPort int `xml:"InternalHttpPort"`
+	}
+	if err := xml.Unmarshal(data, &conf); err != nil {
+		return 0, false, nil
+	}
+	if conf.InternalHttpPort > 0 {
+		return conf.InternalHttpPort, true, nil
+	}
+	return 8096, true, nil
 }
 
 // seerrPort is Seerr's listen port: PORT, or its default.

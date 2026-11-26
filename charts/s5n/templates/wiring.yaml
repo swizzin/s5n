@@ -159,6 +159,36 @@ previous run's logs stay readable until then.
       "url" (printf "http://pbh:%v" .Values.apps.pbh.port)
       "tokenFile" "/etc/s5n/keys/pbh-token") }}
 {{- end }}
+{{- if and .Values.apps.jellyfin .Values.apps.jellyfin.enabled }}
+{{- /* Jellyfin keeps its accounts, its API keys and its library paths in
+       jellyfin.db, so nothing can be sealed into a file before it starts: this
+       Job completes the app's own first-run wizard, and every later run signs
+       in as an account of its own. `username` is the account root's login
+       admits, so the person has one name across the box; the two passwords are
+       file references into the mounted Secret, never values here.
+
+       The libraries are one per Arr instance: the same library directory
+       directories this run creates (the dirs step), with the collection type
+       that Arr writes. Nothing else in the release adds a library, so this list
+       is the whole of what the server has. */}}
+{{- $collections := dict "sonarr" "tvshows" "radarr" "movies" "lidarr" "music" }}
+{{- $libraries := list }}
+{{- range $inst := include "s5n.instances" . | fromJsonArray }}
+{{- if and $inst.arr (ne $inst.app "prowlarr") }}
+{{- $libraries = append $libraries (dict
+      "name" $inst.name
+      "collectionType" (get $collections $inst.app)
+      "path" (printf "/data/media/%s" $inst.category)) }}
+{{- end }}
+{{- end }}
+{{- $_ := set $cfg "jellyfin" (dict
+      "url" (printf "http://jellyfin:%v" .Values.apps.jellyfin.port)
+      "username" (required "login: Jellyfin's first account is the person's, named after the box login; box writes it into the release values" .Values.login)
+      "userPasswordFile" "/etc/s5n/keys/jellyfin-user-password"
+      "boxPasswordFile" "/etc/s5n/keys/jellyfin-box-password"
+      "knownProxies" (.Values.apps.jellyfin.knownProxies | default list)
+      "libraries" $libraries) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

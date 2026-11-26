@@ -144,6 +144,22 @@ plex:
     tag: "1.43.5.11079"
     digest: sha256:06ef0fc23e9af9bbaf284c3f27972f94e703d13d6f745edeb6818fcbebf6c673
 
+jellyfin:
+  default:
+    # Upstream digest pin, not ghcr.io/home-operations: that catalog has no
+    # Jellyfin image, and this is an upstream pin like Seerr's. The index digest
+    # is read from Docker Hub's manifest for 12.4 (amd64
+    # sha256:7da5184caa38c553f219f6772476540081f392a68049e2b68c923f6daf877f8e,
+    # arm64 sha256:c9f6c6d162f8eedc7344a7c66fb4a2f1fe5c871322794ba477a38ca04add9405).
+    # Its image runs as root and has no entrypoint (jellyfin/jellyfin-packaging,
+    # docker/Dockerfile), so the chart's runAsUser is what makes it rootless and
+    # everything it writes is under JELLYFIN_DATA_DIR=/config,
+    # JELLYFIN_CONFIG_DIR=/config/config and JELLYFIN_CACHE_DIR=/cache, which
+    # the chart mounts; /jellyfin is read-only and stays so.
+    repository: docker.io/jellyfin/jellyfin
+    tag: "12.4"
+    digest: sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771
+
 tautulli:
   default:
     repository: ghcr.io/home-operations/tautulli
