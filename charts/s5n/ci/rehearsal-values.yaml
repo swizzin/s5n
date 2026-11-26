@@ -1,17 +1,15 @@
-# A rehearsal box: the lock `box migrate apply` sets on a box built from a
-# rehearsal snapshot. box writes the flag in the grant and no values file sets
-# it; this render exists so the chart's locked egress policy is validated like
-# every other shape. The only difference from a plain render is the release's
-# egress policy: no public-internet ipBlocks, DNS and this release's own pods
-# remain, and the policies are on even with networkPolicy.enabled false.
+# A rehearsal box: the lock `box migrate apply` sets on a box built from a rehearsal
+# snapshot (box writes it in the grant). The one difference from a plain render is the
+# release's egress policy: no public-internet ipBlocks, and the policies on even with
+# networkPolicy.enabled false.
 auth:
   edge: true
 
 apps:
   qbittorrent:
     torrent:
-      # No default in the chart: a helm install chooses its peer port, and the
-      # band box picks from is the one Kubernetes does not assign by itself.
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes does
+      # not assign by itself.
       port: 30080
 
 rehearsal: true

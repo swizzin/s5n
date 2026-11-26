@@ -1,8 +1,6 @@
-# One Bazarr per Arr pair, with a pair that has only one side: the 4K Radarr is
-# on and the 4K Sonarr is not, so bazarr-4k reads one Arr and the Job switches
-# the other side off in the app. This is the render that proves a side the
-# release does not run is absent from the Job's config rather than an empty
-# object or an empty string -- both of which the Job reads as a wired side.
+# One Bazarr per Arr pair, with a pair that has one side: bazarr-4k reads the 4K Radarr
+# and the Job switches the Sonarr side off. An absent side has to be absent from the
+# Job's config, not an empty object the Job reads as wired.
 auth:
   edge: true
 
@@ -15,8 +13,8 @@ storage:
 apps:
   qbittorrent:
     torrent:
-      # No default in the chart: a helm install chooses its peer port, and the
-      # band box picks from is the one Kubernetes does not assign by itself.
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes does
+      # not assign by itself.
       port: 30080
   radarr:
     instances:
@@ -28,7 +26,7 @@ apps:
       - { suffix: "", enabled: true }
       - { suffix: 4k, enabled: true }
 
-# The box's own name. Plex and Seerr are served at plex.<domain> and
-# seerr.<domain> (the catalog says so), so a render needs the domain.
+# Plex and Seerr are served at plex.<domain> and seerr.<domain>, so a render needs
+# the domain.
 gateway:
   host: box.example.com

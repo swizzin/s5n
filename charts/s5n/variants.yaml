@@ -1,84 +1,71 @@
-# Blessed image variants. The chart owns this file and ships it inside the
-# chart archive; it is NOT a values file, so neither `--set`, a user's
-# values.yaml nor a box values file can add a repository to it. The set of
-# images a release can ever run is the set this chart shipped with.
+# Blessed image variants. The chart owns this file and ships it inside the chart
+# archive: it is not a values file, so neither `--set` nor a user's values can add a
+# repository. The images a release can ever run are the ones this chart shipped with.
 #
-# apps.<app>.image.variant names one of the variants below. Values may pin a tag
-# or a digest inside that variant's repository, nothing else — the repository
-# comes from here. A variant other than `default` is an alternate build of the
-# same app that the e2e has to test like the default before it ships. There is
-# one exemption and it is named in its own block; there is no general escape
-# hatch.
+# apps.<app>.image.variant names one entry, and a value may pin a tag or a digest inside
+# that variant's repository, nothing else. A non-default variant is an alternate build the
+# e2e has to test like the default before it ships, with one named exemption and no
+# general escape hatch.
 #
 # The admission policy's blessed-repository list is generated from this file
-# too (install/platform/admission/), so "blessed by the chart" and "admitted by
-# the cluster" are the same list, not two lists that drift.
+# (install/platform/admission/), so "blessed by the chart" and "admitted by the cluster"
+# are one list.
 qbittorrent:
   default:
     repository: ghcr.io/home-operations/qbittorrent
     tag: "5.3.1"
     digest: sha256:fcdbc4ac4a66d8c205ac67e4fe1b578158aaee0a50369c3d04918977f4f359c4
   lt1.2:
-    # The project's own static build: qBittorrent on libtorrent 1.2, musl, for
-    # baseline x86-64-v2 and armv8-a. Its layout is the default's (HOME and XDG
-    # under /config, the conf at /config/qBittorrent/qBittorrent.conf, ports from
-    # QBT_WEBUI_PORT and QBT_TORRENTING_PORT), so the chart's one pod spec runs
-    # it unchanged, and a box can switch variants in place. It ships no curl.
-    # The name is the libtorrent line and the build profile, never a version. The
-    # tag adds only qBittorrent's version (5.3.1-lt1.2); libtorrent's release is
-    # pinned by the digest alone, so a later 1.2.21 is a new digest on this same
-    # tag and stays this variant.
+    # The project's own static build: qBittorrent on libtorrent 1.2, musl, for baseline
+    # x86-64-v2 and armv8-a. Its layout is the default's (HOME and XDG under /config, the conf
+    # at /config/qBittorrent/qBittorrent.conf, ports from QBT_*), so the chart's one pod spec
+    # runs it unchanged and a box can switch variants in place. It ships no curl. The name is
+    # the libtorrent line and the build profile, never a version: the tag adds only
+    # qBittorrent's, and libtorrent's release is pinned by the digest alone.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2"
     digest: sha256:26192c10bb90a0ec52efe0cc86f0da09473867749922bc673bb59f73dce4e37d
   lt1.2-10g:
-    # lt1.2 with two larger compiled-in network buffers for 10 Gbit links:
-    # libtorrent's max_peer_recv_buffer_size 4 MiB (base 2 MiB) and
-    # send_not_sent_low_watermark 1 MiB (base 512 KiB), and nothing else. The base
-    # builds carry five tuned defaults of their own, so "base" here is that build,
-    # never libtorrent's stock ones. Both architectures. lt1.2's layout. Every 10G
-    # build links mimalloc for its allocator; the base builds above keep musl's
-    # own, which is the other half of what "-10g" means today.
+    # lt1.2 with two larger compiled-in network buffers for 10 Gbit links --
+    # max_peer_recv_buffer_size 4 MiB and send_not_sent_low_watermark 1 MiB -- and nothing
+    # else. "Base" is this build's five tuned defaults, never libtorrent's stock ones. Both
+    # architectures, lt1.2's layout, and every 10G build links mimalloc where the base builds
+    # keep musl's allocator.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g"
     digest: sha256:4608611e03d887dd652d3d85dac14ed8e67023fa959a723f6d0b6ab7672843f7
   lt2.1:
-    # The same build on libtorrent 2.1. 2.x keeps no disk cache of its own and
-    # maps files instead, and the chart sets no cache options, so the same pod
-    # spec runs it unchanged. lt1.2's layout.
+    # The same build on libtorrent 2.1. 2.x keeps no disk cache and maps files instead, and the
+    # chart sets no cache options, so the same pod spec runs it unchanged.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1"
     digest: sha256:1d4f30b372db59dfb225f8f4eca3c8070307cd0afff434e6857ae0933ef35d02
   lt2.1-10g:
-    # lt2.1 with the same two larger buffers for 10 Gbit links, and nothing else:
-    # the libtorrent line and the link profile are independent axes. lt1.2's
-    # layout, and the 10G allocations lt1.2-10g's comment describes.
+    # lt2.1 with the same two buffers, and nothing else: the libtorrent line and the link
+    # profile are independent axes.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1-10g"
     digest: sha256:1d6ab7ceac8c57a28cfec0d8dc388ea964e7b139d28b6e09302b5cd742ddcc14
   lt1.2-10g-znver3:
-    # The one build profile the e2e does not run: it is compiled for AMD Zen 3
-    # (-march=znver3), so on CI's runners and most hosts it dies with SIGILL at
-    # start, and it is amd64 only, so an arm64 node cannot pull it. What tests it
-    # instead: the swizzin/qbittorrent repository's own binary verify and smoke
-    # test, run on a Zen 3 runner before the tag is pushed. Its layout is lt1.2's,
-    # which the e2e does run. The exemption covers both Zen 3 entries here, and
-    # the name no longer says mimalloc because every 10G build links it now.
+    # The one build profile the e2e does not run: compiled for AMD Zen 3 (-march=znver3), so it
+    # dies with SIGILL on CI's runners and most hosts, and amd64 only. What tests it instead is
+    # the swizzin/qbittorrent repository's own verify and smoke test on a Zen 3 runner before
+    # the tag is pushed; its layout is lt1.2's, which the e2e does run. Both Zen 3 entries here
+    # are the exemption.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
     digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
   lt2.1-10g-znver3:
-    # The same Zen 3 exemption on libtorrent 2.1: see lt1.2-10g-znver3, which is
-    # the build profile it shares. lt2.1-10g's layout and name otherwise.
+    # The same Zen 3 exemption on libtorrent 2.1: see lt1.2-10g-znver3, the build profile it
+    # shares.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1-10g-znver3"
     digest: sha256:7777bdbe00ff96b8e56c85a62167bc0828a6d4acb010dca67f2bed2c111a2db6
   lt1.2-10g-znver3-mimalloc:
-    # The former name of lt1.2-10g-znver3, kept as a real entry so a values file
-    # that still names it keeps rendering and keeps updating: a variant name the
-    # chart does not have fails the render (templates/_helpers.tpl), so dropping
-    # this would stop a seedbox's apply dead. It pins the same image as
-    # lt1.2-10g-znver3, tag and digest alike, and nothing chooses it anew.
+    # The former name of lt1.2-10g-znver3, kept as a real entry so a values file that still
+    # names it keeps rendering and updating: an unknown variant fails the render
+    # (templates/_helpers.tpl), which would stop a seedbox's apply dead. It pins the same
+    # image, tag and digest alike, and nothing chooses it anew.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
     digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
@@ -115,25 +102,20 @@ bazarr:
 
 sabnzbd:
   default:
-    # The same publisher as qBittorrent's image. Its entrypoint is already an
-    # init container: it copies /defaults/sabnzbd.ini to /config on a first
-    # start and rewrites api_key, nzb_key and host_whitelist from the
-    # SABNZBD__* environment on every start. The chart's own init containers
-    # run before it and seal the settings the environment cannot express
-    # (internal/sabconf).
+    # The same publisher as qBittorrent's image. Its entrypoint is already an init container:
+    # it copies /defaults/sabnzbd.ini to /config and rewrites api_key, nzb_key and
+    # host_whitelist from SABNZBD__* on every start, so the chart's own init container seals
+    # only what the environment cannot express (internal/sabconf).
     repository: ghcr.io/home-operations/sabnzbd
     tag: "5.1.3"
     digest: sha256:07790a7829201d9ea302e8b862078beac4b1a07003fe8359e3f069b6bcd84a95
 
 filebrowser:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: that catalog has no
-    # FileBrowser Quantum image. The owner is gtsteffaniak because the project
-    # moved there: `gtstef/filebrowser` no longer resolves, so an image
-    # reference to the old name is not a working fallback. Its Dockerfile ends
-    # USER filebrowser (uid 1000), EXPOSEs 80, and writes nothing outside
-    # FILEBROWSER_CONFIG's directory, FILEBROWSER_DATABASE_PATH and
-    # server.cacheDir, which the chart points at its own mounts.
+    # Upstream digest pin: ghcr.io/home-operations has no FileBrowser Quantum image. The owner
+    # is gtsteffaniak because the project moved there -- `gtstef/filebrowser` no longer
+    # resolves. Its Dockerfile ends USER filebrowser (uid 1000), EXPOSEs 80, and writes only
+    # under FILEBROWSER_CONFIG's directory, FILEBROWSER_DATABASE_PATH and server.cacheDir.
     repository: ghcr.io/gtsteffaniak/filebrowser
     tag: "2.1.0-stable"
     digest: sha256:17de8d0ac6a6bcfd5ef9aca43d6c0aa2fd031a07d6ee9b8a3b7c6c646efe35bf
@@ -146,16 +128,12 @@ plex:
 
 jellyfin:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: that catalog has no
-    # Jellyfin image, and this is an upstream pin like Seerr's. The index digest
-    # is read from Docker Hub's manifest for 12.4 (amd64
-    # sha256:7da5184caa38c553f219f6772476540081f392a68049e2b68c923f6daf877f8e,
-    # arm64 sha256:c9f6c6d162f8eedc7344a7c66fb4a2f1fe5c871322794ba477a38ca04add9405).
-    # Its image runs as root and has no entrypoint (jellyfin/jellyfin-packaging,
-    # docker/Dockerfile), so the chart's runAsUser is what makes it rootless and
-    # everything it writes is under JELLYFIN_DATA_DIR=/config,
-    # JELLYFIN_CONFIG_DIR=/config/config and JELLYFIN_CACHE_DIR=/cache, which
-    # the chart mounts; /jellyfin is read-only and stays so.
+    # Upstream digest pin: ghcr.io/home-operations has no Jellyfin image. The index digest is
+    # Docker Hub's manifest for 12.4 (amd64 sha256:7da5184caa38..., arm64
+    # sha256:c9f6c6d162f8...). Its image runs as root with no entrypoint
+    # (jellyfin/jellyfin-packaging, docker/Dockerfile), so the chart's runAsUser is what makes
+    # it rootless, and everything it writes is under JELLYFIN_DATA_DIR=/config,
+    # JELLYFIN_CONFIG_DIR=/config/config and JELLYFIN_CACHE_DIR=/cache.
     repository: docker.io/jellyfin/jellyfin
     tag: "12.4"
     digest: sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771
@@ -168,52 +146,49 @@ tautulli:
 
 seerr:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: that catalog has no Seerr
-    # image. Its Dockerfile ends USER node:node (uid 1000) and exposes 5055.
+    # Upstream digest pin: ghcr.io/home-operations has no Seerr image. Its Dockerfile ends
+    # USER node:node (uid 1000) and exposes 5055.
     repository: ghcr.io/seerr-team/seerr
     tag: "v3.5.2"
     digest: sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
 
 qui:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: no qui image there. The
-    # image is root by default with an entrypoint that execs the binary as
-    # whichever uid runs it; it keeps its whole state under /config.
+    # Upstream digest pin: ghcr.io/home-operations has no qui image. The image is root by
+    # default with an entrypoint that execs the binary as whichever uid runs it, and keeps its
+    # whole state under /config.
     repository: ghcr.io/autobrr/qui
     tag: "v1.36.1"
     digest: sha256:83399374ea680d2c2790b4552c2a2c732837611710bcb5e4f7b63d79cfcae416
 
 autobrr:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: no autobrr image there.
-    # The image declares no USER, so it would run as root without the pod's
-    # security context; it keeps its whole state (config.toml, the SQLite
-    # database and its WAL) under /config.
+    # Upstream digest pin: ghcr.io/home-operations has no autobrr image. It declares no USER,
+    # so it would run as root without the pod's security context, and keeps its state
+    # (config.toml, the database and its WAL) under /config.
     repository: ghcr.io/autobrr/autobrr
     tag: "v1.91.1"
     digest: sha256:8c63fa0ba732eb33b2e531a84b3de3c99ae88e87c49bf077a6194020667ef92f
 
 maintainerr:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: no Maintainerr image
-    # there. Its Dockerfile ends USER node (uid 1000) and its tags carry no "v".
+    # Upstream digest pin: ghcr.io/home-operations has no Maintainerr image. Its Dockerfile
+    # ends USER node (uid 1000) and its tags carry no "v".
     repository: ghcr.io/maintainerr/maintainerr
     tag: "3.33.0"
     digest: sha256:124b53cfec9c17dae03a69243b0a2e7b6de740150112b5210b784ce8fa0a2852
 
 pbh:
   default:
-    # Upstream digest pin, not ghcr.io/home-operations: no PeerBanHelper image
-    # there. Its Dockerfile ends USER 0 and keeps its state under /app/data, so
-    # the chart runs it as the seedbox uid and moves the data root to /config
-    # through -Dpbh.datadir; its tags carry the "v".
+    # Upstream digest pin: ghcr.io/home-operations has no PeerBanHelper image. Its Dockerfile
+    # ends USER 0 and keeps its state under /app/data, so the chart runs it as the seedbox uid
+    # and moves the data root to /config through -Dpbh.datadir; its tags carry the "v".
     repository: docker.io/ghostchu/peerbanhelper
     tag: "v9.6.0"
     digest: sha256:f6ecf393e90bfe3ae9db318e4cf4eedd3e2a6503e811c18c176c71a1bedf83c0
 
-# The s5n image itself: the wiring Job and the qBittorrent / Tautulli credential
-# init containers. An empty tag means the chart's appVersion, which is the tag
-# this repo publishes the image under.
+# The s5n image itself: the wiring Job and the credential init containers. An empty tag
+# means the chart's appVersion, the tag this repo publishes the image under.
 s5n:
   default:
     repository: ghcr.io/swizzin/s5n

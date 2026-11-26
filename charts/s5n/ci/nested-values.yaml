@@ -1,7 +1,6 @@
-# Existing category names are kept, never renamed: migrate adopts what the
-# source seedbox already used. Mixed case and one qBittorrent subcategory level
-# are legal here, and the parent directory (4K) is created with the leaf.
-# The claims are named explicitly, as in 4k-values.yaml.
+# Existing category names are kept, never renamed: migrate adopts what the source used.
+# Mixed case and one subcategory level are legal, and the parent directory (4K) is
+# created with the leaf.
 auth:
   edge: true
 
@@ -14,8 +13,8 @@ storage:
 apps:
   qbittorrent:
     torrent:
-      # No default in the chart: a helm install chooses its peer port, and the
-      # band box picks from is the one Kubernetes does not assign by itself.
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes does
+      # not assign by itself.
       port: 30080
   sonarr:
     instances:
@@ -26,7 +25,7 @@ apps:
       - { suffix: "", category: Movies, enabled: true }
       - { suffix: 4k, category: "4K/Movies", enabled: true }
 
-# The box's own name. Plex and Seerr are served at plex.<domain> and
-# seerr.<domain> (the catalog says so), so a render needs the domain.
+# Plex and Seerr are served at plex.<domain> and seerr.<domain>, so a render needs
+# the domain.
 gateway:
   host: box.example.com

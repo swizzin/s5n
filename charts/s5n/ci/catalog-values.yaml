@@ -1,18 +1,15 @@
-# The catalog's opt-in apps, all enabled: their StatefulSets, Services and
-# routes are rendered and validated like every other app's. They default off, so
-# this file is the only render that carries them — including Maintainerr's
-# no-timeout rule for the live event stream and PeerBanHelper's host route and
-# config init container, which kubeconform would otherwise never see.
+# The catalog's opt-in apps, all enabled: they default off, so this is the only render
+# that carries them -- Maintainerr's no-timeout rule and PeerBanHelper's host route and
+# init container included, which kubeconform would otherwise never see.
 auth:
   edge: true
-  # box writes this from the grant for an app that speaks OIDC; a plain helm
-  # install sets it to the proxy Service's ClusterIP, which is what the app's
-  # pods reach the login at the box's own name through.
+  # box writes this from the grant for an OIDC app; a plain helm install sets it to the
+  # proxy Service's ClusterIP.
   oidc:
     gatewayIP: 10.96.31.116
 
-# The account root's login admits, which box writes from the grant: Jellyfin's
-# first user is named after it.
+# The account root's login admits, written by box from the grant: Jellyfin's first
+# user is named after it.
 login: example
 
 # The person's Jellyfin password. box init makes one and shows it once; a plain
@@ -26,8 +23,8 @@ storage:
 apps:
   qbittorrent:
     torrent:
-      # No default in the chart: a helm install chooses its peer port, and the
-      # band box picks from is the one Kubernetes does not assign by itself.
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes does
+      # not assign by itself.
       port: 30080
   lidarr:
     enabled: true
@@ -45,14 +42,14 @@ apps:
     enabled: true
   filebrowser:
     enabled: true
-  # The second media server: its own host name, its own accounts, and the
-  # /cache emptyDir its transcodes need on a read-only root filesystem.
+  # The second media server: its own host name and accounts, and the /cache emptyDir
+  # its transcodes need on a read-only root filesystem.
   jellyfin:
     enabled: true
     knownProxies:
       - 10.244.0.0/16
 
-# The box's own name. Plex and Seerr are served at plex.<domain> and
-# seerr.<domain> (the catalog says so), so a render needs the domain.
+# Plex and Seerr are served at plex.<domain> and seerr.<domain>, so a render needs
+# the domain.
 gateway:
   host: box.example.com
