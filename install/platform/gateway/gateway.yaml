@@ -1,26 +1,14 @@
-# The Gateway box bootstrap installs (Envoy Gateway as the Gateway API
-# implementation); the kind e2e applies the same file.
+# The Gateway box bootstrap installs; the kind e2e applies the same file.
 #
-# The envoy-gateway Helm chart (installed by hack/e2e-kind.sh) ships:
-#   - the envoy-gateway controller Deployment + Service, in the release namespace
-#     (envoy-gateway-system here)
-#   - the Gateway API CRDs and Envoy Gateway CRDs (crds.enabled: true by default).
-#     The chart bundles the Gateway API *experimental* channel at the version Envoy
-#     Gateway v1.9.3 is built against, so the e2e deliberately lets the chart own the
-#     CRDs and does NOT apply standard-install.yaml separately: a separately-pinned
-#     standard channel could drift ahead of (or conflict with) the set the controller
-#     expects, and Helm would then skip or fight an already-installed CRD.
-#   - the managed Envoy Proxy data plane (Deployment + LoadBalancer Service). In
-#     standard mode the controller creates these in envoy-gateway-system, so the
-#     chart's default networkPolicy.gatewayFrom targets that namespace, not the
-#     Gateway's.
+# The GatewayClass and Gateway "s5n" live in s5n-gateway, which this file also
+# creates: server-side apply cannot write a Gateway into a namespace that is not
+# there. The listener is plain HTTP on 80, accepting routes from every namespace.
 #
-# This file creates the GatewayClass and the Gateway "s5n" in namespace s5n-gateway
-# (the chart's default parentRef is {name: s5n, namespace: s5n-gateway}), plus that
-# namespace itself: box applies this file with server-side apply, and the Gateway
-# cannot be written into a namespace that is not there. The listener is plain HTTP
-# on port 80 and accepts routes from every namespace, matching how the installer's
-# managed install is configured.
+# The envoy-gateway chart ships the controller and the Gateway API CRDs (the
+# experimental channel the controller is built against). The chart owns the CRDs on
+# purpose: a separately pinned standard channel can drift from, or conflict with, the
+# set the controller expects. It also runs the proxy data plane in
+# envoy-gateway-system, which is what the chart's networkPolicy.gatewayFrom assumes.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -34,9 +22,7 @@ metadata:
   name: eg
   labels:
     app.kubernetes.io/part-of: s5n
-    # Box created this class beside the Envoy Gateway release box installed.
-    # A re-run reads it as box's own, so box does not have to ask a controller
-    # it chose itself whether it supports the chart's routes.
+    # Box created this class beside the Envoy Gateway release it installed.
     app.kubernetes.io/managed-by: box
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller

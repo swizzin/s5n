@@ -1,32 +1,26 @@
 # The grant, enforced by the cluster.
 #
-# A user's seedbox namespace comes with a kubeconfig scoped to that namespace,
-# so box refusing a key in the user's values file is not enforcement: the user
-# can run kubectl or helm directly. These policies are what make the grant true.
+# A user's kubeconfig is scoped to their namespace, so box refusing a key in their
+# values file is not enforcement: they can run kubectl or helm directly. These policies
+# are what make the grant true.
 #
-# They live on the platform layer, installed by root at `box bootstrap`, never in
-# the s5n release: the release stays namespace-scoped with no cluster RBAC.
-# Root binds them to one namespace per user at `box adduser` (see
-# hack/render-grant), and the bindings' params live in the root-owned s5n-system
-# namespace. A ConfigMap in the user's own namespace would be writable by them
-# and enforce nothing. Root's own seedbox namespace gets no binding: this is
-# tenancy, not a cluster-wide image policy.
+# Root installs them at `box bootstrap`, never in the s5n release (which stays
+# namespace-scoped with no cluster RBAC), and binds them per user namespace at
+# `box adduser`, with params in the root-owned s5n-system (a ConfigMap in the user's
+# own namespace would be theirs to edit). Root's seedbox is unbound: this is tenancy,
+# not a cluster-wide image policy.
 #
-# Params (ConfigMap s5n-grant-<namespace> in s5n-system) carry the user's grant:
-#   blessedRepositories  comma-separated repositories, generated from the
-#                        chart's variants.yaml so "blessed" has one definition
-#   serviceType          the type granted for the torrent peers Service
-#   torrentNodePort      the nodePort root assigned to this user
+# Params (s5n-grant-<namespace> in s5n-system): blessedRepositories, generated from the
+# chart's variants.yaml so "blessed" has one definition; serviceType, the type granted
+# for the torrent peers Service; torrentNodePort, the port root assigned.
 #
-# One policy per resource shape rather than one policy with a kind switch: the
-# API server type-checks each expression against every matched kind, and a
-# Service field read inside a Pod rule is a warning (and a hazard) even when a
-# ternary would never reach it. Two policies, one params object, two bindings
-# written together at adduser.
+# One policy per resource shape: the API server type-checks each expression against
+# every matched kind, so a Service field inside a Pod rule is a warning and a hazard
+# even behind a ternary that never reaches it.
 #
-# failurePolicy Fail: if the API server cannot evaluate a policy (params
-# missing, CEL error), the write is refused rather than admitted. An admission
-# hole on a typo is worse than a release that will not install.
+# failurePolicy Fail: if a policy cannot be evaluated (params missing, a CEL error) the
+# write is refused rather than admitted. An admission hole on a typo is worse than a
+# release that will not install.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -47,14 +41,11 @@ spec:
     kind: ConfigMap
   matchConstraints:
     resourceRules:
-      # Pods and the pod template of every workload kind that can carry one.
-      # CronJobs are included so a bad template is refused when it is written,
-      # not when the Job it eventually creates is.
+      # Pods and every workload kind with a pod template, CronJobs included so a bad
+      # template is refused when written.
       #
-      # `pods/ephemeralcontainers` is the subresource `kubectl debug` writes
-      # to. A rule for "pods" does not match a subresource request, so without
-      # it the user could add any image as an ephemeral container to a pod
-      # they can already patch.
+      # `pods/ephemeralcontainers` is `kubectl debug`'s subresource, which a rule for
+      # "pods" does not match: without it any image could be added to a pod.
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
@@ -80,8 +71,8 @@ spec:
         (has(variables.podspec.ephemeralContainers) ? variables.podspec.ephemeralContainers.map(c, c.image) : [])
     - name: blessed
       expression: "params.data.blessedRepositories.split(',').filter(r, r != '')"
-    # An image matches a blessed repository only as `repo:tag` or `repo@digest`,
-    # so `ghcr.io/home-operations/sonarr-evil` cannot pass as `.../sonarr`.
+    # An image matches only as `repo:tag` or `repo@digest`, so `.../sonarr-evil` cannot
+    # pass as `.../sonarr`.
     - name: unblessed
       expression: >
         variables.images.filter(i, !variables.blessed.exists(r,
@@ -111,15 +102,13 @@ spec:
     - name: serviceType
       expression: "has(object.spec.type) ? object.spec.type : 'ClusterIP'"
   validations:
-    # ExternalName is never admitted: it is neither ClusterIP nor a type
-    # the grant renderer can assign, so the type rule below refuses it already.
+    # ExternalName is neither ClusterIP nor a type the grant assigns.
     - expression: >
         variables.serviceType == 'ClusterIP' ||
         variables.serviceType == params.data.serviceType
       message: "s5n: a Service may only use ClusterIP or the type the grant assigns"
-    # CVE-2020-8554: a ClusterIP Service with spec.externalIPs lets its tenant
-    # claim an arbitrary address and intercept traffic to it. The grant has no
-    # legitimate use for externalIPs, on any Service type.
+    # CVE-2020-8554: externalIPs would let a tenant claim an address and intercept its
+    # traffic, and the grant has no use for them.
     - expression: >-
         !has(object.spec.externalIPs) || object.spec.externalIPs.size() == 0
       message: "s5n: a Service may not set externalIPs"
@@ -130,18 +119,14 @@ spec:
 ---
 # The login is root's, so a user's namespace may not touch it.
 #
-# Root puts one Authelia and one SecurityPolicy on the Gateway, covering every
-# listener and every route attached to it, and the exemptions (the ACME
-# challenge, the portal, the Arrs' own API keys) are root's Authelia
-# configuration. A namespace-scoped kubeconfig with namespace-admin rights
-# could otherwise delete that policy, or write a SecurityPolicy of its own on
-# a route -- Envoy Gateway lets a route-targeted policy override the
-# Gateway-level one, so "no policy" is a working bypass. Gateways are here for
-# the same reason: a Gateway of the user's own would be a listener the login
-# was never attached to.
+# Root puts one Authelia and one SecurityPolicy on the Gateway covering every listener
+# and route, and the exemptions are root's own configuration. Otherwise a
+# namespace-admin could delete that policy or write a route-targeted one -- Envoy
+# Gateway lets a route policy override the Gateway's, so "no policy" is a working
+# bypass. Gateways are here for the same reason: one of the user's own would be a
+# listener the login was never attached to.
 #
-# No params: the rule refuses these writes outright, whoever asks, in a bound
-# namespace. Root's own seedbox is unbound like every other policy here.
+# No params: the write is refused outright, whoever asks, in a bound namespace.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -155,9 +140,7 @@ spec:
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["securitypolicies"]
       - apiGroups: ["gateway.networking.k8s.io"]
-        # Both served versions: v1 is the Gateway, v1beta1 the ReferenceGrant
-        # generation's sibling. A policy that matched one version only would
-        # leave the other writable.
+        # Both served versions: matching one would leave the other writable.
         apiVersions: ["v1", "v1beta1"]
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["gateways"]
@@ -167,22 +150,15 @@ spec:
 ---
 # A user's route may not reach the sign-in path.
 #
-# Authelia's access control lets `^/auth([/?].*)?$` through without a login
-# (internal/authelia/config.go, Rules). Gateway API serves the most specific
-# route, not the first one written, so a user's HTTPRoute matching `/auth/x`
-# on their own host would be served instead of root's portal route, and the
-# request would never ask for a login. The chart's own routes are PathPrefix
-# on each app's urlBase and never under /auth; this closes the hole for a
-# route the user writes by hand.
+# Authelia lets `^/auth([/?].*)?$` through without a login
+# (internal/authelia/config.go, Rules). Gateway API serves the most specific route, so
+# a user's `/auth/x` on their own host would beat root's portal route and never ask for
+# a login. The chart's routes are app urlBases, never under /auth; this closes the hole
+# for a hand-written route.
 #
 # A RegularExpression match can reach /auth without spelling it, and so can a
-# percent-encoded path (`/%61uth/x`), so both are refused outright rather than
-# only the literal prefix. `/authx` and `/authority` stay admitted: Gateway
-# API prefixes match whole path segments, and Authelia's rule does not cover
-# them.
-#
-# No params: like the login policy this refuses the write outright, whoever
-# asks, in a bound namespace. Root's own seedbox namespace is unbound.
+# percent-encoded path (`/%61uth/x`), so both are refused outright. `/authx` and
+# `/authority` stay admitted: prefixes match whole segments.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -191,17 +167,14 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
-      # Both versions the Gateway API bundle box installs serves (v1 storage,
-      # v1beta1 served): matching one only would leave the other writable.
+      # Both versions the bundle serves: matching one would leave the other writable.
       - apiGroups: ["gateway.networking.k8s.io"]
         apiVersions: ["v1", "v1beta1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["httproutes"]
   validations:
-    # Every rule and every match in it has to pass; a rule with no matches is
-    # a catch-all and has no path to refuse. has() guards the optional fields:
-    # matches, path, path.type and path.value are all optional in the schema,
-    # and path.type defaults to PathPrefix.
+    # Every rule and match has to pass; a rule with no matches is a catch-all. has()
+    # guards the optional fields, and path.type defaults to PathPrefix.
     - expression: >-
         object.spec.rules.all(r, !has(r.matches) || r.matches.all(m,
         !has(m.path) || !has(m.path.type) || m.path.type != 'RegularExpression'))
