@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// miniManifest is a valid manifest for testdata/mini. Every hostile case below
-// is this text with one thing broken, so the failure names the line a
-// contributor would have got wrong.
+// miniManifest is a valid manifest for testdata/mini. Every hostile case is this
+// text with one thing broken, so the failure names the line a contributor got
+// wrong.
 const miniManifest = `apps:
   alpha:
     description: the first app
@@ -38,8 +38,8 @@ const miniManifest = `apps:
         default: Etc/UTC
 `
 
-// brokenManifest breaks several things at once, in two apps: the ordering of
-// its problem list is what TestProblemsComeInFileOrder pins.
+// brokenManifest breaks several things at once, in two apps: TestProblemsComeInFileOrder
+// pins the ordering of its problem list.
 const brokenManifest = `apps:
   alpha:
     description: ""
@@ -153,8 +153,8 @@ func TestTransientIsASeparateList(t *testing.T) {
 	}
 }
 
-// A manifest that says nothing about exposure serves every app under a path;
-// `host` is kept, and it is what box builds its list of names from.
+// A manifest that says nothing about exposure serves every app under a path, and
+// `host` is what box builds its list of names from.
 func TestExposureDefaultsToPathAndHostIsKept(t *testing.T) {
 	cat, err := parseMini(t, miniManifest)
 	if err != nil {
@@ -186,8 +186,7 @@ func TestExposureDefaultsToPathAndHostIsKept(t *testing.T) {
 	}
 }
 
-// An exposure box does not know is refused by name: it is a typo that would
-// otherwise render the app's route under a path nobody meant.
+// An unknown exposure would render the app's route under a path nobody meant.
 func TestUnknownExposureIsNamed(t *testing.T) {
 	manifest := strings.Replace(miniManifest,
 		"    description: the first app\n",
@@ -201,8 +200,8 @@ func TestUnknownExposureIsNamed(t *testing.T) {
 	}
 }
 
-// An app with a host of its own needs one name to put before the domain; the
-// Arrs take instances after the app's name, so the two cannot be combined.
+// A host of its own needs one name to put before the domain, which instances
+// cannot give it.
 func TestHostedAppWithInstancesIsRefused(t *testing.T) {
 	manifest := strings.Replace(miniManifest,
 		"    instances: true\n",
@@ -216,8 +215,8 @@ func TestHostedAppWithInstancesIsRefused(t *testing.T) {
 	}
 }
 
-// An entry that says nothing about login sits behind the box's one login, and
-// `login: own` is kept: a caller never sees an empty value either way.
+// An entry that says nothing sits behind the box's one login, and `login: own` is
+// kept: a caller never sees an empty value either way.
 func TestLoginDefaultsToThePortalAndOwnIsKept(t *testing.T) {
 	cat, err := parseMini(t, miniManifest)
 	if err != nil {
@@ -260,9 +259,8 @@ func TestLoginDefaultsToThePortalAndOwnIsKept(t *testing.T) {
 	}
 }
 
-// A login box does not know is refused by name: it would otherwise decide
-// whether a password stands in front of the app, which is not a typo to guess
-// at.
+// An unknown login decides whether a password stands in front of the app, which
+// is not a typo to guess at.
 func TestUnknownLoginIsNamed(t *testing.T) {
 	manifest := strings.Replace(miniManifest,
 		"    description: the first app\n",
@@ -276,9 +274,8 @@ func TestUnknownLoginIsNamed(t *testing.T) {
 	}
 }
 
-// realChart is charts/s5n's catalog with the values and schema from the same
-// directory, read the way Load reads them, so a test can parse the chart's own
-// manifest with one thing changed.
+// realChart is charts/s5n's catalog with its values and schema, read the way Load
+// reads them.
 func realChart(t *testing.T) (manifest, values, schema []byte) {
 	t.Helper()
 	read := func(name string) []byte {
@@ -292,13 +289,12 @@ func realChart(t *testing.T) (manifest, values, schema []byte) {
 	return read(FileName), read("values.yaml"), read("values.schema.json")
 }
 
-// A chart release published before `login:` carries none, and the Plex, Seerr
-// and Tautulli it shipped still sign their users in themselves: the frozen set
-// in this package is what keeps an older chart's bypass under a newer box.
+// A release published before `login:` carries none, and its Plex, Seerr and
+// Tautulli still sign their users in themselves: the frozen set keeps that bypass
+// under a newer box.
 func TestLoginAbsentKeepsTheLegacyAppsSelfAuthenticating(t *testing.T) {
 	manifest, values, schema := realChart(t)
-	// Both spellings go: a release that predates the key carries neither, and
-	// the one this chart writes for Tautulli is a value like any other.
+	// A release that predates the key carries neither spelling.
 	old := []byte(strings.NewReplacer("    login: own\n", "", "    login: portal\n", "").Replace(string(manifest)))
 	if string(old) == string(manifest) {
 		t.Fatal("the chart's catalog carries no `login:` key to strip, so this fixture no longer looks like an older release")
@@ -312,9 +308,8 @@ func TestLoginAbsentKeepsTheLegacyAppsSelfAuthenticating(t *testing.T) {
 	}
 }
 
-// An explicit value wins over the legacy set: the chart decides, so a later
-// release can bring one of those three behind the login without a box release.
-// Tautulli is that case in this chart's own catalog; Seerr is the one left.
+// An explicit value wins over the legacy set, so a later chart can bring one of
+// those three behind the login without a box release.
 func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
 	manifest, values, schema := realChart(t)
 	// Plex is the first `login: own` in the manifest.
@@ -332,9 +327,9 @@ func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
 	}
 }
 
-// The chart's own catalog serves Tautulli behind the box's login. Its name is
-// in the legacy set, so an entry that simply dropped the key would read as
-// `login: own` and undo the decision: the value has to be written out.
+// Tautulli's name is in the legacy set, so an entry that simply dropped the key
+// would read as `login: own` and undo the chart's decision: the value has to be
+// written out.
 func TestTheChartsTautulliIsBehindThePortal(t *testing.T) {
 	manifest, values, schema := realChart(t)
 	cat, err := Parse("catalog.yaml", manifest, values, schema)
@@ -353,9 +348,8 @@ func TestTheChartsTautulliIsBehindThePortal(t *testing.T) {
 	}
 }
 
-// TestHostileManifestIsNamed: every refusal says which entry is wrong. A
-// manifest is untrusted input to a root process, and "the catalog is broken"
-// would leave the contributor guessing.
+// Every refusal names the entry that is wrong: a manifest is untrusted input to a
+// root process, and "the catalog is broken" would leave the contributor guessing.
 func TestHostileManifestIsNamed(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -483,15 +477,12 @@ func TestHostileManifestIsNamed(t *testing.T) {
 	}
 }
 
-// TestProblemsComeInFileOrder pins the whole problem list for one manifest: the
-// apps in the manifest's order, each app's description, instances and questions
-// in turn, and within a question the prompt, the default, the kind and the key.
-// The table above looks for one problem at a time, so it cannot see a refactor
-// that reorders the checks or rewords a message.
+// Pins the whole problem list for one manifest: apps in order, then description,
+// instances and questions, and within a question the prompt, default, kind and
+// key. The table above cannot see a refactor that reorders the checks.
 //
-// The two grant problems are compared by their opening words only: the tail of
-// each is internal/seedbox's own reason for the rule, which its tests pin, so a
-// reworded reason should not fail here.
+// The two grant problems are compared by their opening words only: the tail is
+// internal/seedbox's reason, which its own tests pin.
 func TestProblemsComeInFileOrder(t *testing.T) {
 	values, schema := mini(t)
 	_, err := Parse("catalog.yaml", []byte(brokenManifest), values, schema)
@@ -532,9 +523,8 @@ func TestProblemsComeInFileOrder(t *testing.T) {
 	}
 }
 
-// TestRealChartManifestLoads is the one test that reads the shipped chart: the
-// manifest and the chart's own values and schema have to agree, and a new app
-// under `apps:` with no entry here fails here rather than in init.
+// The one test that reads the shipped chart: its manifest and values must agree,
+// and a new app under `apps:` with no entry fails here rather than in init.
 func TestRealChartManifestLoads(t *testing.T) {
 	cat, err := Load("../../charts/s5n")
 	if err != nil {
@@ -548,12 +538,9 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s has no description", app.Name)
 		}
 	}
-	// Nobody logs in to qBittorrent: its WebUI skips the login for the
-	// release's addresses and the edge's login is the one a person uses, so the
-	// manifest asks nothing. The values key stays (the init container still
-	// seals a username), and Load has already checked every question key is a
-	// real schema leaf -- so the check that a question exists is the one that
-	// has to go.
+	// qBittorrent asks nothing: its WebUI skips the login for the release's
+	// addresses and the edge's login is the one a person uses. The values key
+	// stays (the init container still seals a username).
 	qbit, ok := cat.App("qbittorrent")
 	if !ok {
 		t.Fatal("qbittorrent is not in the catalog")
@@ -572,9 +559,8 @@ func TestRealChartManifestLoads(t *testing.T) {
 	if tr[0].Key != "secrets.plexClaimToken" || !tr[0].Optional {
 		t.Fatalf("plex transient question = %+v, want secrets.plexClaimToken, optional", tr[0])
 	}
-	// The apps whose UI cannot live under a prefix (an absolute /api path, or
-	// assets built from the site root): the chart serves them at a host of their
-	// own, and box is what resolves and certifies those names.
+	// An absolute /api path or assets built from the site root cannot live under a
+	// prefix, so the chart serves them at a host of their own.
 	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr,jellyfin,pbh" {
 		t.Fatalf("hosted apps = %s, want plex,seerr,jellyfin,pbh", got)
 	}
@@ -584,20 +570,16 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s exposure = %q, want host", name, app.Exposure)
 		}
 	}
-	// Everything else must be a stored answer: a transient question is the
-	// exception, and the loader is what keeps it one.
+	// A transient question is the exception: the kind is meant to be rare.
 	for _, app := range cat.Apps() {
 		if len(app.Transient()) > 1 {
 			t.Fatalf("apps.%s has %d transient questions; the kind is meant to be rare", app.Name, len(app.Transient()))
 		}
 	}
-	// The apps that sign in through the login's provider, in manifest order:
-	// the clients box registers for a box with all three installed. A new one is
-	// an entry here, and the chart wires it from the same flag -- which is what
-	// makes a box that already exists register the client when its next run
-	// takes a chart with the app enabled: the list is the catalog's answer, and
-	// the login half of every root apply (and every `box update` step) writes a
-	// client it does not find.
+	// The clients box registers for a box with these installed, in manifest order:
+	// a box that already exists registers one when its next run takes a chart with
+	// the app enabled, because the login half of every root apply writes a client
+	// it does not find.
 	if got := strings.Join(cat.OIDCApps([]string{"qui", "autobrr", "filebrowser", "maintainerr", "sonarr"}), ","); got != "qui,autobrr,filebrowser" {
 		t.Fatalf("OIDC apps = %s, want qui,autobrr,filebrowser (only the catalog's flag makes a client)", got)
 	}
@@ -611,9 +593,8 @@ func TestRealChartManifestLoads(t *testing.T) {
 		t.Fatal("apps.maintainerr is marked as an OIDC client")
 	}
 
-	// The opt-in apps: off unless the operator says so, no instances, and
-	// nothing to ask at init. A box that installs the defaults must not get
-	// them, so `default: false` is the assertion that matters most here.
+	// The opt-in apps: off unless the operator says so, no instances, nothing
+	// asked. `default: false` is the assertion that matters most.
 	for _, name := range []string{"qui", "autobrr", "filebrowser", "maintainerr"} {
 		app, ok := cat.App(name)
 		if !ok {
@@ -645,7 +626,6 @@ func TestLoadNamesAMissingManifest(t *testing.T) {
 	}
 }
 
-// TestOversizeManifestIsRefused: the cap is a refusal, never a truncated read.
 func TestOversizeManifestIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"values.yaml", "values.schema.json"} {
@@ -667,9 +647,8 @@ func TestOversizeManifestIsRefused(t *testing.T) {
 	}
 }
 
-// TestRefOutsideTheSchemaIsRefused: a question must be checked against the
-// schema the chart shipped, so a schema that reaches outside itself is a
-// refusal, not something to chase.
+// A question is checked against the schema the chart shipped, so a schema that
+// reaches outside itself is refused, not chased.
 func TestRefOutsideTheSchemaIsRefused(t *testing.T) {
 	values, _ := mini(t)
 	schema := `{"type":"object","properties":{"apps":{"type":"object","properties":{"alpha":{"$ref":"https://example.com/schema.json"}}}}}`
@@ -680,9 +659,8 @@ func TestRefOutsideTheSchemaIsRefused(t *testing.T) {
 	}
 }
 
-// TestCallsAreReadAndChecked: `calls` is the list the chart inverts for the
-// release's NetworkPolicy, so every name in it has to be an app this chart
-// actually has -- and an app cannot list itself, nor the same peer twice.
+// `calls` is the list the chart inverts for the NetworkPolicy, so every name must
+// be an app this chart has, and an app cannot list itself or a peer twice.
 func TestCallsAreReadAndChecked(t *testing.T) {
 	withCalls := func(calls string) string {
 		return strings.Replace(miniManifest, "    default: true\n    questions:",
@@ -741,12 +719,9 @@ func TestCallsAreReadAndChecked(t *testing.T) {
 	}
 }
 
-// TestSnapshotGlobsAreReadAndChecked: `snapshot` is what box copies before an
-// update and what a rollback deletes, so a glob that is absolute, walks up, is
-// not clean or is not a pattern is refused at load -- the alternative is a copy
-// that finds nothing or a restore that removes a file outside the app's config
-// directory. The messages are compared whole, because a contributor should be
-// able to act on the line without reading the loader.
+// `snapshot` is what box copies before an update and what a rollback deletes, so
+// an absolute glob, one that walks up, or one that is not a pattern is refused at
+// load. The messages are compared whole, so a contributor can act on the line.
 func TestSnapshotGlobsAreReadAndChecked(t *testing.T) {
 	withSnapshot := func(globs string) string {
 		return strings.Replace(miniManifest, "    default: true\n    questions:",
@@ -757,8 +732,7 @@ func TestSnapshotGlobsAreReadAndChecked(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	alpha, _ := cat.App("alpha")
-	// The list is trimmed in place, so the copier runs exactly what the loader
-	// checked.
+	// The list is trimmed in place, so the copier runs what the loader checked.
 	if got := strings.Join(alpha.Snapshot, ","); got != "app.db,db/db.sqlite3-wal" {
 		t.Fatalf("apps.alpha.snapshot = %q, want the trimmed list", got)
 	}
@@ -816,11 +790,9 @@ func TestSnapshotGlobsAreReadAndChecked(t *testing.T) {
 	}
 }
 
-// TestRealChartSnapshots pins what each entry copies. The lists are the chart's
-// statement of what an image upgrade can rewrite beyond going back, so a change
-// is a decision about a rollback: an app added without one, or one whose
-// database moved, fails here rather than shipping a snapshot that restores
-// nothing.
+// Pins what each entry copies: the chart's statement of what an image upgrade can
+// rewrite beyond going back. An app added without one fails here rather than
+// shipping a snapshot that restores nothing.
 func TestRealChartSnapshots(t *testing.T) {
 	cat, err := Load("../../charts/s5n")
 	if err != nil {
@@ -866,12 +838,10 @@ func TestRealChartSnapshots(t *testing.T) {
 	}
 }
 
-// TestRealChartCallsAreTheReleaseEdges: the catalog's lists are the input the
-// chart's NetworkPolicy is derived from, so this pins the edges that a shipped
-// release got wrong -- Seerr into the Arrs, everything Maintainerr calls, autobrr
-// into qui, whose qBittorrent proxy is a download client autobrr can use, and qui
-// into the Arrs, whose instances it registers for ID lookups. A name here is also
-// an app that must exist, which is the rule the render depends on.
+// The catalog's lists are what the chart's NetworkPolicy is derived from, so this
+// pins the edges a shipped release got wrong (Seerr into the Arrs, everything
+// Maintainerr calls, autobrr into qui, qui into the Arrs). A name here is also an
+// app that must exist.
 func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 	cat, err := Load("../../charts/s5n")
 	if err != nil {
@@ -906,9 +876,8 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 			t.Fatalf("apps.%s.calls = %v, want none: it is a callee, not a caller", name, app.Calls)
 		}
 	}
-	// Every name resolves to a catalog app and never to its own entry -- the
-	// same two rules Load enforces, asserted over the shipped file so a future
-	// entry cannot slip past by being valid where nobody looks.
+	// Every name resolves to a catalog app and never to its own entry: the same
+	// rules Load enforces, asserted over the shipped file.
 	for _, app := range cat.Apps() {
 		for _, call := range app.Calls {
 			if call == app.Name {

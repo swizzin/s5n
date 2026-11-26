@@ -1,27 +1,15 @@
-// Package catalog reads the chart's catalog manifest: what a seedbox can run,
-// and the setup questions `box init` asks for each app.
+// Package catalog reads the chart's catalog manifest: what a seedbox can run, and
+// the setup questions `box init` asks for each app. It ships inside the chart, so
+// adding an app is a chart change and box names no app of its own.
 //
-// The manifest is chart-owned, beside variants.yaml: it ships inside the chart
-// archive, values cannot override it, and box reads it from the chart release
-// it is installing. That is what makes adding an app a chart change: box names
-// no app and asks no app-specific question of its own, so a new app arrives as
-// one manifest entry plus its values key, and box only changes when an app
-// needs a new *kind* of question.
+// The file is untrusted input to a process that may run as root, and a wrong entry
+// is a prompt that writes to a key root did not mean to give away: Load refuses
+// unknown fields, caps the size, requires one entry per `apps:` key, and every
+// question key must be a leaf of values.schema.json and never a grant key.
 //
-// The file is untrusted input to a process that may run as root, and a wrong
-// entry is a prompt that writes to a key root did not mean to give away. So
-// Load is strict: unknown fields are refused rather than ignored, the file has
-// a size cap, every app under `apps:` in values.yaml has exactly one entry and
-// vice versa, and every question key must be a leaf of values.schema.json.
-// Above all it must not be a grant key: domain, paths, uid and the app list are
-// box's own questions (internal/seedbox's grant rules), because a contributor
-// who could ask for one of them could move a box's data or hand it another
-// box's downloads through a prompt the user thinks is tuning.
-//
-// An entry also names the state an image upgrade can rewrite (`snapshot:`): the
-// files box copies before it moves a release and puts back if the move fails.
-// Those globs decide what a rollback deletes, so they are checked here, with the
-// rule itself living in internal/snapshot beside the code that copies by it.
+// An entry also names the state an image upgrade can rewrite (`snapshot:`); those
+// globs decide what a rollback deletes, so they are checked here against
+// internal/snapshot's rule.
 package catalog
 
 import (
@@ -42,13 +30,12 @@ import (
 // FileName is the manifest inside a chart directory, next to values.yaml.
 const FileName = "catalog.yaml"
 
-// MaxManifest bounds the manifest box will read. The real one is a few KB; the
-// cap is here because the file arrives inside a chart and box may be running as
-// root, so "read whatever this file says" needs a limit.
+// MaxManifest bounds the manifest box will read: the real one is a few KB, and
+// "read whatever this file says" needs a limit.
 const MaxManifest = 256 << 10
 
-// Kind is one kind of setup question. The list is deliberately short: a new
-// kind is the only catalog change that needs a box release.
+// Kind is one kind of setup question. A new kind is the only catalog change that
+// needs a box release.
 type Kind string
 
 const (
@@ -59,12 +46,10 @@ const (
 	KindSecret Kind = "secret"
 	// KindBool is a yes/no answer.
 	KindBool Kind = "bool"
-	// KindTransient is a secret that outlives no file. It is asked last, after
-	// apply's confirm, handed to that one apply and never written to values or
-	// the grant. The Plex claim token is the case: it expires about four
-	// minutes after plex.tv/claim issues it, so it can only be supplied at
-	// install time. The key still exists in values.schema.json, because the
-	// answer is passed to the chart; it is just never stored by box.
+	// KindTransient is a secret that outlives no file: asked after apply's
+	// confirm, handed to that one apply, never written to values or the grant.
+	// The Plex claim token is the case: it expires about four minutes after
+	// issue, so it can only be supplied at install time.
 	KindTransient Kind = "transient"
 )
 
@@ -96,8 +81,8 @@ const (
 	// ExposurePath is the default: `https://<domain>/<name>`.
 	ExposurePath Exposure = "path"
 	// ExposureHost is `https://<app>.<domain>`, with its own listener and
-	// certificate. An app whose UI writes absolute asset paths cannot live
-	// under a prefix, so the chart serves it at a name of its own.
+	// certificate: an app whose UI writes absolute asset paths cannot live under
+	// a prefix.
 	ExposureHost Exposure = "host"
 )
 
@@ -109,18 +94,15 @@ const (
 	// LoginPortal is the default: the app sits behind the box's one login, so
 	// the edge asks for a session before it serves anything under it.
 	LoginPortal Login = "portal"
-	// LoginOwn is an app that signs its users in itself, on the name or the
-	// path it is served at. Its host, or its whole path prefix, bypasses the
-	// login: a media server that issues its own tokens, or a tool reached by
-	// the same players and APIs.
+	// LoginOwn is an app that signs its users in itself, on the name or path it is
+	// served at: its host, or its whole path prefix, bypasses the login.
 	LoginOwn Login = "own"
 )
 
 // legacyOwnLogin are the apps chart releases published before `login:` carried
-// without saying so: their Plex, Seerr and Tautulli bypassed the login, and a
-// newer box must keep giving them that under those charts. The set is frozen --
-// a new app says `login: own` in the catalog, never here -- and it goes when
-// box's floor passes the first chart release that carries the key.
+// which bypassed the login, and a newer box must keep giving them that under
+// those charts. The set is frozen; it goes when box's floor passes the first
+// chart release that carries the key.
 var legacyOwnLogin = map[string]bool{
 	"plex":     true,
 	"seerr":    true,
@@ -134,44 +116,35 @@ type App struct {
 	// Description is one line, shown beside the app when init asks which apps
 	// the box should have.
 	Description string `yaml:"description"`
-	// Instances says the app takes more than one instance (the Arrs do). The
-	// instances themselves are the grant's, not a values question.
+	// Instances says the app takes more than one instance (the Arrs do); the
+	// instances are the grant's.
 	Instances bool `yaml:"instances"`
 	// Default says init preselects the app.
 	Default bool `yaml:"default"`
 	// Exposure is how the chart serves it; empty means ExposurePath.
 	Exposure Exposure `yaml:"exposure"`
-	// Login is how a person gets in: behind the box's one login, or with the
-	// app's own. Empty in the manifest means Load resolves it to LoginPortal,
-	// or to LoginOwn for the few apps a chart older than this key shipped.
+	// Login is how a person gets in. Empty means LoginPortal, or LoginOwn for the
+	// few apps a chart older than this key shipped.
 	Login Login `yaml:"login"`
-	// OIDC says the app signs in through the login's own OIDC provider: the
-	// chart gives it the issuer and a client secret, and the login registers a
-	// client for it in this box's namespace. It is the chart's decision, not
-	// box's -- a second client later is one entry here and nothing in box
-	// beyond reading this flag.
+	// OIDC says the app signs in through the login's OIDC provider: the chart
+	// gives it the issuer and a client secret, and the login registers a client
+	// in this box's namespace.
 	OIDC bool `yaml:"oidc"`
 	// Calls lists the in-release apps this one connects to, and it is the only
-	// such list: the chart derives the release's NetworkPolicy from it, each
-	// app's ingress admitting exactly the enabled apps that name it. So the
-	// consequence of a missing entry is a call the callee refuses, which is why
-	// Load checks every name against the catalog and refuses a self-reference.
-	// "sonarr"/"radarr" mean every instance of that Arr. An app that dials
-	// nothing inside the release leaves the list empty.
+	// such list: the chart derives the NetworkPolicy from it, so a missing entry
+	// is a call the callee refuses. "sonarr"/"radarr" mean every instance.
 	Calls []string `yaml:"calls"`
 	// Snapshot lists the globs, relative to the app's config directory, whose
-	// files an image upgrade can rewrite beyond going back: a database a
-	// migration moved forward, a settings file a new version rewrote, and the
-	// SQLite companions that belong with them. box copies what they match
-	// before an update and puts it back if the update fails, so an app without
-	// an entry has nothing to restore -- right for one whose upgrades only add.
+	// files an image upgrade can rewrite beyond going back: a migrated database
+	// and its SQLite companions. box copies what they match before an update and
+	// restores it if the update fails; an app without an entry has nothing to
+	// restore.
 	Snapshot []string `yaml:"snapshot"`
 	// Questions are asked in this order, after the app is selected.
 	Questions []Question `yaml:"questions"`
 }
 
-// Transient returns the app's transient questions, in order. They are asked
-// after apply's confirm, not with the others.
+// Transient returns the app's transient questions, asked after apply's confirm.
 func (a App) Transient() []Question {
 	var out []Question
 	for _, q := range a.Questions {
@@ -207,9 +180,8 @@ func (c *Catalog) Apps() []App {
 	return out
 }
 
-// OIDCApps is the enabled apps that sign in through the login, in manifest
-// order. enabled is the names init selected; an app the catalog marks and this
-// box did not install is not a client, and a box with none is not a provider.
+// OIDCApps is the enabled apps that sign in through the login, in manifest order:
+// an app the catalog marks and this box did not install is not a client.
 func (c *Catalog) OIDCApps(enabled []string) []string {
 	on := make(map[string]bool, len(enabled))
 	for _, name := range enabled {
@@ -253,8 +225,8 @@ func (c *Catalog) Defaults() []string {
 	return out
 }
 
-// manifest is the file's shape. It is decoded with KnownFields, so a typo'd
-// field is an error instead of a silently missing question.
+// manifest is the file's shape, decoded with KnownFields so a typo'd field is an
+// error instead of a silently missing question.
 type manifest struct {
 	Apps map[string]manifestApp `yaml:"apps"`
 }
@@ -271,7 +243,7 @@ type manifestApp struct {
 	Questions   []Question `yaml:"questions"`
 }
 
-// Error lists every problem with a manifest at once. A contributor who got the
+// Error lists every problem with a manifest at once: a contributor who got the
 // shape wrong wants the whole list, not one line per run.
 type Error struct {
 	Path     string
@@ -289,11 +261,9 @@ func (e *Error) Error() string {
 	return b.String()
 }
 
-// Load reads and validates the catalog manifest in a chart directory, with
-// values.yaml and values.schema.json from the same directory: the manifest is
-// only meaningful against the chart it shipped with. `box init` reads a chart
-// release instead — a pulled artifact's files are bytes, not a directory — and
-// calls Parse with exactly those three files.
+// Load reads and validates the catalog manifest in a chart directory, with the
+// values.yaml and values.schema.json it shipped with. `box init` reads a chart
+// release instead and calls Parse with exactly those three files.
 func Load(dir string) (*Catalog, error) {
 	raw, err := readCapped(filepath.Join(dir, FileName))
 	if err != nil {
@@ -314,8 +284,7 @@ func Load(dir string) (*Catalog, error) {
 }
 
 // Parse builds a catalog from the manifest bytes and the chart's values and
-// schema. Load is Parse over a directory; the split is what lets the tests feed
-// a hostile manifest without writing it into the chart.
+// schema; the split from Load is what lets the tests feed a hostile manifest.
 func Parse(path string, raw, values, schema []byte) (*Catalog, error) {
 	m, err := decodeManifest(path, raw)
 	if err != nil {
@@ -343,11 +312,9 @@ func Parse(path string, raw, values, schema []byte) (*Catalog, error) {
 	return cat, nil
 }
 
-// decodeManifest decodes the manifest's first document into the shape the file
-// is read as. Both of its refusals are about the file itself, before any entry
-// is looked at, which is why they are their own step: unknown fields are a typo
+// decodeManifest decodes the manifest's first document. Unknown fields are a typo
 // that would otherwise be a silently missing question, and a second document
-// would be ignored by the decoder rather than read.
+// would be ignored rather than read.
 func decodeManifest(path string, raw []byte) (*manifest, error) {
 	var m manifest
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
@@ -367,10 +334,9 @@ func decodeManifest(path string, raw []byte) (*manifest, error) {
 	return &m, nil
 }
 
-// appSetProblems checks the manifest's app set against the chart's: every
-// manifest entry names an app the chart has, and every app the chart has is in
-// the manifest. A workload nobody can configure is as wrong as a question for
-// an app that does not exist.
+// appSetProblems checks the manifest's app set against the chart's: every entry
+// names an app the chart has, and every chart app has an entry. A workload nobody
+// can configure is as wrong as a question for an app that does not exist.
 func appSetProblems(m *manifest, order []string, chartApps map[string]chartApp) []string {
 	var problems []string
 	if len(m.Apps) == 0 {
@@ -378,8 +344,8 @@ func appSetProblems(m *manifest, order []string, chartApps map[string]chartApp) 
 	}
 	for _, name := range order {
 		if _, ok := m.Apps[name]; !ok {
-			// appOrder reads the same document, so this cannot happen unless the
-			// file has duplicate `apps:` keys, which yaml refuses first.
+			// appOrder reads the same document, so this can only be a duplicate
+			// `apps:` key, which yaml refuses first.
 			problems = append(problems, fmt.Sprintf("apps.%s: declared twice", name))
 		}
 	}
@@ -397,9 +363,8 @@ func appSetProblems(m *manifest, order []string, chartApps map[string]chartApp) 
 }
 
 // buildApps turns the manifest's entries into the catalog in manifest order,
-// collecting every entry's problems. An entry with problems is still built:
-// one run lists everything wrong with the file, and it is the problem list, not
-// the build, that refuses the manifest.
+// collecting every entry's problems. An entry with problems is still built: the
+// problem list, not the build, refuses the manifest.
 func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *schema) (*Catalog, []string) {
 	cat := &Catalog{byName: make(map[string]int, len(order))}
 	var problems []string
@@ -431,11 +396,9 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 	return cat, problems
 }
 
-// validateExposure checks how the chart serves the app. An unknown value is a
-// typo that would otherwise render the app's route under a path nobody meant,
-// so it is refused by name like every other manifest mistake. An app that takes
-// instances has no single name to put before the domain, so it cannot take a
-// host of its own.
+// validateExposure checks how the chart serves the app. An unknown value would
+// render the route under a path nobody meant. An app that takes instances has no
+// single name, so it cannot take a host of its own.
 func validateExposure(app *App) []string {
 	switch app.Exposure {
 	case "", ExposurePath:
@@ -463,10 +426,9 @@ func (c *Catalog) Hosted() []string {
 	return out
 }
 
-// validateLogin checks how a person gets into the app, and resolves an absent
-// key: every caller then has an answer, and only the catalog knows that an old
-// chart's Plex, Seerr and Tautulli sign their users in themselves. An explicit
-// value wins over that set, which is how a chart stops marking one of them.
+// validateLogin checks how a person gets into the app, resolving an absent key so
+// every caller has an answer. An explicit value wins over legacyOwnLogin, which is
+// how a chart stops marking one of them.
 func validateLogin(app *App) []string {
 	switch app.Login {
 	case "":
@@ -483,10 +445,9 @@ func validateLogin(app *App) []string {
 	}
 }
 
-// SelfAuthenticating returns the apps that sign their users in themselves, in
-// manifest order. The login gives each one a bypass instead of the one-factor
-// rule, so a new app with its own sign-in is one manifest key and no box
-// change.
+// SelfAuthenticating returns the apps that sign their users in themselves: the
+// login gives each one a bypass, so a new app with its own sign-in is one manifest
+// key and no box change.
 func (c *Catalog) SelfAuthenticating() []string {
 	var out []string
 	for _, a := range c.apps {
@@ -520,14 +481,10 @@ func validateApp(app *App, chart chartApp, chartApps map[string]chartApp, sch *s
 	return append(problems, validateQuestions(app, sch)...)
 }
 
-// validateCalls checks an entry's `calls` list. The chart inverts that list for
-// the release's NetworkPolicy, so a name that is not a catalog app renders a
-// peer selector nothing matches, a self-reference renders an app admitting
-// itself, and a repeat renders the same peer twice: each one is a policy that
-// says something its author did not mean, and each is refused by name here.
-//
-// The names are trimmed in place, so the catalog's App carries what the chart
-// reads from the same file.
+// validateCalls checks an entry's `calls` list, which the chart inverts for the
+// NetworkPolicy: an unknown name renders a peer selector nothing matches, a
+// self-reference an app admitting itself, and a repeat the same peer twice. Each
+// is refused by name here.
 func validateCalls(app *App, chartApps map[string]chartApp) []string {
 	var problems []string
 	seen := map[string]int{}
@@ -555,15 +512,11 @@ func validateCalls(app *App, chartApps map[string]chartApp) []string {
 	return problems
 }
 
-// validateSnapshot checks an entry's `snapshot` list: the globs that decide
-// what box copies before an update and what a rollback deletes. One that is
-// absolute, walks up, is not clean or is not a path.Match pattern is refused
-// here, because the alternative is a copy that silently finds nothing or a
-// restore that removes a file outside the app's config directory.
-//
-// The rule is internal/snapshot's, beside the code that copies by it; this adds
-// the entry's location so a contributor sees which glob to edit. The globs are
-// trimmed in place, so the catalog carries what the copier will run.
+// validateSnapshot checks an entry's `snapshot` list: the globs that decide what
+// box copies before an update and what a rollback deletes. One that is absolute or
+// walks up is refused here, because the alternative is a copy that finds nothing
+// or a restore that removes a file outside the app's config directory. The rule is
+// internal/snapshot's; this adds the entry's location.
 func validateSnapshot(app *App) []string {
 	var problems []string
 	seen := map[string]int{}
@@ -631,10 +584,8 @@ func validateQuestionText(q Question, where string) []string {
 	return problems
 }
 
-// validateQuestionKind checks the kind and the default's type, which the kind
-// decides. known is false for a missing or unknown kind: every rule after it
-// reads the kind, so the caller stops there rather than guess what the
-// contributor meant.
+// validateQuestionKind checks the kind and its default's type. known is false for a
+// missing or unknown kind: every rule after it reads the kind.
 func validateQuestionKind(q Question, where string) (problems []string, known bool) {
 	switch q.Kind {
 	case KindString, KindSecret, KindTransient:
@@ -672,9 +623,8 @@ func validateQuestionKey(key, where string, kind Kind, sch *schema) []string {
 			break
 		}
 	}
-	// The grant is root's: a manifest must never be able to ask for the
-	// domain, a host path, a uid, the namespace or the app list. BoxOnly and
-	// BoxSets are refused with the same rigidity: neither file names a claim.
+	// The grant is root's: a manifest must never be able to ask for the domain, a
+	// host path, a uid, the namespace or the app list.
 	if rule, ok := seedbox.GrantRule(path.Keys()); ok {
 		return append(problems, fmt.Sprintf("%s.key: %s is set by %s (%s); the grant is box's question, never the catalog's",
 			where, key, setBy(rule), rule.Why))
@@ -749,9 +699,8 @@ func valuesApps(src []byte) (map[string]chartApp, error) {
 	return out, nil
 }
 
-// appOrder is the manifest's `apps:` key order. A YAML mapping decoded into a
-// Go map loses it, and init shows the apps in the order a contributor wrote
-// them, so it is read once from the node tree.
+// appOrder is the manifest's `apps:` key order, which init shows: a Go map loses
+// it, so it is read once from the node tree.
 func appOrder(raw []byte) ([]string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
@@ -787,8 +736,8 @@ func appOrder(raw []byte) ([]string, error) {
 	return nil, nil
 }
 
-// readCapped reads a chart file, refusing one over the cap. A file that is too
-// big is a refusal, not a truncated read: half a manifest is worse than none.
+// readCapped reads a chart file, refusing one over the cap: half a manifest is
+// worse than none.
 func readCapped(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
