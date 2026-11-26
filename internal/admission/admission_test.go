@@ -14,9 +14,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// decodeAll parses a multi-document YAML stream into plain values. Both sides of
-// the parity test go through it, so indentation, comments, map order and flow
-// vs block style cannot make a difference: only the objects can.
+// decodeAll parses a multi-document YAML stream into plain values, so the parity
+// test compares objects and not indentation or style.
 func decodeAll(t *testing.T, what string, data []byte) []any {
 	t.Helper()
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -47,16 +46,9 @@ func readFixture(t *testing.T, path string) []byte {
 	return data
 }
 
-// TestRenderMatchesThePreviousRenderer is the parity proof: each golden is the
-// output of the platform layer's original Python renderer, captured once per
-// input before that renderer was deleted in favour of this package. The Go
-// output has to parse to the same objects, document for document.
-//
-// The first case renders the real chart, so the golden fails when
-// charts/s5n/variants.yaml gains, loses or renames a repository. That is on
-// purpose: the params are where "blessed by the chart" reaches already-installed
-// seedboxes, and the failure is the prompt to decide whether the new list is
-// meant. Regenerate the golden and say so in the commit.
+// Each golden is the output of the Python renderer this package replaced. The
+// first renders the real chart, so re-blessing an image fails here on purpose:
+// regenerate the golden and say so in the commit.
 func TestRenderMatchesThePreviousRenderer(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -111,9 +103,8 @@ func TestRenderMatchesThePreviousRenderer(t *testing.T) {
 }
 
 func TestRepositoriesDedupesAndSorts(t *testing.T) {
-	// Two apps share registry.example.com/seedbox/arr; one app has a second
-	// variant. Dedupe first, then sort: a re-render of unchanged input has to
-	// produce the same string, or every `kubectl apply` rewrites the params.
+	// Dedupe then sort: a re-render of unchanged input has to produce the same
+	// string, or every `kubectl apply` rewrites the params.
 	got, err := Repositories(readFixture(t, "testdata/charts/dedupe/variants.yaml"))
 	if err != nil {
 		t.Fatalf("repositories: %v", err)
@@ -128,10 +119,8 @@ func TestRepositoriesDedupesAndSorts(t *testing.T) {
 	}
 }
 
-// TestImagesReadsEveryVariant: the image table `box update` compares two
-// releases with. A tag without a digest is still a variant (the fixture's alt
-// builds carry none), and a repo-less variant stays in the table so update can
-// see the variant is there.
+// A tag without a digest is still a variant, and a repo-less variant stays in
+// the table so update can see it is there.
 func TestImagesReadsEveryVariant(t *testing.T) {
 	got, err := Images(readFixture(t, "testdata/charts/dedupe/variants.yaml"))
 	if err != nil {
@@ -185,9 +174,8 @@ func TestRenderRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestRenderRejectsBadVariants: the chart owns variants.yaml, so a file this
-// package cannot read is a chart bug, and the render refuses rather than
-// writing params with a partial blessed list.
+// The chart owns variants.yaml, so a file this cannot read is a chart bug: the
+// render refuses rather than writing params with a partial blessed list.
 func TestRenderRejectsBadVariants(t *testing.T) {
 	grant := Grant{Namespace: "example-user", TorrentNodePort: 30000, ServiceType: "NodePort"}
 	cases := []struct {
@@ -219,9 +207,9 @@ func TestRenderRejectsBadVariants(t *testing.T) {
 	}
 }
 
-// TestBindingsSelectExactlyTheNamespace is the tenancy invariant: a
-// cluster-scoped binding, selecting by the namespace's own name label, reading
-// params from root's namespace, and denying when the params are gone.
+// The tenancy invariant: a cluster-scoped binding, selecting by the namespace's
+// own name label, reading params from root's namespace, denying when they are
+// gone.
 func TestBindingsSelectExactlyTheNamespace(t *testing.T) {
 	g := Grant{Namespace: "example-user", TorrentNodePort: 31111, ServiceType: "NodePort"}
 	docs, err := Render(readFixture(t, "testdata/charts/clusterip/variants.yaml"), g)
@@ -249,8 +237,8 @@ func TestBindingsSelectExactlyTheNamespace(t *testing.T) {
 			t.Errorf("binding %s actions = %v", b.Metadata.Name, b.Spec.ValidationActions)
 		}
 		if wantPolicy == "s5n-no-login-changes" || wantPolicy == "s5n-no-auth-routes" {
-			// Neither policy reads params: binding one to the grant's
-			// ConfigMap would make a rule that needs none depend on one.
+			// Neither policy reads params; binding one to a ConfigMap would make a
+			// rule that needs none depend on one.
 			if b.Spec.ParamRef != nil {
 				t.Errorf("binding %s reads params %+v, but its policy has none", b.Metadata.Name, b.Spec.ParamRef)
 			}
@@ -273,9 +261,8 @@ func TestBindingsSelectExactlyTheNamespace(t *testing.T) {
 	}
 }
 
-// TestPolicyReadsTheseParams fails when policy.yaml stops reading a key this
-// package writes: the params object and the policies that consume it move
-// together, and nothing else would notice a renamed key.
+// Fails when policy.yaml stops reading a key this writes: the params object and
+// the policies move together, and nothing else would notice a renamed key.
 func TestPolicyReadsTheseParams(t *testing.T) {
 	policy := string(readFixture(t, "../../install/platform/admission/policy.yaml"))
 	for _, want := range []string{
@@ -289,9 +276,8 @@ func TestPolicyReadsTheseParams(t *testing.T) {
 	}
 }
 
-// TestRenderChartKeepsTheBadInputAndTheBadChartApart: a namespace root typed
-// wrong must not be reported as a variants.yaml problem, and a variants.yaml
-// this package cannot read must name the file it read.
+// A bad namespace is not a variants.yaml problem, and a bad variants.yaml names
+// the file it read.
 func TestRenderChartKeepsTheBadInputAndTheBadChartApart(t *testing.T) {
 	chart := t.TempDir()
 	write := func(content string) {
@@ -318,9 +304,8 @@ func TestRenderChartKeepsTheBadInputAndTheBadChartApart(t *testing.T) {
 	}
 }
 
-// TestTheLoginPolicyIsInTheManifest: the binding this package renders is only
-// enforcement if the policy it names exists and refuses those writes. A rename
-// on either side is a login a namespace can walk around.
+// The binding is only enforcement if the policy it names exists and refuses
+// those writes; a rename on either side is a login a namespace can walk around.
 func TestTheLoginPolicyIsInTheManifest(t *testing.T) {
 	documents := decodeAll(t, "policy.yaml", readFixture(t, "../../install/platform/admission/policy.yaml"))
 	var found map[string]any
@@ -376,11 +361,9 @@ func TestTheLoginPolicyIsInTheManifest(t *testing.T) {
 	}
 }
 
-// TestTheAuthRoutePolicyIsInTheManifest: the grant's new binding is only
-// enforcement if the policy it names exists, covers every served HTTPRoute
-// version, and refuses the three ways a path can reach /auth without spelling
-// it. Renaming the policy or dropping a version leaves a hole neither the
-// chart nor the renderer would notice.
+// The policy must exist, cover every served HTTPRoute version, and refuse the
+// three ways a path can reach /auth without spelling it: renaming it or dropping
+// a version leaves a hole neither the chart nor the renderer would notice.
 func TestTheAuthRoutePolicyIsInTheManifest(t *testing.T) {
 	var found map[string]any
 	for _, raw := range decodeAll(t, "policy.yaml", readFixture(t, "../../install/platform/admission/policy.yaml")) {
@@ -409,8 +392,8 @@ func TestTheAuthRoutePolicyIsInTheManifest(t *testing.T) {
 	for _, v := range rule["apiVersions"].([]any) {
 		versions[fmt.Sprint(v)] = true
 	}
-	// The Gateway API bundle box installs serves v1 and v1beta1; a policy
-	// matching one only leaves the other writable.
+	// The Gateway API bundle box installs serves v1 and v1beta1; matching one only
+	// leaves the other writable.
 	for _, want := range []string{"v1", "v1beta1"} {
 		if !versions[want] {
 			t.Errorf("the auth-route policy does not match HTTPRoute %s", want)

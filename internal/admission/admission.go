@@ -1,23 +1,11 @@
-// Package admission is the platform layer's admission contract.
+// Package admission is the platform layer's admission contract: Render turns one
+// user's grant into the params ConfigMap and the two bindings that attach the
+// platform policies to that namespace, and UnblessedImages applies the image rule
+// to pods that already exist, which a binding never re-checks.
 //
-// Two halves, one rule set. Render turns one user's grant into the params
-// ConfigMap and the two ValidatingAdmissionPolicyBindings that attach the
-// platform policies to exactly that namespace; UnblessedImages applies the
-// policies' image rule to pods that already exist.
-//
-// It is not internal/seedbox. That package decides what a grant may contain
-// from a user's own files, before anything is installed. This one is the other
-// side of the contract: what root writes into the cluster, and therefore what
-// the cluster refuses. They are separate because their inputs are: seedbox
-// reads values files, this reads the chart's variants.yaml and the grant root
-// assigned.
-//
-// The image rule lives here in Go as well as in policy.yaml because a binding
-// never re-checks a running pod (AGENTS.md, gotchas): the pods a new binding
-// strands are exactly the ones this package names before the binding is
-// created. The two rules must agree: TestBlessedMatchesThePolicyRule is the
-// case table and TestPolicyCELStillMatchesTheGoRule fails when the CEL under it
-// changes.
+// The image rule lives here in Go as well as in policy.yaml, so the pods a new
+// binding strands can be named before it is created. TestBlessedMatchesThePolicyRule
+// and TestPolicyCELStillMatchesTheGoRule hold the two rules together.
 package admission
 
 import (
@@ -35,34 +23,32 @@ import (
 const ParamsNamespace = "s5n-system"
 
 // ServiceTypes are the grants Render accepts. ClusterIP is one: a box that
-// exposes no peers port grants nothing and a ClusterIP Service is still
+// exposes no peers port grants nothing, and a ClusterIP Service is still
 // admitted by the policy's first rule.
 var ServiceTypes = []string{"ClusterIP", "LoadBalancer", "NodePort"}
 
-// nodePortRange is the default Kubernetes NodePort range. A grant's port is
-// compared against every nodePort a Service writes, so it has to be a port the
-// API server would ever accept.
+// nodePortRange is the default Kubernetes NodePort range: a grant's port is
+// compared against every nodePort a Service writes.
 const (
 	minNodePort = 30000
 	maxNodePort = 32767
 )
 
-// Grant is the part of one user's grant the cluster enforces. It is a subset of
-// the grant internal/seedbox owns: only the keys admission reads.
+// Grant is the part of one user's grant the cluster enforces.
 type Grant struct {
-	// Namespace is the user's seedbox namespace: the binding selects exactly
-	// it, and the params object is named after it.
+	// Namespace is the user's seedbox namespace: the binding selects exactly it,
+	// and the params object is named after it.
 	Namespace string
-	// TorrentNodePort is the single nodePort a Service in this namespace may
-	// set. It is a port on the node, so root assigns it (docs/box.md).
+	// TorrentNodePort is the single nodePort a Service in this namespace may set.
+	// It is a port on the node, so root assigns it (docs/box.md).
 	TorrentNodePort int
 	// ServiceType is the type the torrent peers Service may use, besides
-	// ClusterIP which is always admitted.
+	// ClusterIP, which is always admitted.
 	ServiceType string
 }
 
-// validate refuses a grant the params render cannot express, naming the input
-// as given rather than the parsed value.
+// validate refuses a grant the params render cannot express, naming the input as
+// given.
 func (g Grant) validate() error {
 	if !validDNSLabel(g.Namespace) {
 		return fmt.Errorf("namespace %q is not a DNS label: lowercase letters, digits and '-', at most 63 characters, not starting or ending with '-'", g.Namespace)
@@ -78,10 +64,9 @@ func (g Grant) validate() error {
 	return fmt.Errorf("torrent Service type %q: a grant may only assign %s", g.ServiceType, strings.Join(ServiceTypes, ", "))
 }
 
-// validDNSLabel reports whether s is an RFC 1123 label, which is what a
-// namespace name is: it becomes the binding's only selector value and the
-// params object's name, so a malformed one would be refused by the API server
-// long after root believed the user was set up.
+// validDNSLabel reports whether s is an RFC 1123 label: it becomes the binding's
+// selector value and the params object's name, so a malformed one would be
+// refused by the API server long after root believed the user was set up.
 func validDNSLabel(s string) bool {
 	if s == "" || len(s) > 63 {
 		return false
@@ -98,30 +83,26 @@ func validDNSLabel(s string) bool {
 	return true
 }
 
-// Image is one blessed variant: the repository the chart resolves it to, and
-// the pins inside it. `box update` reads it to tell which enabled apps' images
-// move between two releases -- a database migrates when its image changes, so
-// that answer is what a step snapshots.
+// Image is one blessed variant: the repository the chart resolves it to, and the
+// pins inside it. `box update` reads it to tell which enabled apps' images move
+// between two releases, and so which databases a step snapshots.
 type Image struct {
-	// Repository is the only image the chart can run for this app; values may
-	// not name one (docs/box.md, "Image choice: blessed variants").
+	// Repository is the only image the chart can run for this app; values may not
+	// name one (docs/box.md, "Image choice: blessed variants").
 	Repository string
-	// Tag and Digest are the pins inside that repository. The chart pins both,
-	// and a digest bump alone is an image change: that is why update compares
-	// Repository and Digest, never the tag.
+	// Tag and Digest are the pins inside that repository. A digest bump alone is
+	// an image change, which is why update compares Repository and Digest.
 	Tag    string
 	Digest string
 }
 
-// Images is the chart's variants.yaml as its image table: app -> variant ->
-// image. It is the one parse of the file, so the blessed repository list
-// (Repositories), the admission policy's params and `box update`'s moving-app
-// list cannot disagree about what a variant names.
+// Images is the chart's variants.yaml as app -> variant -> image. It is the one
+// parse of the file, so the blessed list, the policy's params and update's
+// moving-app list cannot disagree.
 //
-// An app or variant that is not a mapping is an error, because that is a chart
-// typo and not a variant without an image. A variant that names no repository
-// is kept as-is; Repositories skips it, and update's comparison sees the
-// variant present with an empty image rather than absent.
+// An app or variant that is not a mapping is an error: that is a chart typo, not
+// a variant without an image. A variant that names no repository is kept as-is;
+// Repositories skips it.
 func Images(variants []byte) (map[string]map[string]Image, error) {
 	if len(strings.TrimSpace(string(variants))) == 0 {
 		return nil, fmt.Errorf("variants.yaml is empty")
@@ -156,12 +137,8 @@ func Images(variants []byte) (map[string]map[string]Image, error) {
 }
 
 // Repositories is the blessed list: every distinct repository named by the
-// chart's variants.yaml, sorted. This is the only place the list is built, in
-// box as in hack/render-grant, so "blessed by the chart" has one definition.
-//
-// A variant that names no repository is skipped; an app or variant that is not
-// a mapping is an error, because that is a chart typo and not a variant without
-// a repository.
+// chart's variants.yaml, sorted. It is built only here, in box as in
+// hack/render-grant, so "blessed by the chart" has one definition.
 func Repositories(variants []byte) ([]string, error) {
 	apps, err := Images(variants)
 	if err != nil {
@@ -187,9 +164,9 @@ func Repositories(variants []byte) ([]string, error) {
 	return names, nil
 }
 
-// Render is the pure render: variants.yaml's bytes and one grant in, the
-// objects that carry it out. The caller writes them; this package never talks
-// to a cluster.
+// Render is the pure render: variants.yaml's bytes and one grant in, the objects
+// that carry it out. The caller writes them; this package never talks to a
+// cluster.
 func Render(variants []byte, g Grant) (Docs, error) {
 	if err := g.validate(); err != nil {
 		return Docs{}, err
@@ -197,10 +174,9 @@ func Render(variants []byte, g Grant) (Docs, error) {
 	return renderForValidGrant(variants, g)
 }
 
-// renderForValidGrant is Render without the grant validation, for a caller that
-// validated it already and needs the two error sources to stay distinguishable:
-// a bad namespace is the caller's input, a file this package cannot read is the
-// chart's.
+// renderForValidGrant is Render without the grant validation, keeping the two
+// error sources distinguishable: a bad namespace is the caller's input, a file
+// this cannot read is the chart's.
 func renderForValidGrant(variants []byte, g Grant) (Docs, error) {
 	repos, err := Repositories(variants)
 	if err != nil {
@@ -209,13 +185,12 @@ func renderForValidGrant(variants []byte, g Grant) (Docs, error) {
 	return grantDocs(repos, g), nil
 }
 
-// RenderChart is Render for a chart directory: it reads
-// <chart-dir>/variants.yaml, the file the templates resolve images from, so the
-// params and the release can never disagree about which repositories exist.
+// RenderChart is Render for a chart directory, reading <chart-dir>/variants.yaml
+// so the params and the release cannot disagree about which repositories exist.
 func RenderChart(chartDir string, g Grant) (Docs, error) {
-	// The grant is checked before the chart is read, and outside the wrap
-	// below: "namespace %q is not a DNS label" is about the input root typed,
-	// and prefixing it with variants.yaml would send root looking in the chart.
+	// The grant is checked before the chart is read: a bad namespace is about the
+	// input root typed, and prefixing it with variants.yaml would send root looking
+	// in the chart.
 	if err := g.validate(); err != nil {
 		return Docs{}, err
 	}
