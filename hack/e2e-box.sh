@@ -7129,6 +7129,26 @@ box_migrate() {
 # node_root <node> <shell command>: one command as root inside the node, which
 # sees $WORK at its own path. The node's root is the only user here that can
 # read a tree owned by the seedbox's user, and the only one that can chown it.
+# migrate_seed_script <config dir>: an executable script in a source's config
+# directory, which migrate_check_script finds again on the box.
+MIGRATE_SCRIPT=scripts/on-complete.sh
+migrate_seed_script() {
+  mkdir -p "$1/${MIGRATE_SCRIPT%/*}"
+  printf '#!/bin/sh\necho s5n e2e: an operator script\n' >"$1/${MIGRATE_SCRIPT}"
+  chmod 0755 "$1/${MIGRATE_SCRIPT}"
+}
+
+# migrate_check_script <config dir>: the script came across with its mode.
+migrate_check_script() {
+  local script="$1/${MIGRATE_SCRIPT}" mode
+  mode=$(stat -c '%a' "$script" 2>/dev/null || echo none)
+  if [ "$mode" != 755 ]; then
+    echo "${script} is mode ${mode}, want the source's 755: a script in a config directory has to stay one"
+    return 1
+  fi
+  echo "  ${script#"$1"/}: carried with its execute bit (${mode})"
+}
+
 node_root() { # node_root <node> <command>
   docker exec "${1}-control-plane" bash -c "$2"
 }
@@ -9397,6 +9417,10 @@ migrate_box() {
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
+  # A script the operator keeps in a config directory -- a torrent client's
+  # on-complete hook, a helper an Arr's custom script calls -- is one that runs:
+  # its execute bit is part of what the migration carries.
+  migrate_seed_script "$src/var/data/qbittorrent"
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
   printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
   chmod 600 "$WORK/source/qbittorrent-password"
@@ -10598,6 +10622,7 @@ PY
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
+  migrate_check_script "$CONFIG_PATH/qbittorrent" || fail=1
   # Plex's config travels as its whole data, so the box has its preferences, its
   # databases and the Metadata and Media trees this script put in the source --
   # the artwork and preview thumbnails a migration exists to save Plex building
@@ -10852,6 +10877,10 @@ migrate_keep_box() {
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
+  # A script the operator keeps in a config directory -- a torrent client's
+  # on-complete hook, a helper an Arr's custom script calls -- is one that runs:
+  # its execute bit is part of what the migration carries.
+  migrate_seed_script "$src/var/data/qbittorrent"
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
   printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
   chmod 600 "$WORK/source/qbittorrent-password"
@@ -11208,6 +11237,7 @@ migrate_keep_box() {
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
+  migrate_check_script "$CONFIG_PATH/qbittorrent" || fail=1
   # Plex's config travels as its whole data, so the box has its preferences, its
   # databases and the Metadata and Media trees this script put in the source --
   # the artwork and preview thumbnails a migration exists to save Plex building
