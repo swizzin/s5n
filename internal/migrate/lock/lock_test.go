@@ -1,9 +1,7 @@
 package lock
 
-// lock_test.go drives the proof with a fake clientset: the two pods' answers
-// are scripted, so every branch — the lock holds, the cluster does not enforce
-// it, the control could not run, the public check — is tested without a
-// cluster. What the pods are is asserted on the objects the proof creates.
+// lock_test.go scripts the pods' answers, so every branch is tested without a
+// cluster; the pods themselves are asserted on the objects the proof creates.
 
 import (
 	"context"
@@ -16,9 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// fakePods hands back one scripted exit code per created pod, in order, already
-// terminated; it records what was created and deleted, and names a CNI from
-// kube-system.
+// fakePods hands back one scripted exit code per created pod, already
+// terminated, and records what was created and deleted.
 type fakePods struct {
 	exits   []int32
 	created []*corev1.Pod
@@ -87,9 +84,8 @@ func options() Options {
 	}
 }
 
-// TestProveHoldsWhenTheLabelledPodIsDenied is the happy path: the control
-// reaches the address and the pod carrying the release's label does not, so the
-// policy selected it and denied it.
+// TestProveHoldsWhenTheLabelledPodIsDenied: the control reaches the address and
+// the labelled pod does not.
 func TestProveHoldsWhenTheLabelledPodIsDenied(t *testing.T) {
 	f := &fakePods{exits: []int32{exitAsAsked, exitAsAsked}, cniPods: []string{"kindnet-abc"}}
 	rep, err := Prove(context.Background(), f, options())
@@ -107,9 +103,8 @@ func TestProveHoldsWhenTheLabelledPodIsDenied(t *testing.T) {
 	}
 }
 
-// TestProveRefusesAClusterThatDoesNotEnforce is the refusal this whole package
-// exists for: the labelled pod reached the address the policy denies, so a
-// rehearsal would run live. It names the CNI when it can.
+// TestProveRefusesAClusterThatDoesNotEnforce: the labelled pod reached what the
+// policy denies, so a rehearsal would run live.
 func TestProveRefusesAClusterThatDoesNotEnforce(t *testing.T) {
 	f := &fakePods{exits: []int32{exitAsAsked, exitOpposite}, cniPods: []string{"kindnet-abc"}}
 	rep, err := Prove(context.Background(), f, options())
@@ -135,9 +130,7 @@ func TestProveRefusesAClusterThatDoesNotEnforce(t *testing.T) {
 }
 
 // TestProveSaysTheProofCouldNotRun: a control that cannot reach the address
-// means the probe's failure proves nothing — a namespace policy of its own, or
-// a network that does not route, looks exactly like this. The refusal must say
-// that, never that the lock works.
+// means the probe's failure proves nothing, and the refusal must say that.
 func TestProveSaysTheProofCouldNotRun(t *testing.T) {
 	f := &fakePods{exits: []int32{exitOpposite}}
 	_, err := Prove(context.Background(), f, options())
@@ -154,8 +147,7 @@ func TestProveSaysTheProofCouldNotRun(t *testing.T) {
 	}
 }
 
-// TestProveRefusesWhenTheProbeCannotRun: an image that will not pull or a pod
-// the namespace refuses is not "the lock held".
+// TestProveRefusesWhenTheProbeCannotRun: a pod that never ran is not a lock.
 func TestProveRefusesWhenTheProbeCannotRun(t *testing.T) {
 	f := &fakePods{exits: []int32{exitAsAsked, exitBroken}}
 	_, err := Prove(context.Background(), f, options())
@@ -170,9 +162,7 @@ func TestProveRefusesWhenTheProbeCannotRun(t *testing.T) {
 }
 
 // TestProbePodsAreTheOnesTheClusterWillAdmit: the control carries no release
-// label (so only a namespace-wide policy can select it), the probe carries the
-// instance label and nothing that changes a selection, and both are the pods
-// Pod Security "restricted" and the blessed-image policy admit.
+// label, the probe carries it, and both pass restricted and the image policy.
 func TestProbePodsAreTheOnesTheClusterWillAdmit(t *testing.T) {
 	f := &fakePods{exits: []int32{exitAsAsked, exitAsAsked}}
 	if _, err := Prove(context.Background(), f, options()); err != nil {
@@ -202,8 +192,7 @@ func TestProbePodsAreTheOnesTheClusterWillAdmit(t *testing.T) {
 	}
 }
 
-// assertRestricted checks one probe pod against Pod Security "restricted" and
-// the blessed-image rule: the namespace a rehearsal runs in enforces both.
+// assertRestricted checks a probe pod against restricted and the image rule.
 func assertRestricted(t *testing.T, pod *corev1.Pod) {
 	t.Helper()
 	spec := pod.Spec
@@ -238,10 +227,9 @@ func assertRestricted(t *testing.T, pod *corev1.Pod) {
 	}
 }
 
-// TestProveChecksAPublicAddress: the second check only ever adds a failure.
-// A public address the labelled pod reaches means the policy is absent; one it
-// cannot reach is what a locked box and a host with no internet both look like,
-// so the note says so and the run goes on.
+// TestProveChecksAPublicAddress: the labelled pod reaching a public address means
+// the policy is absent; failing to is what both a locked box and no internet look
+// like, so it is only a note.
 func TestProveChecksAPublicAddress(t *testing.T) {
 	o := options()
 	o.Internet = Target{Host: "192.0.2.53", Port: 443}
@@ -280,12 +268,9 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// TestDNSTargetIsTheDNSServiceMetricsPort: the target is the cluster DNS
-// Service's metrics port. A Service address outlives any one CoreDNS pod, which
-// is what the per-pod gate needs: a pod IP that went away would read as a
-// closed connection and wave an app through. A cluster whose DNS Service has no
-// metrics port, or no DNS Service, is a refusal rather than a proof with
-// nothing to dial.
+// TestDNSTargetIsTheDNSServiceMetricsPort: a Service address outlives any CoreDNS
+// pod, whose departure would read as a closed connection. No metrics port, or no
+// DNS Service, is a refusal rather than a proof with nothing to dial.
 func TestDNSTargetIsTheDNSServiceMetricsPort(t *testing.T) {
 	svc := func(name, ip string, ports ...int32) corev1.Service {
 		s := corev1.Service{
@@ -320,9 +305,8 @@ func TestDNSTargetIsTheDNSServiceMetricsPort(t *testing.T) {
 	}
 }
 
-// TestProbePodsSettle: every probe pod dials with --settle, so a pod whose
-// policy the CNI has not programmed yet is not read as a cluster that ignores
-// policy, and the pod's own lifetime outlasts the settle period.
+// TestProbePodsSettle: every probe pod dials with --settle, so a policy the CNI
+// has not programmed yet is not read as a cluster that ignores it.
 func TestProbePodsSettle(t *testing.T) {
 	o := Options{Namespace: "s5n", Release: "s5n", Image: "s5n:test", Target: Target{Host: "10.96.0.10", Port: 9153}, Settle: 20 * time.Second}
 	cmd := strings.Join(probePod(o, "probe", nil, o.Target, "closed").Spec.Containers[0].Command, " ")
@@ -333,8 +317,8 @@ func TestProbePodsSettle(t *testing.T) {
 	}
 }
 
-// TestParseTargetReadsWhatStringWrites: the grant records the gate as a string
-// and the proof reads it back, so the two must be the same address.
+// TestParseTargetReadsWhatStringWrites: the grant's string and the proof's
+// address must round-trip.
 func TestParseTargetReadsWhatStringWrites(t *testing.T) {
 	want := Target{Host: "10.96.0.10", Port: 9153}
 	got, err := ParseTarget(want.String())

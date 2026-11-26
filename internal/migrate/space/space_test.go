@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestSizeIsTheDuplicateCountOfATree: the walk counts what a copy would write,
-// one stat per entry, and a skipped directory takes its whole subtree with it.
+// TestSizeIsTheDuplicateCountOfATree: a skipped directory takes its subtree with
+// it.
 func TestSizeIsTheDuplicateCountOfATree(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel string, n int) {
@@ -38,8 +38,8 @@ func TestSizeIsTheDuplicateCountOfATree(t *testing.T) {
 	if want := int64(100 + 500 + 700 + 9000 + 9000 + 3); all != want {
 		t.Errorf("the whole tree is %d bytes, want %d (a symlink is its link, not its target)", all, want)
 	}
-	// The skipped directories are the ones a full Plex snapshot leaves out, and
-	// they are named the way the archive walks the tree: relative, slash form.
+	// Skipped directories are named the way the archive walks: relative, slash
+	// form.
 	kept, err := Size(dir, []string{"Cache", "Logs/"})
 	if err != nil {
 		t.Fatalf("size the tree without its caches: %v", err)
@@ -50,16 +50,15 @@ func TestSizeIsTheDuplicateCountOfATree(t *testing.T) {
 }
 
 // TestSizeOfAMissingTreeIsAnError: a path the run cannot read is a refusal, not
-// zero bytes that fit anywhere.
+// zero bytes.
 func TestSizeOfAMissingTreeIsAnError(t *testing.T) {
 	if _, err := Size(filepath.Join(t.TempDir(), "nope"), nil); err == nil {
 		t.Fatal("sizing a directory that is not there was answered")
 	}
 }
 
-// TestFreeAsksTheFilesystemThePathWillBeOn: the config directory an install
-// creates does not exist when the question is asked, so the answer is its
-// parent's filesystem, and a real one answers with real numbers.
+// TestFreeAsksTheFilesystemThePathWillBeOn: a directory the install has not made
+// yet is answered by its parent's filesystem.
 func TestFreeAsksTheFilesystemThePathWillBeOn(t *testing.T) {
 	dir := t.TempDir()
 	free, err := Free(dir)
@@ -78,8 +77,8 @@ func TestFreeAsksTheFilesystemThePathWillBeOn(t *testing.T) {
 	}
 }
 
-// TestSameKnowsOneFilesystemFromTwo: a snapshot and the seedbox's copy on one
-// machine are counted twice only when they really are one filesystem.
+// TestSameKnowsOneFilesystemFromTwo: two paths count twice only on one
+// filesystem.
 func TestSameKnowsOneFilesystemFromTwo(t *testing.T) {
 	dir := t.TempDir()
 	same, err := Same(dir, filepath.Join(dir, "not", "there", "yet"))
@@ -94,8 +93,7 @@ func TestSameKnowsOneFilesystemFromTwo(t *testing.T) {
 	}
 }
 
-// TestMarginIsATenthAndNeverLessThanAFloor: a tree of nothing still needs room
-// beside it, and a large one needs a tenth of itself.
+// TestMarginIsATenthAndNeverLessThanAFloor: even an empty tree needs the floor.
 func TestMarginIsATenthAndNeverLessThanAFloor(t *testing.T) {
 	if got := Margin(0); got != marginFloor {
 		t.Errorf("the margin of an empty tree is %d, want the floor %d", got, marginFloor)
@@ -106,9 +104,8 @@ func TestMarginIsATenthAndNeverLessThanAFloor(t *testing.T) {
 	}
 }
 
-// TestChooseNeedsRoomForEveryCopy: a full Plex tree is carried only when every
-// filesystem it lands on has room for it, and a host that is both ends of the
-// migration carries it twice on one filesystem.
+// TestChooseNeedsRoomForEveryCopy: a host that is both ends carries it twice on
+// one filesystem.
 func TestChooseNeedsRoomForEveryCopy(t *testing.T) {
 	const gib = int64(1) << 30
 	size := 20 * gib
@@ -127,8 +124,7 @@ func TestChooseNeedsRoomForEveryCopy(t *testing.T) {
 		}
 	})
 	t.Run("short at the config path", func(t *testing.T) {
-		// The snapshot's own filesystem has room; the target's has room for the
-		// tree but not for the margin, and that is short.
+		// The target has room for the tree but not the margin.
 		v := Choose(size, []Place{
 			{Path: "/var/lib/s5n/migrate", Free: need},
 			{Path: "/var/lib/seedbox/config", Free: size},
@@ -138,8 +134,7 @@ func TestChooseNeedsRoomForEveryCopy(t *testing.T) {
 		}
 	})
 	t.Run("same host counted twice", func(t *testing.T) {
-		// One filesystem holding both the snapshot and the copy beside it needs
-		// room for two, and one tree's worth is not enough.
+		// Room for one copy of two is short.
 		both := []Place{{Path: "/var/lib/s5n/migrate", Free: need, Copies: 2}}
 		if v := Choose(size, both); v.Fits() {
 			t.Errorf("one filesystem with room for one copy of two = %+v, want it short", v)
@@ -151,8 +146,7 @@ func TestChooseNeedsRoomForEveryCopy(t *testing.T) {
 	})
 }
 
-// TestHumanSaysSizesTheWayBoxDoes: the numbers in a line are the ones a person
-// compares against df.
+// TestHumanSaysSizesTheWayBoxDoes: the numbers a person compares against df.
 func TestHumanSaysSizesTheWayBoxDoes(t *testing.T) {
 	for _, c := range []struct {
 		n    int64
@@ -170,9 +164,8 @@ func TestHumanSaysSizesTheWayBoxDoes(t *testing.T) {
 	}
 }
 
-// goneEntry is one entry whose file has gone by the time the walk asks what it
-// is: a running app rewriting its settings through a temporary file and a
-// rename, which is what a read of a live source sees.
+// goneEntry is an entry whose file has gone by the time the walk asks, as a live
+// source's temporary file does.
 type goneEntry struct{ name string }
 
 func (e goneEntry) Name() string               { return e.name }
@@ -180,10 +173,8 @@ func (e goneEntry) IsDir() bool                { return false }
 func (e goneEntry) Type() fs.FileMode          { return 0 }
 func (e goneEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrNotExist }
 
-// TestTallyCountsAFileThatWentAwayAsNothing: the source a migration is read off is
-// still running, and a name a directory listing held can be gone by the time the
-// walk stats it. Counting nothing is the answer; failing the run for a file that
-// is not there to copy would stop a migration for a temporary file.
+// TestTallyCountsAFileThatWentAwayAsNothing: a name listed but gone when stat'd
+// counts nothing, or a temporary file would stop a migration.
 func TestTallyCountsAFileThatWentAwayAsNothing(t *testing.T) {
 	dir := t.TempDir()
 	c := &counter{dir: dir}
@@ -193,15 +184,14 @@ func TestTallyCountsAFileThatWentAwayAsNothing(t *testing.T) {
 	if c.files != 0 || c.bytes != 0 {
 		t.Errorf("the walk counted %d files and %d bytes for a file that is not there", c.files, c.bytes)
 	}
-	// The tree itself is still a refusal: a path that is not there is not an
-	// empty tree.
+	// The tree itself is still a refusal.
 	if _, _, err := Tally(filepath.Join(dir, "gone"), nil); err == nil {
 		t.Error("a tree that is not there was counted as nothing")
 	}
 }
 
-// TestTallyCountsADirectoryThatWentAwayAsNothing: the same, one level up: a
-// directory the walk listed and cannot enter is nothing to count, not a failure.
+// TestTallyCountsADirectoryThatWentAwayAsNothing: one level up, likewise
+// nothing.
 func TestTallyCountsADirectoryThatWentAwayAsNothing(t *testing.T) {
 	dir := t.TempDir()
 	c := &counter{dir: dir}
