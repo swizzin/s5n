@@ -791,9 +791,15 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// The answers that outlive no file: the catalog's transient questions, and
 	// the password box just made for an app that keeps its own accounts.
 	extra := map[string]any{}
+	if contains(apps, "jellyfin") {
+		// The key is dropped from every diff, not only the run that makes one:
+		// the first run passes the password as a value and every later run does
+		// not, so without this a re-run would see the Secret's password as a
+		// value disappearing and rewrite the release.
+		req.TransientKeys = append(req.TransientKeys, "secrets.jellyfinUserPassword")
+	}
 	if res.JellyfinPassword != "" {
 		extra["secrets.jellyfinUserPassword"] = res.JellyfinPassword
-		req.TransientKeys = append(req.TransientKeys, "secrets.jellyfinUserPassword")
 	}
 	if len(transient) > 0 || len(extra) > 0 {
 		asked := d.transientAsker(transient, opts)

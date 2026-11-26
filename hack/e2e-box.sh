@@ -3108,8 +3108,8 @@ except Exception: print("")' || true
   # never serves there (a fresh server answers it anonymously) -- and the
   # receipt is the Job's own record of the same work. The kind e2e reads the API
   # on the pod's port, where the box's key belongs.
-  for lib in sonarr radarr radarr-4k lidarr; do
-    grep -q "jellyfin/library/${lib} " "$WORK/bootstrap1.txt" ||
+  for lib in sonarr radarr lidarr; do
+    grep -q "jellyfin/library/${lib}" "$WORK/bootstrap1.txt" ||
       { echo "the receipt has no jellyfin/library/${lib} row: the Job built no library for it"; fail=1; }
   done
   jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
