@@ -16,9 +16,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// settingsFixture is a settings.json shaped like the one Seerr writes from its
-// Settings interface (server/lib/settings/index.ts at v3.5.1), with Seerr's own
-// two-space indentation.
+// settingsFixture is shaped like what Seerr writes (settings/index.ts at
+// v3.5.1), in its two-space indentation.
 const settingsFixture = `{
   "clientId": "synthetic-client-id",
   "main": {
@@ -78,11 +77,9 @@ const settingsFixture = `{
 }
 `
 
-// dbFixture is the two root-folder columns, shaped after the TypeORM entities
-// (server/entity/OverrideRule.ts:14-19,36 and MediaRequest.ts:548,554 at
-// v3.5.1: the column keeps its property name, the table is the class name
-// snake_cased). A rule may name one Arr or both, and a request names the one it
-// was sent to.
+// dbFixture is the two root-folder columns after the TypeORM entities
+// (OverrideRule.ts:14-19, MediaRequest.ts:548,554 at v3.5.1); a rule may name one
+// Arr or both, a request the one it went to.
 const dbFixture = `
 CREATE TABLE override_rule (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -225,19 +222,16 @@ func TestRewritesDirectoriesAndConnections(t *testing.T) {
 		t.Errorf("a connection still names the source:\n%s", got)
 	}
 
-	// The override rule moved; the request history did not, and was not
-	// reported as a gap.
+	// The rule moved; history did not, and was not a gap.
 	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/data/media/Movies" {
 		t.Errorf("override_rule.rootFolder = %q", got)
 	}
-	// The history path a rule covers is rewritten like any other; the one no
-	// rule covers is the case the next test proves does not block.
+	// A covered history path is rewritten; the uncovered one is the next test.
 	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/data/media/Old Requests" {
 		t.Errorf("media_request.rootFolder = %q", got)
 	}
 
-	// A second pass has nothing left to do. No address is unclassified: the
-	// connections now name the box, and in.Resolve knows its own endpoints.
+	// A second pass has nothing to do: the connections name the box's endpoints.
 	rep2, err := rewriter{}.Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -250,8 +244,8 @@ func TestRewritesDirectoriesAndConnections(t *testing.T) {
 	}
 }
 
-// TestHistoryPathNeitherBlocksNorRewrites: a completed request records where it
-// went and is never read again, so a path no rule covers there is not a gap.
+// TestHistoryPathNeitherBlocksNorRewrites: a completed request is never read
+// again, so an uncovered path there is not a gap.
 func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
@@ -272,7 +266,7 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/mnt/other/Requests" {
 		t.Errorf("media_request.rootFolder = %q, want untouched", got)
 	}
-	// One count line, in the list the operator reads, rather than one per row.
+	// One count line rather than one per row.
 	var counted []rewrite.Left
 	for _, l := range rep.Left {
 		if strings.Contains(l.What, "past request") {
@@ -282,8 +276,7 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	if len(counted) != 1 {
 		t.Fatalf("Left = %+v, want one count line for the requests left", rep.Left)
 	}
-	// The screen gets the clause and the report the sentence: the row is one
-	// state and one reason, and the explanation is where there is room.
+	// The screen gets the clause, the report the sentence.
 	if counted[0].What != "1 past request" || counted[0].Why != "history: seerr never reads it again" {
 		t.Errorf("the count line = %+v, want \"1 past request\" and its one reason", counted[0])
 	}
@@ -308,9 +301,8 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	}
 }
 
-// TestMissingBaseURLIsAdded: Seerr's baseUrl is optional, and an Arr the chart
-// serves under /sonarr is unreachable without it. The key is added in the
-// file's own indentation, and the file stays valid JSON.
+// TestMissingBaseURLIsAdded: an Arr served under /sonarr is unreachable without
+// baseUrl; it is added in the file's indentation and the file stays valid JSON.
 func TestMissingBaseURLIsAdded(t *testing.T) {
 	ctx := context.Background()
 	settings := strings.Replace(settingsFixture, "      \"baseUrl\": \"\",\n", "", 1)
@@ -375,8 +367,7 @@ func TestUncoveredSettingsPathBlocks(t *testing.T) {
 	if len(rep.Uncovered) != 1 || !strings.Contains(rep.Uncovered[0].Key, "activeDirectory") {
 		t.Fatalf("Uncovered = %v", rep.Uncovered)
 	}
-	// The folder is the Arr's, so the gap names the Arr: the plan asks for a
-	// rule in radarr's paths, not in Seerr's.
+	// The gap names the Arr: the rule belongs in radarr's paths, not Seerr's.
 	if got := rep.Uncovered[0].App; got != "radarr" {
 		t.Errorf("Uncovered[0].App = %q, want radarr: an Arr root folder moves by the Arr's table", got)
 	}
@@ -406,8 +397,7 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 }
 
-// TestServiceNameConnection: the Sonarr entry stores the Service's DNS form,
-// and the plan's host rule settles it.
+// TestServiceNameConnection: the host rule settles a Service's DNS form.
 func TestServiceNameConnection(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
@@ -420,9 +410,8 @@ func TestServiceNameConnection(t *testing.T) {
 	}
 }
 
-// TestOverrideRuleNamesBothArrsAndTheyAgree: one rootFolder column is shared by
-// both Arrs a rule names (server/entity/OverrideRule.ts:14-19,36 at v3.5.1), so
-// it is written when both Arrs make the same path of it.
+// TestOverrideRuleNamesBothArrsAndTheyAgree: the one column shared by both Arrs
+// is written when both make the same path of it (OverrideRule.ts:14-19).
 func TestOverrideRuleNamesBothArrsAndTheyAgree(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
@@ -446,16 +435,13 @@ func TestOverrideRuleNamesBothArrsAndTheyAgree(t *testing.T) {
 	}
 }
 
-// TestOverrideRuleBothArrsDisagreeIsLeft: the two Arrs put their libraries in
-// different places, so one column cannot be right for both. The rule stays
-// exactly as it is and the report says what each Arr makes of it: that is a
-// decision the operator sees, not a refusal.
+// TestOverrideRuleBothArrsDisagreeIsLeft: one column cannot be right for two
+// libraries, so the rule stays and the report says what each Arr makes of it.
 func TestOverrideRuleBothArrsDisagreeIsLeft(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
 	exec(t, in.Dir, `UPDATE override_rule SET radarrServiceId = 0, sonarrServiceId = 1, rootFolder = '/srv/media/Shared'`)
-	// Sonarr's library is somewhere else than Radarr's, and both tables still
-	// cover the paths Seerr stores for them.
+	// Sonarr's library is elsewhere, and both tables still cover the paths.
 	in.Plan.Apps["sonarr"] = plan.App{
 		Kind: plan.Kubernetes, Source: "sonarr", Config: "/srv/apps/sonarr",
 		Ports: []int{8989},
@@ -486,8 +472,8 @@ func TestOverrideRuleBothArrsDisagreeIsLeft(t *testing.T) {
 	}
 }
 
-// TestOverrideRuleWithNoArrIsCalledOut: a rule that names no Arr cannot be
-// placed in anyone's filesystem, so it is left and called out.
+// TestOverrideRuleWithNoArrIsCalledOut: a rule naming no Arr cannot be placed, so
+// it is left and called out.
 func TestOverrideRuleWithNoArrIsCalledOut(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
@@ -505,15 +491,13 @@ func TestOverrideRuleWithNoArrIsCalledOut(t *testing.T) {
 	}
 }
 
-// TestMediaRequestMovesByTheArrItWasSentTo: a request records the Arr it went
-// to (MediaRequest.ts:548: type and serverId), and its root folder is that Arr's
-// path.
+// TestMediaRequestMovesByTheArrItWasSentTo: type and serverId name the Arr whose
+// path the folder is (MediaRequest.ts:548).
 func TestMediaRequestMovesByTheArrItWasSentTo(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, settingsFixture)
 	exec(t, in.Dir, `INSERT INTO media_request (id, type, serverId, rootFolder) VALUES (2, 'tv', 1, '/srv/media/TV')`)
-	// Seerr's own table knows nothing about the library: only the Arrs' rules
-	// can move these.
+	// Seerr's own table knows nothing about the library; the Arrs' rules move these.
 	in.Plan.Apps["seerr"] = plan.App{Kind: plan.Kubernetes, Source: "seerr", Config: "/srv/apps/seerr"}
 
 	if _, err := (rewriter{}).Check(ctx, in); err != nil {
@@ -566,8 +550,7 @@ func readColumn(t *testing.T, dir, table, column string) string {
 	return out
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()
