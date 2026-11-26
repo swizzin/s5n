@@ -1,10 +1,5 @@
 package work
 
-// work_test.go proves the one place a migrate run's private directories come
-// from: beside the snapshot, 0700, removed when the run ends -- and never in the
-// system's temporary directory, which is what a run on a host whose /tmp is a
-// tmpfs would find by failing.
-
 import (
 	"os"
 	"path/filepath"
@@ -12,8 +7,6 @@ import (
 	"testing"
 )
 
-// TestNewIsBesideTheSnapshotAndGoneAfter: the directory the run works in is under
-// the snapshot's own directory, and the function New hands back removes it.
 func TestNewIsBesideTheSnapshotAndGoneAfter(t *testing.T) {
 	dir := t.TempDir()
 	got, done, err := New(dir)
@@ -39,8 +32,6 @@ func TestNewIsBesideTheSnapshotAndGoneAfter(t *testing.T) {
 	}
 }
 
-// TestNewTheSystemTemporaryDirectoryIsNeverUsed: a read-only $TMPDIR does not
-// stop a run, because nothing this package makes is under it.
 func TestNewTheSystemTemporaryDirectoryIsNeverUsed(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a directory it cannot write, so the read-only $TMPDIR would prove nothing")
@@ -61,9 +52,6 @@ func TestNewTheSystemTemporaryDirectoryIsNeverUsed(t *testing.T) {
 	}
 }
 
-// TestNewMakesTheSnapshotsDirectory: box's own snapshot directory is made when it
-// is not there, because the first run is the one that creates it, and is never
-// widened when it is.
 func TestNewMakesTheSnapshotsDirectory(t *testing.T) {
 	under := filepath.Join(t.TempDir(), "migrate")
 	got, done, err := New(under)
@@ -83,8 +71,6 @@ func TestNewMakesTheSnapshotsDirectory(t *testing.T) {
 	}
 }
 
-// TestNewRefusesWhatIsNotADirectory: a path a run would write into is a directory
-// or it is a refusal, named.
 func TestNewRefusesWhatIsNotADirectory(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "snapshot.tar.gz")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

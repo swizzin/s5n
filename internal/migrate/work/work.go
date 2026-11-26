@@ -1,13 +1,6 @@
-// Package work is where a migrate run keeps the files it has to extract, check
-// and rewrite: a private directory beside the snapshot, never in the system's
-// temporary directory.
-//
-// $TMPDIR is not a disk. On a Fedora or an Arch host it is a tmpfs, which is RAM:
-// a snapshot's state can be gigabytes (a real source's autobrr config was 8.5
-// GiB, and a Plex tree is tens of gigabytes), and asking the kernel for that much
-// memory either fails the run or takes the host down. The snapshot's own
-// directory is a disk by construction -- the snapshot is already on it -- so the
-// work goes beside it and is removed when the run ends.
+// Package work holds a migrate run's private working copies: beside the
+// snapshot, never in $TMPDIR, which is a tmpfs on some hosts and a source's
+// state can be gigabytes.
 package work
 
 import (
@@ -17,12 +10,8 @@ import (
 	"os"
 )
 
-// New makes one: a 0700 directory under under, which is the snapshot file's own
-// directory, and the function that removes it and everything in it.
-//
-// under is created 0700 when it is not there: box's own snapshot directory
-// (/var/lib/s5n/migrate) does not exist on a host that has never taken one, and
-// the first run is the one that makes it.
+// New makes a 0700 directory under under, the snapshot file's own directory,
+// which it creates 0700 when it is not there, and the function that removes it.
 func New(under string) (string, func(), error) {
 	none := func() {}
 	if under == "" {
