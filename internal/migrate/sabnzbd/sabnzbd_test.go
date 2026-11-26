@@ -12,9 +12,8 @@ import (
 	"github.com/swizzin/s5n/internal/sabconf"
 )
 
-// sourcePlan is what a read of a Kubernetes source writes: its downloads and
-// scripts lived under /downloads and /library, and box's tree is /data and
-// /config. Every path in it is invented.
+// sourcePlan: downloads and scripts under /downloads and /library, box's tree
+// /data and /config. Every path is invented.
 const sourcePlan = `version: 2
 apps:
   sabnzbd:
@@ -30,9 +29,8 @@ apps:
         to: /config/backup
 `
 
-// sourceINI is the shape SABnzbd 5 writes: [misc] with its own login and the
-// two paths on the source's download tree, one nested section per category and
-// per server, and a server password already obfuscated.
+// sourceINI is the shape SABnzbd 5 writes, with its own login and an already
+// obfuscated server password.
 const sourceINI = `__version__ = 19
 __encoding__ = utf-8
 [misc]
@@ -95,10 +93,8 @@ func read(t *testing.T, dir string) *sabconf.File {
 	return f
 }
 
-// TestRewritesThePathsAndSwitchesTheLoginOff is the whole job: the two download
-// paths, each category's directory, the script and backup folders, and the
-// source's own web login. The API key and the obfuscated server password are
-// the app's own credentials and stay exactly as they are.
+// TestRewritesThePathsAndSwitchesTheLoginOff is the whole job: the API key and
+// the obfuscated server password are the app's own and stay as they are.
 func TestRewritesThePathsAndSwitchesTheLoginOff(t *testing.T) {
 	in := input(t, sourcePlan)
 	rep, err := (rewriter{}).Check(context.Background(), in)
@@ -152,7 +148,7 @@ func TestRewritesThePathsAndSwitchesTheLoginOff(t *testing.T) {
 }
 
 // TestAPathNoRuleCoversBlocks: a path the plan does not settle is a gap, not a
-// guess. Nothing is written.
+// guess, and nothing is written.
 func TestAPathNoRuleCoversBlocks(t *testing.T) {
 	ini := strings.Replace(sourceINI, "/downloads/complete\n", "/srv/elsewhere/complete\n", 1)
 	in := input(t, sourcePlan)
@@ -175,7 +171,7 @@ func TestAPathNoRuleCoversBlocks(t *testing.T) {
 }
 
 // TestTheFileIsOnlyTouchedWhereItMust: a second run is a no-op, and every line
-// this package does not own is the byte it was.
+// this package does not own is unchanged.
 func TestTheFileIsOnlyTouchedWhereItMust(t *testing.T) {
 	in := input(t, sourcePlan)
 	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {

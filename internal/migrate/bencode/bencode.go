@@ -1,14 +1,9 @@
-// Package bencode is the codec for the files qBittorrent stores as bencode:
-// one resume file per torrent, and the torrent's own metadata file beside it.
-//
-// box rewrites the paths a resume file holds and must change nothing else in
-// it. libtorrent reads the file back into the torrent's live state, and a key
-// lost there is a torrent that rechecks from the beginning. The promise is
-// kept in the one form a test can hold it to: a decoded value keeps what the
-// file said — strings as bytes, dictionary keys in file order — and encoding
-// it again reproduces the input byte for byte. Nothing here assumes text: a path is
-// bytes, and a name that is not valid UTF-8 has to survive the round trip
-// unchanged.
+// Package bencode is the codec for qBittorrent's bencode files: one resume file
+// per torrent and its metadata. box rewrites the paths a resume file holds and
+// must change nothing else -- libtorrent reads it back into live state, and a
+// lost key is a torrent that rechecks from the start -- so a decoded value keeps
+// the file's bytes and order and re-encodes byte for byte. Nothing here assumes
+// text: a path is bytes, and invalid UTF-8 must survive the round trip.
 package bencode
 
 import (
@@ -40,8 +35,7 @@ type Value struct {
 	Dict  []Field // Dict, in the order the file had them
 }
 
-// Field is one dictionary entry. The key is bytes for the same reason a value
-// is: libtorrent's dictionaries are not all text.
+// Field is one dictionary entry; the key is bytes for the same reason.
 type Field struct {
 	Key   []byte
 	Value Value
@@ -60,9 +54,8 @@ func (v *Value) Lookup(key string) *Value {
 	return nil
 }
 
-// maxDepth bounds nesting. A resume file nests a handful of levels deep (dict,
-// info dict, file list, file dict, path list), so the cap only ever fires on a
-// file that is not one.
+// maxDepth bounds nesting: a resume file is a handful of levels deep, so the cap
+// only fires on a file that is not one.
 const maxDepth = 64
 
 // Error is a byte sequence this codec refuses, at the byte it refused.
@@ -75,17 +68,10 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("bencode: at byte %d: %s", e.Offset, e.Msg)
 }
 
-// Decode reads exactly one value. Trailing bytes are an error rather than an
-// ignored tail: a file with something after its dictionary is not a file
-// libtorrent wrote, and guessing which half to keep is not this package's job.
-//
-// It refuses non-canonical encodings — an integer with a leading zero or a
-// plus sign, a length prefix with a leading zero, dictionary keys out of order
-// or repeated — because encoding what was decoded has to give the same bytes
-// back, and a non-canonical input cannot. libtorrent never writes one (its
-// dictionaries are sorted maps) and reports one it reads as a soft error
-// (bdecode_node::has_soft_error), so a file that trips this is not one
-// libtorrent wrote.
+// Decode reads exactly one value; trailing bytes are an error, not an ignored
+// tail. It refuses non-canonical encodings (leading zeros, keys out of order or
+// repeated) because re-encoding must give the same bytes back: libtorrent writes
+// none and reports one it reads as a soft error (bdecode_node::has_soft_error).
 func Decode(data []byte) (Value, error) {
 	d := decoder{data: data}
 	v, err := d.value(0)
@@ -190,9 +176,8 @@ func (d *decoder) string() (Value, error) {
 func (d *decoder) list(depth int) (Value, error) {
 	start := d.pos
 	d.pos++ // 'l'
-	// Allocated even when empty so a round trip compares equal: a nil slice and
-	// an empty one encode the same, and a decoded value must not differ from the
-	// one that was encoded.
+	// Allocated even when empty so a round trip compares equal: nil and empty
+	// encode the same.
 	out := make([]Value, 0, 4)
 	for {
 		if d.pos >= len(d.data) {
@@ -255,9 +240,8 @@ func allDigits(b []byte) bool {
 	return true
 }
 
-// Encode writes a value. A dictionary whose keys are not strictly increasing is
-// an error rather than something encoded: libtorrent never writes one, and this
-// package writes nothing libtorrent would not have.
+// Encode writes a value; dictionary keys out of order are an error, since
+// libtorrent never writes one.
 func Encode(v Value) ([]byte, error) {
 	var b bytes.Buffer
 	if err := encode(&b, v, 0); err != nil {

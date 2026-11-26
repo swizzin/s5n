@@ -1,17 +1,8 @@
-// Package sabnzbd rewrites the paths SABnzbd stored before box's release takes
-// its config over, and switches its own web login off.
-//
-// SABnzbd keeps all of it in sabnzbd.ini, one ConfigObj file: the two download
-// directories, a directory per category, the script and backup folders, the
-// news servers and the web settings. The chart seals the two download
-// directories before the first start (internal/sabconf), so what this package
-// is for is everything else that would point into the source's tree.
-//
-// Server credentials are never touched. SABnzbd stores a server password
+// Package sabnzbd rewrites the paths SABnzbd stored and switches its own web
+// login off. Server credentials are never touched: a server password is stored
 // obfuscated ("!!!encoded!!!" + hexlify, sabnzbd/config.py:1224-1240), so a
-// rewrite would have to re-encode a secret this package never reads; the Job
-// leaves it to the app's own file. The API key is the same: it is the key the
-// app answers to, and a migration keeps it rather than minting another.
+// rewrite would re-encode a secret this package never reads. The chart seals the
+// download directories (internal/sabconf); this covers everything else.
 package sabnzbd
 
 import (
@@ -30,9 +21,8 @@ import (
 
 func init() { rewrite.Register("sabnzbd", rewriter{}) }
 
-// configName is SABnzbd's one settings file, in the directory the image passes
-// as --config-file /config/sabnzbd.ini (apps/sabnzbd/entrypoint.sh in
-// home-operations/containers).
+// configName is SABnzbd's one settings file, in the directory the image passes as
+// --config-file (apps/sabnzbd/entrypoint.sh in home-operations/containers).
 const configName = "sabnzbd.ini"
 
 // The keys this package reads, all in [misc] (sabnzbd/cfg.py at 5.1.3).
@@ -111,18 +101,16 @@ func run(in rewrite.Input, write bool) (rewrite.Report, error) {
 	return rep, nil
 }
 
-// rewritePaths moves every path the file stores through this app's table. A
-// path no rule covers is a gap, which stops the write pass before anything
-// moves.
+// rewritePaths moves every stored path through the app's table; one no rule
+// covers is a gap, which stops the write pass.
 func rewritePaths(in rewrite.Input, f *sabconf.File, rep *rewrite.Report, note func(where, what string)) error {
 	for _, key := range []string{keyCompleteDir, keyDownloadDir, keyScriptDir, keyBackupDir} {
 		if err := rewritePath(in, f, rep, note, sectionMisc, key, sectionMisc+"/"+key); err != nil {
 			return err
 		}
 	}
-	// A category's directory is joined onto complete_dir when the job is
-	// post-processed, so it is a path in its own right. The category name is
-	// the Arrs' and never changes: only the directory behind it does.
+	// A category's directory is joined onto complete_dir when a job is
+	// post-processed, so it is a path of its own; the name never changes.
 	for _, name := range f.Children("categories") {
 		where := "categories," + name
 		if err := rewritePath(in, f, rep, note, where, "dir", where+"/dir"); err != nil {
@@ -154,8 +142,8 @@ func rewritePath(in rewrite.Input, f *sabconf.File, rep *rewrite.Report, note fu
 }
 
 // switchLoginOff clears the two settings that make SABnzbd ask for its own
-// password (sabnzbd/interface.py:358-361 at 5.1.3, check_login). It reports
-// whether it changed anything, so the report says so once.
+// password (sabnzbd/interface.py:358-361 at 5.1.3, check_login); it reports
+// whether anything changed, so the report says so once.
 func switchLoginOff(f *sabconf.File, note func(where, what string)) (bool, error) {
 	changed := false
 	for _, key := range []string{keyUsername, keyPassword} {

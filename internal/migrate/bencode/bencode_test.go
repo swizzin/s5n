@@ -11,13 +11,10 @@ import (
 	"testing"
 )
 
-// bstr renders a string the way libtorrent's writer does, so the fixtures below
-// can be written readably and still be the bytes a resume file holds.
+// bstr renders a string the way libtorrent's writer does.
 func bstr(s string) string { return strconv.Itoa(len(s)) + ":" + s }
 
-// resumeShaped is a file with the shape a resume file has: a dictionary of
-// integers, a binary hash, strings, a nested dictionary and a list. The paths
-// and the hash are invented.
+// resumeShaped has the shape a resume file does. Paths and hash are invented.
 func resumeShaped() []byte {
 	hash := strings.Repeat("a1", 10)
 	return []byte("d" +
@@ -185,9 +182,6 @@ func TestEncodeRefusesWhatLibtorrentCouldNotRead(t *testing.T) {
 	}
 }
 
-// TestRoundTripRandomValues proves the codec on shapes no fixture wrote: any
-// value it can hold, including arbitrary bytes and deep nesting, comes back
-// from its own output unchanged.
 func TestRoundTripRandomValues(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	for i := 0; i < 200; i++ {
