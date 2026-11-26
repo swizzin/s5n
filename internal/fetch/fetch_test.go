@@ -14,8 +14,7 @@ import (
 	"time"
 )
 
-// waits records the backoff a retrying fetch asked for, so a test can assert
-// it without spending it.
+// waits records the backoff without spending it.
 type waits struct{ seen []time.Duration }
 
 func (w *waits) sleep(_ context.Context, d time.Duration) error {
@@ -27,8 +26,7 @@ func fastPolicy(w *waits) Policy {
 	return Policy{Sleep: w.sleep}
 }
 
-// statusServer answers with one status per request, in order, then the last of
-// them for any further request. It counts the requests it saw.
+// statusServer answers one status per request in order, then repeats the last.
 type statusServer struct {
 	codes []int
 	body  string
@@ -250,8 +248,7 @@ func TestTransportStopsWhenTheContextIsCancelledDuringBackoff(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	// The real sleeper: the point is that a cancel during the 1s wait does
-	// not wait out the 1s, nor the remaining attempts.
+	// The real sleeper: a cancel during the 1s wait must not wait it out.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -309,8 +306,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// netOpError is a net.Error with a chosen cause, which the real network stack
-// produces for a reset or a timed-out connection.
+// netOpError is a net.Error with a chosen cause, as the network stack makes.
 type netOpError struct {
 	err     error
 	timeout bool

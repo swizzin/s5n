@@ -5,13 +5,9 @@ import (
 	"net/http"
 )
 
-// Transport is the retrying http.RoundTripper box's fetches go through. It
-// exists so a 5xx from an upstream during bootstrap is retried rather than
-// handed to the operator as a failed install; the package comment says what is
-// and is not retried.
-//
-// Only GET and HEAD are retried, and only when the body can be replayed: a
-// POST that failed may already have done its work on the far side.
+// Transport is the retrying http.RoundTripper box's fetches go through. Only
+// GET and HEAD are retried, and only with a replayable body: a POST that failed
+// may already have done its work on the far side.
 type Transport struct {
 	// Base performs one attempt. Nil means http.DefaultTransport.
 	Base http.RoundTripper
@@ -31,8 +27,8 @@ func (t Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	var resp *http.Response
 	err := t.Policy.Do(req.Context(), req.URL.String(), func() Attempt {
-		// RoundTrip must not modify the caller's request, and a retry is a
-		// new request: same URL, same method, a fresh body.
+		// RoundTrip must not modify the caller's request: a retry is a clone
+		// with a fresh body.
 		attempt := req.Clone(req.Context())
 		if req.GetBody != nil {
 			body, err := req.GetBody()
@@ -43,8 +39,7 @@ func (t Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		got, err := base.RoundTrip(attempt)
 		if err != nil {
-			// The caller's own context ending is not an upstream failure:
-			// say why the fetch stopped instead of retrying a cancelled run.
+			// The caller's own cancellation is not an upstream failure.
 			if ctxErr := req.Context().Err(); ctxErr != nil {
 				return Attempt{Err: ctxErr, Status: ctxErr.Error()}
 			}
