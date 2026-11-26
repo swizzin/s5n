@@ -1,13 +1,9 @@
 package filebrowser
 
-// Encoding the app's own tables, not a shape invented here: the columns are the
-// ones its migrations create (internal/database/sqldb at v2.1.0-stable) and a
-// user document is what its own User struct marshals.
-//
-// The fixture source kept its downloads and library under /media -- a mount of
-// its own -- and called it "Media". The plan maps that mount onto
-// /data/media, which is what apply's renames leave behind, so every reference
-// to it is a scope of the box's one source at a position under /data.
+// The columns are the app's own migrations (internal/database/sqldb at
+// v2.1.0-stable). The fixture source kept everything under /media, called
+// "Media", which the plan maps onto /data/media, so every reference is a scope of
+// the box's source at a position under /data.
 
 import (
 	"context"
@@ -81,9 +77,8 @@ apps:
         to: /data/media
 `
 
-// userJSON is one user with a source reference in every place the app stores
-// one. The id is a 64-bit number on purpose: a JSON round trip through float64
-// would rewrite its low digits.
+// userJSON has a source reference everywhere the app stores one; the 64-bit id is
+// on purpose, since a float64 round trip would rewrite its low digits.
 func userJSON(scopes, permKey, pinnedKey, linkSource, declined string) string {
 	return `{
   "id": 16141659585636484512,
@@ -138,8 +133,7 @@ func setup(t *testing.T, config string, users ...string) rewrite.Input {
 	return rewrite.Input{App: "filebrowser", Dir: dir, Plan: p}
 }
 
-// exec runs one statement against the staged database, for a fixture's own
-// rows and for reading the result back.
+// exec runs one statement against the staged database.
 func exec(t *testing.T, dir, stmt string) [][]any {
 	t.Helper()
 	ctx := context.Background()
@@ -203,7 +197,7 @@ func userDoc(t *testing.T, dir string) map[string]any {
 	return doc
 }
 
-// rawUser is one user document exactly as the database holds it.
+// rawUser is one user document as the database holds it.
 func rawUser(t *testing.T, dir string) string {
 	t.Helper()
 	rows := exec(t, dir, `SELECT user_data FROM users`)
@@ -228,9 +222,8 @@ func changesByWhere(rep rewrite.Report) map[string]int {
 	return out
 }
 
-// TestAlreadyTheBoxesSourceIsANoOp: the common source install already points the
-// app at /data, so the database needs no edit at all -- and an edit nobody needs
-// is a write a migration should not make.
+// TestAlreadyTheBoxesSourceIsANoOp: a source already on /data needs no edit, and an
+// unneeded edit is a write a migration should not make.
 func TestAlreadyTheBoxesSourceIsANoOp(t *testing.T) {
 	in := setup(t, `server:
   sources:
@@ -261,9 +254,8 @@ func TestAlreadyTheBoxesSourceIsANoOp(t *testing.T) {
 	}
 }
 
-// TestRewritesTheSourceAPathAndName: a source the app knew by another directory
-// becomes a scope of the box's one source, with its position kept, and its name
-// becomes the one the chart's source has.
+// TestRewritesTheSourceAPathAndName: another directory becomes a scope of the
+// box's source with its position kept, under the name the chart's source has.
 func TestRewritesTheSourceAPathAndName(t *testing.T) {
 	in := setup(t, `server:
   sources:
@@ -334,9 +326,8 @@ func TestRewritesTheSourceAPathAndName(t *testing.T) {
 	if link["sourceName"] != "/data" || link["target"] != "/media" {
 		t.Errorf("sidebar link = %v, want the box's source and the target under it", link)
 	}
-	// The id is untouched: a document re-encoded through float64 would have
-	// rounded it. The bytes are what is checked, because decoding into a map is
-	// what would round it.
+	// The id is untouched: checking the bytes, not a decoded map, is what proves a
+	// float64 round trip did not round it.
 	if raw := rawUser(t, in.Dir); !strings.Contains(raw, `"id":16141659585636484512`) {
 		t.Errorf("the re-encoded user document lost the 64-bit id:\n%s", raw)
 	}
@@ -351,8 +342,8 @@ func TestRewritesTheSourceAPathAndName(t *testing.T) {
 		t.Errorf("quota = %v %v", rows[0]...)
 	}
 
-	// A second pass has nothing left to do: the box's own source is a no-op and
-	// the source the config still names has no row left pointing at it.
+	// A second pass has nothing to do: the box's source is a no-op and no row
+	// points at the other.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -362,8 +353,8 @@ func TestRewritesTheSourceAPathAndName(t *testing.T) {
 	}
 }
 
-// TestAnUnmappedSourcePathBlocks: a source the app's config names and the plan
-// cannot place is a gap. Nothing is written while it stands.
+// TestAnUnmappedSourcePathBlocks: a configured source the plan cannot place is a
+// gap, and nothing is written.
 func TestAnUnmappedSourcePathBlocks(t *testing.T) {
 	in := setup(t, `server:
   sources:
@@ -385,9 +376,8 @@ func TestAnUnmappedSourcePathBlocks(t *testing.T) {
 	}
 }
 
-// TestAStalePathIsLeftAndCalledOut: a path only the database remembers is not a
-// gap -- the app's config no longer names it -- so it is left as it is and said
-// once.
+// TestAStalePathIsLeftAndCalledOut: a database-only path is not a gap, because the
+// config no longer names it; it is left and said once.
 func TestAStalePathIsLeftAndCalledOut(t *testing.T) {
 	in := setup(t, `server:
   sources:
@@ -408,11 +398,9 @@ func TestAStalePathIsLeftAndCalledOut(t *testing.T) {
 	}
 }
 
-// TestALocalAccountIsLeftAndCalledOut: the box's app signs its users in through
-// the box's login, and it resolves an identity to a stored account by name --
-// refusing one that another login method made. An account the source's own form
-// created is therefore not the one the person signs in as, and the pass says so
-// instead of renaming a row nothing in the plan says is the owner's.
+// TestALocalAccountIsLeftAndCalledOut: the app resolves an identity by name and
+// refuses a row of another login method, so a source-form account is not the one
+// the person signs in as; the pass says so rather than renaming an unknown owner.
 func TestALocalAccountIsLeftAndCalledOut(t *testing.T) {
 	local := strings.Replace(userJSON("/data", "/data", "/data", "/data", "/data"),
 		`"version": 6,`, `"loginMethod": "password",`+"\n"+`  "version": 6,`, 1)
@@ -445,9 +433,8 @@ func TestALocalAccountIsLeftAndCalledOut(t *testing.T) {
 	}
 }
 
-// TestNoConfigFileStillRewrites: a source with no config.yaml defaulted its
-// source to the working directory, so the database's own paths are the only
-// record of what it had.
+// TestNoConfigFileStillRewrites: without config.yaml the database paths are the
+// only record of what it had.
 func TestNoConfigFileStillRewrites(t *testing.T) {
 	in := setup(t, "", userJSON("/media", "/media", "/media", "/media", "/media"))
 	rep, err := rewriter{}.Check(context.Background(), in)
@@ -471,8 +458,8 @@ func TestNoConfigFileStillRewrites(t *testing.T) {
 	}
 }
 
-// TestNoDatabaseIsANote: an app whose staged config has no database has no
-// stored path to rewrite, and saying so beats a silent pass.
+// TestNoDatabaseIsANote: no database means no stored path, and a note beats a
+// silent pass.
 func TestNoDatabaseIsANote(t *testing.T) {
 	dir := t.TempDir()
 	p, err := plan.Parse([]byte(planYAML))
@@ -488,9 +475,8 @@ func TestNoDatabaseIsANote(t *testing.T) {
 	}
 }
 
-// TestConfigSourcesReadsTheList pins the scan of config.yaml: the two keys are
-// flat scalars under a list item, and the item's own `config:` block must not be
-// read as one of them.
+// TestConfigSourcesReadsTheList pins the scan: flat scalars under a list item, and
+// the item's own `config:` block not read as one.
 func TestConfigSourcesReadsTheList(t *testing.T) {
 	dir := t.TempDir()
 	name := filepath.Join(dir, configName)
@@ -527,7 +513,7 @@ auth:
 	}
 }
 
-// TestJoinScopeKeepsThePosition is the one arithmetic the rewrite rests on.
+// TestJoinScopeKeepsThePosition is the arithmetic the rewrite rests on.
 func TestJoinScopeKeepsThePosition(t *testing.T) {
 	for _, tc := range []struct{ rel, scope, want string }{
 		{"", "", ""},
@@ -544,7 +530,7 @@ func TestJoinScopeKeepsThePosition(t *testing.T) {
 	}
 }
 
-// jsonEqual compares two decoded documents without caring about key order.
+// jsonEqual compares documents without caring about key order.
 func jsonEqual(t *testing.T, a, b map[string]any) bool {
 	t.Helper()
 	left, err := json.Marshal(a)
