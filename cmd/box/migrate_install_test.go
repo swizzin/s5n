@@ -1,9 +1,6 @@
 package main
 
-// migrate_install_test.go proves the answers a host with no box is installed
-// from: the plan holds the apps, the data root and the owner, and the four a
-// plan cannot know are refused by name, together, when they were not given.
-// Nothing here touches a host: installAnswers is the whole decision.
+// migrate_install_test.go proves the four answers a fresh install needs.
 
 import (
 	"bytes"

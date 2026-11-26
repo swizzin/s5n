@@ -1,12 +1,6 @@
 package main
 
-// migrate_screen_test.go is the two reads' screens as a golden: the migration
-// report is the page a person reads in full (rule 7), so the screen keeps the
-// counts and the file's name, and cutover's refusal is one line of state and one
-// command per kind that stops what is running.
-//
-// Both are built from a saved source and an injected stop proof: no cluster, no
-// API server.
+// migrate_screen_test.go is the reads' screens as a golden, from a saved source.
 
 import (
 	"context"

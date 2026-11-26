@@ -1,15 +1,6 @@
 package main
 
-// migrate_version_test.go proves the one refusal the version column can make: a
-// release older than the version that wrote the source's config stops the run
-// before anything is shown or moved, names every app with both versions and the
-// command that runs it anyway, and --yolo is that command.
-//
-// The column is read from the plan and the chart alone (planFacts), so the tests
-// drive the installer half with the pass that decides the platform and the
-// install itself rigged to fail if they are reached: a refusal that got as far
-// as either would have staged a seedbox's configs, probed the cluster for a
-// platform, or installed one, to say no to a fact about two image references.
+// migrate_version_test.go proves a downgrade refuses before anything is staged.
 
 import (
 	"bytes"

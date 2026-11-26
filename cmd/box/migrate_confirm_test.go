@@ -1,10 +1,6 @@
 package main
 
-// migrate_confirm_test.go proves the run asks one question. A migrate apply on
-// a host with no box installs a cluster, a platform and an empty seedbox, and
-// then adopts into it: the platform plan and the migration's own summary are
-// one decision, so they are one form, shown once, and --yes answers it without
-// asking at all.
+// migrate_confirm_test.go proves a fresh install asks one question.
 
 import (
 	"bytes"

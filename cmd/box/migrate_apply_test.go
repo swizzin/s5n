@@ -1,9 +1,6 @@
 package main
 
-// migrate_apply_test.go drives the pieces `box migrate apply` builds for
-// internal/migrate/apply: the two switches it writes (the grant's instance keys
-// and the release Secret's per-app keys), the ownership record, and the plan
-// loader's refusals. The run itself is internal/migrate/apply's own tests.
+// migrate_apply_test.go drives apply's switches, ownership record and refusals.
 
 import (
 	"bytes"

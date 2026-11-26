@@ -1,9 +1,6 @@
 package main
 
-// migrate_work_test.go proves where an apply works: beside the snapshot it is
-// reading, never in the system's temporary directory, which on a Fedora or an
-// Arch host is a tmpfs -- and what it extracts out of a full Plex carry, which is
-// the state its checks read and not the library they never do.
+// migrate_work_test.go proves work happens beside the snapshot, never /tmp.
 
 import (
 	"bytes"
