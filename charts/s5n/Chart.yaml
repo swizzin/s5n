@@ -4,42 +4,25 @@ description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in o
 type: application
 version: 0.6.5
 appVersion: "0.6.5"
-# Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
-# 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
-# every user namespace to enforce the grant.
+# Distribution-agnostic: vanilla, k0s, k3s, managed. A floor, never a ceiling: 1.30 is
+# where ValidatingAdmissionPolicy is GA, and the platform layer binds one to every user
+# namespace to enforce the grant.
 kubeVersion: ">=1.30.0-0"
 home: https://github.com/swizzin/s5n
 sources:
   - https://github.com/swizzin/s5n
 keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
-# What box may do with this release (docs/box.md, "A minimum box version").
-# min-box goes up only when an interface box and the chart share changes in a
-# way an older box would get wrong; a new app, a digest bump or an optional
-# values key leaves it alone. upgrade-from is the oldest release this one can be
-# upgraded from, and `box update` steps through the releases between when it is
-# older.
+# What box may do with this release (docs/box.md, "A minimum box version"). min-box rises
+# only when an interface box and the chart share changes and an older box would get it
+# wrong; a new app, a digest bump or an optional values key leaves it alone. upgrade-from
+# is the oldest release this one upgrades from, and `box update` steps through the ones
+# between.
 #
-# 0.6.0 raises both. box renders the login itself (install/platform/authelia),
-# and this chart counts on 0.6.0's: one that checks only the session cookie, so a
-# token an app's page sends (PeerBanHelper's) no longer locks a signed-in person
-# out, and Tautulli now sits behind it (`login: portal`) with its own login off.
-# A 0.5.0 box would render the older login in front of this chart, so it keeps
-# to the 0.5.0 chart. And no 0.5.0 install is upgraded in place: no e2e upgrades
-# a real 0.5.0 box and chart, so a 0.5.0 seedbox is reinstalled.
-#
-# 0.6.3 raises neither. The chart ships no default peer port, but every box since
-# 0.4.0 records the port in the grant at init (a migrate install answers init the
-# same way), so an older box hands this chart the port it already runs. The
-# upgrade e2e installs the published 0.6.0 box and chart and updates them to this
-# one.
-#
-# 0.6.4 raises neither. The chart's one change is a NetworkPolicy edge (autobrr
-# may call qui), which box never reads.
-#
-# 0.6.5 raises neither. The chart's change is its image list (qBittorrent 5.3.1,
-# the two Zen 3 builds, the former variant name kept as an entry of its own), and
-# the wiring Job's autobrr change ships in the s5n image; an older box reads the
-# variants as data and hands the chart the same values.
+# 0.6.0 is the floor because box renders the login itself (install/platform/authelia) and
+# this chart counts on that one: a session cookie only, so a token an app's page sends no
+# longer locks a signed-in person out, with Tautulli behind it and its own login off. A
+# 0.5.0 box would render the older login in front of this chart, and no 0.5.0 install is
+# upgraded in place.
 annotations:
   box.s5n/min-box: "0.6.0"
   box.s5n/upgrade-from: "0.6.0"

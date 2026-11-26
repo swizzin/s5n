@@ -1,21 +1,15 @@
 # s5n — one release = one namespace = one seedbox.
 # Nothing in this chart may assume it is the only release in the cluster.
 
-# The palette `box` draws its own dialogs in, on the machine that runs it. The
-# chart renders nothing from this key: box reads it from the values file at
-# startup, so the theme a person picks is a file they already edit, not a flag
-# on one command. A pair name follows the terminal's background, a variant name
-# pins one, and values.schema.json lists every name internal/theme accepts.
+# The palette `box` draws its dialogs in, read from this file by box and rendered by
+# nothing: the theme a person picks is a file they already edit. values.schema.json lists
+# every name internal/theme accepts.
 theme: s5n
 
-# The account root's login admits, written by box from the grant (it is that
-# grant key, not a chart value: a user's values file naming it is refused). The
-# chart renders no login, and nothing about the edge reads this; it is here
-# because an app that keeps its own accounts names the person's first account
-# after it -- Jellyfin's first user, which its players then sign in as -- so the
-# person has one name across the box. Empty on a plain `helm install`, which is
-# also a render failure if Jellyfin is switched on: that app's first account has
-# no name without it.
+# The account root's login admits, written by box from the grant (a values file naming it
+# is refused). Nothing about the edge reads it; an app that keeps its own accounts names
+# its first account after it (Jellyfin's first user), so the person has one name across
+# the box. Empty on a plain install, which is a render failure with Jellyfin on.
 login: ""
 
 global:
@@ -24,35 +18,21 @@ global:
   pgid: 1000
   tz: Etc/UTC
 
-# The chart ships no login of its own, and the apps behind it are admin panels.
-# auth.edge is the explicit statement that a login does sit in front of this
-# release: box sets it, and a plain `helm install` must set it too, the way it
-# would configure an ingress with basic auth. There is deliberately no default;
-# a missing or false value is refused at render time rather than shipping the
-# stack open.
-#
-# auth:
-#   edge: true
+# The chart ships no login of its own, and the apps behind it are admin panels, so
+# auth.edge is the explicit statement that one sits in front of this release. box sets it
+# and a plain `helm install` must too; a missing or false value is refused at render time
+# rather than shipping the stack open.
 
 # The data contract. Every app mounts the same claim at /data:
 #   /data/downloads/<category>   qBittorrent save paths
 #   /data/media/<category>      Arr root folders
-# One filesystem, one path => hardlinks always work, no remote path mappings.
+# One filesystem, one path, so hardlinks always work.
 #
-# The chart creates no storage. Both settings name PersistentVolumeClaims that
-# already exist in the release namespace; the chart mounts them and creates
-# nothing else. A render that can see the cluster refuses a claim name no object
-# has, rather than installing pods that wait for storage that never arrives.
-# There is no host path, storage class or size here: a claim's capacity is its
-# own, and a static claim cannot be resized from values.
-#
-# box creates the claims (and the static PVs behind them) from the grant's host
-# paths, named per namespace. On a plain `helm install`, create them first:
-#
-#   kubectl create -f your-pv-and-claim.yaml
-#
-# The names below are the defaults a plain install expects to find; box passes
-# its own (`<namespace>-s5n-data`, `<namespace>-s5n-config`).
+# The chart creates no storage: both settings name claims that already exist in the
+# release namespace, and a render that can see the cluster refuses a name no object has.
+# No host path, storage class or size: a static claim cannot be resized from values. box
+# creates both from the grant's host paths (`<namespace>-s5n-data`, `-config`); a plain
+# install creates them first.
 storage:
   data:
     existingClaim: s5n-data
@@ -62,11 +42,9 @@ storage:
     # puid:pgid.
     existingClaim: s5n-config
 
-# TLS. Nothing in this chart renders from this key: `box init` resolves the
-# box's host name and picks Let's Encrypt when it has a public address, and a
-# self-signed certificate when it does not. Setting either value here forces
-# that choice for this seedbox. A plain `helm install` gets HTTPRoutes only;
-# TLS is the platform Gateway's job.
+# TLS. Nothing in this chart renders from this key: `box init` picks Let's Encrypt when the
+# box has a public address and a self-signed certificate when it does not, and setting
+# either value forces that choice. A plain install gets HTTPRoutes only.
 tls:
   issuer: ""
 
@@ -81,28 +59,22 @@ gateway:
   # Public host, e.g. box.example.com. Empty = match any host.
   host: ""
 
-# A rehearsal box: what `box migrate apply` sets on a box built from a rehearsal
-# snapshot, so a copy of a live seedbox's configs cannot run as the live one. It
-# removes the public-internet egress from the release's NetworkPolicy (DNS and
-# this release's own pods remain) and forces the policies on. box writes it in
-# the grant and nothing unlocks it; the value is box's, so no values file may
-# set it. The chart renders nothing else differently.
+# A rehearsal box: what `box migrate apply` sets on a box built from a rehearsal snapshot,
+# so a copy of a live seedbox's configs cannot run as the live one. It removes the
+# public-internet egress from the NetworkPolicy and forces the policies on. box writes it
+# in the grant; no values file may set it.
 rehearsal: false
-# The address every app's rehearsal gate dials (host:port): an in-cluster
-# address the lock denies, which box proves closed before any app starts and
-# writes into the grant with the flag above. Each app pod of a rehearsal box
-# waits in an init container until it stops answering, so no app runs before
-# its own pod's policy is in place. box's, like rehearsal; unused otherwise.
+# The address every app's rehearsal gate dials: an in-cluster address the lock denies,
+# which box proves closed before any app starts. Each app waits in an init container until
+# it stops answering. box's, like rehearsal; unused otherwise.
 rehearsalGate: ""
 
 networkPolicy:
   enabled: true
-  # Where Gateway traffic comes from. This default is for a plain `helm install`
-  # behind Envoy Gateway: the namespace its proxy fleet runs in
-  # (envoy-gateway-system in standard mode), not the Gateway's own namespace.
-  # box overrides it on every apply with the namespace of the Service that holds
-  # the Gateway's address, so a box behind another implementation admits that
-  # implementation's proxy instead. Neither file may set it (see the grant rules).
+  # Where Gateway traffic comes from. The default is for a plain install behind Envoy
+  # Gateway: the namespace its proxy fleet runs in, not the Gateway's own. box overrides it
+  # on every apply with the namespace of the Service holding the Gateway's address, so no
+  # file may set it.
   gatewayFrom:
     - namespaceSelector:
         matchLabels:
@@ -114,10 +86,9 @@ networkPolicy:
   # fallback for offline rendering (`helm template`), where lookup returns nothing.
   apiServerCIDRs: []
 
-# The wiring Job. It runs as a Helm post-install/post-upgrade hook: connects the
-# Arrs to qBittorrent, registers them in Prowlarr, proves the /data hardlink
-# contract, and records what it verified in the `<release>-wiring` ConfigMap.
-# It is a reconciler, so a second run on an unchanged release changes nothing.
+# The wiring Job: a Helm post-install/post-upgrade hook that connects the Arrs to
+# qBittorrent, registers them in Prowlarr, proves the /data hardlink contract, and records
+# what it verified in `<release>-wiring`. A reconciler, so a second run changes nothing.
 wiring:
   enabled: true
   image:
@@ -133,59 +104,44 @@ wiring:
 # Arr API keys live here, generated once and preserved across upgrades (lookup).
 secrets:
   existingSecret: ""
-  # Optional Plex server token (X-Plex-Token) from a claimed server. The wiring
-  # Job mounts it as the Secret's `plex-token` key and hands it to Tautulli, so
-  # no network range ever has to be trusted for Plex authentication. Empty or
-  # absent leaves tautulli/plex pending in the wiring receipt. The key can also
-  # be patched straight into the release Secret (upgrades preserve it); a
-  # non-empty value here wins, which is how a rotation is applied.
+  # Optional Plex server token (X-Plex-Token) from a claimed server, handed to Tautulli so no
+  # network range is trusted for Plex auth. Absent leaves tautulli/plex pending in the
+  # receipt. A key patched into the release Secret survives upgrades; a value here wins,
+  # which is how a rotation is applied.
   plexToken: ""
-  # The claim token https://plex.tv/claim issues. It expires about four minutes
-  # after issue, so it can only be supplied at install time: it is a "transient"
-  # question in catalog.yaml, which `box init` asks last and hands to the one
-  # apply without ever writing it to a file. This key is the way in for a plain
-  # `helm install`. Plex only exchanges it while its server is still unclaimed,
-  # so it does nothing on an upgraded release; empty is the normal state and
-  # leaves the server unclaimed until it is claimed by hand. A hand-patched
-  # plex-claim-token in the release Secret survives an upgrade; a non-empty
-  # value here wins over it.
+  # The claim token https://plex.tv/claim issues; it expires about four minutes after issue,
+  # so it is a "transient" question in catalog.yaml that `box init` asks last and hands to
+  # one apply. This key is the way in for a plain `helm install`. Plex only exchanges it
+  # while unclaimed, so it does nothing on an upgrade.
   plexClaimToken: ""
 
 apps:
   qbittorrent:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8080
-    # Seeded into qBittorrent.conf by an init container, together with a generated
-    # password from the release Secret. Nobody signs in with it: the WebUI skips
-    # its login for the release's addresses, so this is only the account the
-    # config names, and an existing seedbox's value keeps working.
+    # Seeded into qBittorrent.conf by an init container with a generated password. Nobody signs
+    # in with it: the WebUI skips its login for the release's addresses, so this is only the
+    # account the config names, and an existing seedbox's value keeps working.
     webuiUsername: admin
     # qBittorrent has no URL base setting; the route strips the prefix.
     rewritePath: true
     torrent:
-      # The peer port: must equal the externally reachable port so peers are
-      # told the right one, and with a NodePort Service it must also sit in the
-      # cluster's NodePort range.
+      # The peer port: peers must be told the one they can reach, and with a NodePort Service it
+      # must sit in the cluster's NodePort range.
       #
-      # The chart ships no default. A fixed number is what collides: the API
-      # server hands out its own nodePorts from the upper part of the range, so
-      # a default there (31111, which this chart used to ship) is a port any
-      # Service asking for "any free port" can win first, and then this Service
-      # is refused for the rest of the install. `box init` picks a free port in
-      # the lower band (30000-30085 for the default range, the part Kubernetes
-      # does not assign by itself) and records it in the grant; a helm install
-      # must set this key, and is refused with a message saying so.
+      # The chart ships no default, because a fixed number is what collides: the API server
+      # hands out its own nodePorts from the upper band, so a default there is a port any
+      # Service asking for "any free port" can win first and this Service is then refused.
+      # `box init` picks one in the lower band (30000-30085) and records it in the grant; a
+      # helm install must set this key, and is refused with a message saying so.
       service:
-        # NodePort on the node's own address, so the peer port shares a single-IP box
-        # with the Gateway's LoadBalancer address without any address sharing, and
-        # keeps the pod free of hostPort (forbidden under Pod Security baseline+).
-        # Local keeps real peer source IPs (bans, per-peer limits). The port must sit
-        # in the cluster's NodePort range (30000-32767 unless widened). LoadBalancer is
-        # available for boxes with a spare address.
+        # NodePort on the node's own address, so the peer port shares a single-IP box with the
+        # Gateway's address without address sharing, and the pod stays free of hostPort. Local
+        # keeps real peer source IPs (bans, per-peer limits). LoadBalancer is for a box with a
+        # spare address.
         type: NodePort
         externalTrafficPolicy: Local
         # Optional annotations for the peers Service, e.g. metallb.io/loadBalancerIPs
@@ -197,16 +153,14 @@ apps:
   sonarr:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8989
     envPrefix: SONARR
     instances:
-      # category is the directory under /data/media this instance's library
-      # lives in, and under /data/downloads what it downloads into. A migrated
-      # box sets downloadCategory to the category the source's torrents are
-      # already in (Movies, 4K/TV); the library still moves to category.
+      # category is the directory under /data/media this instance's library lives in, and under
+      # /data/downloads what it downloads into. A migrated box sets downloadCategory to where
+      # the source's torrents already are; the library still moves to category.
       - suffix: ""
         category: tv
         enabled: true
@@ -219,8 +173,7 @@ apps:
   radarr:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 7878
     envPrefix: RADARR
@@ -237,36 +190,28 @@ apps:
   prowlarr:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 9696
     envPrefix: PROWLARR
     resources: {}
     env: {}
 
-  # Plex first: Tautulli and Seerr both attach to it. A missing (or expired)
-  # claim token leaves Plex unclaimed; the wiring Job still deploys it and
-  # proves it answers, it just can't sign it into a Plex.tv account. See
-  # AGENTS.md invariant notes and PLAN.md's wiring section.
+  # Plex first: Tautulli and Seerr both attach to it. A missing or expired claim token leaves
+  # Plex unclaimed; the wiring Job still deploys it and proves it answers.
   plex:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 32400
     # Plex has no URL-base setting, same as qBittorrent; the route strips the prefix.
     rewritePath: true
-    # CIDRs that may reach Plex without a Plex.tv account token
-    # (PLEX_NO_AUTH_NETWORKS). Empty by default, and it must stay empty unless a
-    # human has checked the ranges: the public Gateway's Envoy proxy reaches Plex
-    # from its own pod IP, which sits inside the cluster pod CIDR, so listing any
-    # range that contains the pod CIDR makes every request arriving through the
-    # Gateway count as "local" — that is unauthenticated admin of the server for
-    # anyone on the internet. NetworkPolicy cannot help; it already has to admit
-    # the Gateway. Tautulli connects with a real token instead
-    # (secrets.plexToken), so nothing needs to be trusted here.
+    # CIDRs that may reach Plex without a Plex.tv token (PLEX_NO_AUTH_NETWORKS). It must stay
+    # empty unless a human has checked the ranges: the Gateway's proxy reaches Plex from the
+    # pod CIDR, so a range containing it makes every request through the Gateway "local" --
+    # unauthenticated admin of the server. NetworkPolicy cannot help. Tautulli uses a real
+    # token instead (secrets.plexToken).
     noAuthNetworks: []
     resources: {}
     env: {}
@@ -274,17 +219,13 @@ apps:
   tautulli:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8181
-    # Tautulli keeps its prefix: its own URL-root setting (http_root) is sealed
-    # to this instance's path on every start by the init container, so the app
-    # builds its absolute redirects and asset URLs under /tautulli instead of at
-    # the host's root. Stripping the prefix was the alternative, and it cannot
-    # work: Tautulli answers `/` with a redirect to HTTP_ROOT + "home" and its
-    # logout with HTTP_ROOT + "auth/logout" (plexpy/webserve.py, webstart.py at
-    # v2.18.2), which left the prefix and landed on the login's own /auth.
+    # Tautulli keeps its prefix: the init container seals its own http_root, so the app builds
+    # its redirects and asset URLs under /tautulli. Stripping the prefix cannot work: it
+    # redirects `/` to HTTP_ROOT + "home" and its logout to HTTP_ROOT + "auth/logout"
+    # (plexpy/webserve.py, webstart.py at v2.18.2), landing on the login's own /auth.
     rewritePath: false
     resources: {}
     env: {}
@@ -292,63 +233,44 @@ apps:
   seerr:
     enabled: true
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 5055
     rewritePath: true
     resources: {}
     env: {}
 
-  # Opt-in: a second media server, and the one whose clients can transcode in
-  # software only until a GPU is a platform feature. It is served at
-  # jellyfin.<domain> because its players are configured with a server address
-  # and a path prefix breaks a subset of them, and it signs its players in
-  # itself, so that host bypasses the box's login (catalog.yaml). Its own
-  # first-run wizard is an API, so the chart closes it inside the pod: an init
-  # container runs the app against the same config, bound to localhost, names
-  # the person's account and completes the wizard before the app container
-  # starts (templates/workloads.yaml). While it runs the pod is not Ready, so
-  # there is no moment the Gateway can reach a server with the wizard open. A
-  # second init container follows it on every start and owns network.xml's bind
-  # address, so the loopback that wizard leaves behind can never outlive a pod:
-  # the app binds every interface, and this chart's NetworkPolicy is the gate.
+  # Opt-in: a second media server, software-transcoding until a GPU is a platform feature.
+  # Served at jellyfin.<domain>, because a path prefix breaks a subset of its players, and it
+  # signs its players in itself, so that host bypasses the box's login (catalog.yaml). Its
+  # first-run wizard is closed inside the pod by an init container (templates/workloads.yaml)
+  # and a second one owns network.xml's bind address on every start.
   jellyfin:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8096
-    # No prefix is used: the catalog serves this app at its own host name, so
-    # the route matches its whole site root and nothing is stripped.
+    # No prefix is used: the catalog serves this app at its own host name, so the route
+    # matches its whole site root.
     rewritePath: true
-    # The peers whose X-Forwarded-For Jellyfin honours. It accepts a subnet as
-    # well as a single address (Jellyfin.Server/Extensions/
-    # ApiServiceCollectionExtensions.cs, AddProxyAddresses), and with the list
-    # empty it ignores the header entirely (ConfigureForwardHeaders, same file):
-    # every request the Gateway proxies would then look like it came from the
-    # Gateway pod, which is a local address. That is not a cosmetic difference:
-    # the endpoints marked LocalAccessOrRequiresElevation answer a local caller
-    # without a credential, so an internet client behind the Gateway would get
-    # an anonymous restart, and every per-user remote-access rule would see
-    # "local". box reads the cluster's own pod network from the Nodes' podCIDRs
-    # at init and records it in the grant, and the chart writes it into
-    # network.xml in an init container before the app starts -- the value is
-    # read once, at startup, so a later write would not take. A plain
-    # `helm install` sets the pod subnet its CNI hands out.
+    # The peers whose X-Forwarded-For Jellyfin honours (it takes a subnet;
+    # ApiServiceCollectionExtensions.cs, AddProxyAddresses). Empty, it ignores the header
+    # (ConfigureForwardHeaders), so every proxied request looks local -- and the endpoints
+    # marked LocalAccessOrRequiresElevation answer a local caller without a credential, an
+    # anonymous restart for anyone behind the Gateway. box reads the Nodes' podCIDRs at init
+    # and records them in the grant; the chart writes them before the app starts, because the
+    # value is read once, at startup.
     knownProxies: []
     resources: {}
     env: {}
 
-  # qui is opt-in: it is a second UI for the same qBittorrent, useful once its
-  # cross-seed and automation are wanted. It serves itself under /qui (its own
-  # baseUrl), so the route keeps the prefix instead of stripping it.
+  # qui is opt-in: a second UI for the same qBittorrent, for its cross-seed and automation.
+  # It serves itself under /qui (its own baseUrl), so the route keeps the prefix.
   qui:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 7476
     # qui's baseUrl is set by the chart from the instance name; nothing is
@@ -357,15 +279,13 @@ apps:
     resources: {}
     env: {}
 
-  # autobrr is opt-in: it watches IRC announces and feeds for releases and hands
-  # them to the download client, and it does nothing until the operator
-  # configures indexers by hand. It serves itself under /autobrr (its own
-  # baseUrl), so the route keeps the prefix instead of stripping it.
+  # autobrr is opt-in: it watches IRC announces and hands releases to the download client,
+  # and does nothing until indexers are configured by hand. It serves itself under /autobrr
+  # (its own baseUrl).
   autobrr:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 7474
     # autobrr's baseUrl is set by the chart from the instance name; nothing is
@@ -374,24 +294,20 @@ apps:
     resources: {}
     env: {}
 
-  # Lidarr is opt-in: a box that installs the defaults has no music library,
-  # and its root folder wants a quality profile and a metadata profile the
-  # operator tunes. It is the third Arr, so its pod spec, URL base, API key and
-  # Prowlarr registration are the same shape as Sonarr's and Radarr's.
+  # Lidarr is opt-in: a box that installs the defaults has no music library, and its root
+  # folder wants quality and metadata profiles the operator tunes. The third Arr, so its pod
+  # spec, URL base, API key and Prowlarr registration are Sonarr's and Radarr's shape.
   lidarr:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8686
     envPrefix: LIDARR
     instances:
-      # Music lives in /data/media/music and downloads into qBittorrent's
-      # `lidarr` category, which is the category Lidarr's own qBittorrent client
-      # defaults to (Download/Clients/QBittorrent/QBittorrentSettings.cs at
-      # v3.1.2.4902: MusicCategory = "lidarr"). A second instance is the Arr
-      # pattern like any other, though music rarely needs one.
+      # Music lives in /data/media/music and downloads into qBittorrent's `lidarr` category,
+      # which is the one Lidarr's own client defaults to (QBittorrentSettings.cs at
+      # v3.1.2.4902: MusicCategory = "lidarr").
       - suffix: ""
         category: music
         downloadCategory: lidarr
@@ -399,28 +315,22 @@ apps:
     resources: {}
     env: {}
 
-  # Bazarr is opt-in, and it is the one app whose instances pair with the Arrs'
-  # rather than adding a library of their own. Upstream Bazarr reads exactly one
-  # Sonarr and one Radarr (bazarr/app/config.py at v1.6.2: the sonarr.* and
-  # radarr.* sections), so a box with an HD and a 4K pair runs one Bazarr per
-  # pair, and `bazarr-4k` reads `sonarr-4k` and `radarr-4k`. An instance is a
-  # suffix and nothing else: it has no category, because it owns no library --
-  # it subtitles the ones the Arrs own. A pair with only one side enabled wires
-  # that side and switches the other off; with neither, the render stops and
-  # says which instance.
+  # Bazarr is opt-in, and the one app whose instances pair with the Arrs' rather than adding
+  # a library: upstream reads exactly one Sonarr and one Radarr (bazarr/app/config.py at
+  # v1.6.2), so `bazarr-4k` reads `sonarr-4k` and `radarr-4k`. An instance is a suffix and
+  # nothing else -- it owns no category. A pair with one side enabled wires that side; with
+  # neither, the render stops and names the instance.
   #
-  # It sits behind the box's one login with its own auth off: Bazarr's
-  # auth.type defaults to none (config.py:186), and the chart never sets one.
+  # It sits behind the box's one login with its own auth off: Bazarr's auth.type defaults to
+  # none (config.py:186) and the chart never sets one.
   bazarr:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 6767
-    # The app is told its prefix on every start (general.base_url, sealed by
-    # the init container): it registers both blueprints under it, so it builds
-    # its own asset URLs and the route keeps the path.
+    # The app is told its prefix on every start (general.base_url, sealed by the init
+    # container), so it builds its own asset URLs and the route keeps the path.
     rewritePath: false
     instances:
       - suffix: ""
@@ -430,83 +340,69 @@ apps:
     resources: {}
     env: {}
 
-  # SABnzbd is opt-in: it is the second download client, for usenet, and a box
-  # that installed the defaults has a torrent client already. It is served under
-  # /sabnzbd by its own url_base, which the init container seals before the app
-  # starts, so the route keeps the prefix instead of stripping it. Its own login
-  # is off: the edge is the only login, like every other app here.
+  # SABnzbd is opt-in: the second download client, for usenet. It is served under /sabnzbd by
+  # its own url_base, which the init container seals, and its own login is off: the edge is
+  # the only login.
   #
   # It is the one app whose download paths are on the config claim by default
-  # (Downloads/incomplete and Downloads/complete, relative to /config), so the
-  # init container also seals complete_dir and download_dir onto the data claim.
-  # That is what makes an Arr's import a hardlink instead of a copy.
+  # (Downloads/incomplete and Downloads/complete, relative to /config), so the init container
+  # also seals complete_dir and download_dir onto the data claim: that is what makes an Arr's
+  # import a hardlink.
   sabnzbd:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 8080
-    # SABnzbd's url_base is set by the init container from the instance name;
-    # nothing is stripped, because the app builds its own URLs under it.
+    # SABnzbd's url_base comes from the instance name via the init container; nothing is
+    # stripped, because the app builds its own URLs under it.
     rewritePath: false
     resources: {}
     env: {}
 
-  # PeerBanHelper is opt-in: once it is connected it starts banning peers on the
-  # rules it ships, and it wants a host name of its own (its WebUI calls
-  # /api/... from the site root). It is the one app whose memory limit is
-  # load-bearing: the JVM sizes its heap at 85% of a container limit and at 85%
-  # of the node's memory without one, so the limit below is what keeps an idle
-  # ~150MB process from reserving the box.
+  # PeerBanHelper is opt-in: once connected it bans peers on the rules it ships, and it wants
+  # a host name of its own (its WebUI calls /api/... from the site root). Its memory limit is
+  # load-bearing: the JVM sizes its heap at 85% of it, and at 85% of the node's without one.
   pbh:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 9898
     resources:
-      # The request is what scheduling reserves (the app settles around
-      # 115-165MB); the limit is the JVM's heap ceiling, 85% of 512Mi = 421MB,
-      # which it idles far below.
+      # The request is what scheduling reserves (the app settles around 115-165MB); the limit is
+      # the JVM's heap ceiling, 85% of 512Mi, which it idles far below.
       requests:
         memory: 192Mi
       limits:
         memory: 512Mi
     env: {}
 
-  # FileBrowser Quantum is opt-in: it is a second way to the same files the
-  # Arrs and the download client already manage, and a box with none of them
-  # has nothing for it to show. Its whole configuration is a ConfigMap this
-  # chart owns (config.yaml), so it carries no init container and no
-  # credentials: it signs in through the login's own provider, and the edge's
-  # login stands in front of it too.
+  # FileBrowser Quantum is opt-in: a second way to the same files, and a box with no Arrs has
+  # nothing for it to show. Its whole configuration is the ConfigMap this chart owns, so no
+  # init container and no credentials; it signs in through the login's provider, behind the
+  # edge's login too.
   filebrowser:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     # The image's own default port is 80, which a non-root process cannot bind;
     # the config file takes this value, so the pod and the app agree.
     port: 8080
-    # The app builds its asset and API URLs from http.baseURL, which the
-    # ConfigMap sets to this instance's path, so the route keeps the prefix
-    # instead of stripping it.
+    # The app builds its asset and API URLs from http.baseURL, which the ConfigMap sets to this
+    # instance's path, so the route keeps the prefix.
     rewritePath: false
     resources: {}
     env: {}
 
-  # Maintainerr is opt-in for the obvious reason: it deletes media, torrents and
-  # leftover folders on rules the operator writes, and a box that installed the
-  # defaults did not ask for that. It has no login of its own at all, so the edge
-  # is the only thing between it and the network (auth.edge).
+  # Maintainerr is opt-in: it deletes media, torrents and leftover folders on rules the
+  # operator writes. It has no login of its own, so the edge is the only thing between it and
+  # the network.
   maintainerr:
     enabled: false
     image:
-      # Blessed variant from variants.yaml. The repository comes only from
-      # there; a tag or digest pin here is held within that repository.
+      # A blessed variant from variants.yaml; a tag or digest pin stays in its repository.
       variant: default
     port: 6246
     # BASE_PATH is set by the chart from the instance name; nothing is stripped.

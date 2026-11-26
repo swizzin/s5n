@@ -1,16 +1,14 @@
-# Every catalog app enabled at once, with both Arr pairs. The chart's peers
-# inside the release are derived from the catalog's `calls` list, so this is the
-# render that carries every edge at once: a missing one is invisible in a
-# defaults-only render, where half the callers are off.
+# Every catalog app enabled at once, with both Arr pairs: the one render that carries
+# every NetworkPolicy edge at once, so a missing one is visible here.
 auth:
   edge: true
-  # box writes this from the grant for an app that speaks OIDC; a plain helm
-  # install sets it to the proxy Service's ClusterIP.
+  # box writes this from the grant for an OIDC app; a plain helm install sets it to the
+  # proxy Service's ClusterIP.
   oidc:
     gatewayIP: 10.96.31.116
 
-# The account root's login admits, which box writes from the grant: Jellyfin's
-# first user is named after it.
+# The account root's login admits, written by box from the grant: Jellyfin's first
+# user is named after it.
 login: example
 
 storage:
@@ -22,8 +20,8 @@ storage:
 apps:
   qbittorrent:
     torrent:
-      # No default in the chart: a helm install chooses its peer port, and the
-      # band box picks from is the one Kubernetes does not assign by itself.
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes does
+      # not assign by itself.
       port: 30080
   sonarr:
     instances:
@@ -52,14 +50,14 @@ apps:
     enabled: true
   filebrowser:
     enabled: true
-  # The second media server: its own host name, its own accounts, and the
-  # /cache emptyDir its transcodes need on a read-only root filesystem.
+  # The second media server: its own host name and accounts, and the /cache emptyDir
+  # its transcodes need on a read-only root filesystem.
   jellyfin:
     enabled: true
     knownProxies:
       - 10.244.0.0/16
 
-# The box's own name. Plex and Seerr are served at plex.<domain> and
-# seerr.<domain> (the catalog says so), so a render needs the domain.
+# Plex and Seerr are served at plex.<domain> and seerr.<domain>, so a render needs
+# the domain.
 gateway:
   host: box.example.com

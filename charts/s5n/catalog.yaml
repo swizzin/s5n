@@ -1,86 +1,33 @@
-# The catalog: every app a seedbox can run, and the setup questions `box init`
-# asks for it.
+# The catalog: every app a seedbox can run, and the setup questions `box init` asks for
+# it. The chart owns the file (values cannot add to or override it) and box reads it from
+# the chart it installs, so a new app needs one entry here, one under `apps:` in
+# values.yaml, its values.schema.json definition and, if it connects to others, a wiring
+# step -- never a box release.
 #
-# The chart owns this file, the same way it owns variants.yaml: it ships inside
-# the chart archive and `--set` or a values file cannot add to it, change it or
-# override it. box reads it from the chart release it is installing, so adding
-# an app does not need a box release -- one entry here, one entry under `apps:`
-# in values.yaml, its values.schema.json definition, and, if the app needs
-# connecting to the others, a wiring step in the s5n image.
+# Every app under `apps:` has exactly one entry here, and internal/catalog refuses a
+# manifest that disagrees, or a question whose key is not a chart value or is a grant key:
+# the grant (domain, paths, uid, app list) is box's own question.
 #
-# Every app under `apps:` in values.yaml has exactly one entry below and vice
-# versa. internal/catalog refuses a manifest that disagrees, and refuses a
-# question whose key is not a chart value or is a grant key: the grant (domain,
-# paths, uid, the app list) is box's own question, never a manifest's. So a
-# question may only name a key the *user* owns.
+# A question is `key` (the values path it writes), `prompt`, `help` (one optional line),
+# `kind` (`string`, `secret`, `bool`, or `transient` -- a secret that outlives no file:
+# asked after apply's confirm and never written anywhere, the Plex claim token being the
+# case, since it expires minutes after issue), `default` (matching the kind) and `optional`
+# (an empty answer is allowed).
 #
-# A question is:
-#   key       the chart values path the answer is written to
-#   prompt    the line `box init` shows
-#   help      one optional line under the prompt (why, or where to get it)
-#   kind      one of:
-#               string     free text
-#               secret     masked input; written to the values file, never echoed
-#                          and never printed in an apply diff
-#               bool       yes or no
-#               transient  a secret that outlives no file: asked last, after
-#                          apply's confirm, handed to that one apply and never
-#                          written to values or the grant. The Plex claim token
-#                          is the case: it expires about four minutes after
-#                          https://plex.tv/claim issues it, so it can only be
-#                          supplied at install time. A transient key still has
-#                          to exist in values.schema.json, because it is passed
-#                          to the chart.
-#   default   a starting answer; must match the kind
-#   optional  an empty answer is allowed (the app copes without it)
+# `exposure: host` serves the app at <app>.<domain> with its own listener and certificate,
+# for a UI that writes absolute asset paths; the default, `path`, puts it under /<name> on
+# the box's own name. `login: own` is an app that signs its users in itself, whose host
+# then bypasses the box's login.
 #
-# An entry also says how the chart serves the app:
+# `calls` is what the app dials inside the release, and the one list the NetworkPolicy is
+# derived from: an app's ingress admits exactly the enabled apps naming it, so a call this
+# list forgets is refused at the callee. "sonarr" means every instance of that Arr, and
+# no app calls itself.
 #
-#   exposure: path   under /<name> on the box's own host name (the default)
-#   exposure: host   at <app>.<domain>, with its own listener and certificate,
-#                    for a UI that writes absolute asset paths and so cannot
-#                    live under a prefix. The chart owns this decision; it is
-#                    not a values key, because a user choosing it wrongly is a
-#                    broken UI, not tuning. `box init` resolves each such name
-#                    and checks it answers where the domain does before it
-#                    writes anything for it (docs/box.md, "Certificates").
-#
-# And how a person gets into it:
-#
-#   login: portal    behind the box's one login (the default): the edge asks
-#                    for a session before it serves the app.
-#   login: own       the app signs its users in itself, on whatever name or
-#                    path it is served at, so that host or prefix bypasses the
-#                    login. It is for an app whose clients can't answer a
-#                    login page: a media server serving its own players by
-#                    its own token, or a tool those players and API clients
-#                    reach.
-#
-# An entry also says what the app dials *inside* the release:
-#
-#   calls: [qbittorrent, prowlarr]   the in-release apps it connects to
-#
-# It is the one list for that, and the chart derives the release's NetworkPolicy
-# from it: each app's ingress admits exactly the enabled apps that name it, so an
-# app that is switched off admits nothing and is admitted by nothing. Naming a
-# peer is what opens the peer's ingress; the release's own egress is open either
-# way, so a call this list forgets is refused at the callee and nowhere else.
-# "sonarr"/"radarr" mean every instance of that Arr. An app that calls nothing
-# inside the release omits the key. A name here must be a catalog app, and no
-# app calls itself.
-#
-# An entry also says what an image upgrade can rewrite beyond going back, so a
-# failed update can put it back:
-#
-#   snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
-#
-# A list of globs in path.Match syntax, relative to the app's config directory
-# (the /config mount), each matched against a whole relative path: `*` does not
-# cross a `/`, and there is no `**`. Name the database a migration moves
-# forward, the settings file a new version rewrites, and the SQLite companions
-# (`-wal`, `-shm`) that belong with the database; never a cache, a log, media
-# covers or Plex's metadata bundles. An app without the key has nothing to put
-# back, which is right for one whose upgrades only add.
+# `snapshot` is the globs an image upgrade can rewrite, so a failed update can put them
+# back: path.Match syntax, relative to the app's config directory, and no `**`. Name the
+# database a migration moves forward, the settings file a new version rewrites and the
+# SQLite companions; never a cache, a log or Plex's metadata bundles.
 #
 # A new *kind* of question is the only catalog change that needs a box release
 # (docs/box.md, "The catalog and box").
@@ -89,20 +36,16 @@ apps:
     description: the download client; it seeds what the Arrs grab
     instances: false
     default: true
-    # The download client is called, and calls nothing inside the release: its
-    # trackers and RSS feeds are outside it.
+    # The download client is called, and calls nothing inside the release: its trackers and
+    # RSS feeds are outside it.
     #
-    # No questions. Nobody logs in to qBittorrent any more: the WebUI skips its
-    # login for the release's addresses and the edge's login is the one a person
-    # uses, so the account the init container seals needs no answer from them.
-    # The values key stays, with its "admin" default, because the init container
-    # still writes a username into qBittorrent.conf (a chart value an existing
-    # seedbox may already carry; removing it would break its schema).
+    # No questions: the WebUI skips its login for the release's addresses, so the account the
+    # init container seals needs no answer -- but the key stays, with its "admin" default,
+    # because the init container still writes a username and an existing seedbox may carry one.
     #
-    # Its own settings upgrade renames and drops keys and records the version it
-    # reached (src/app/upgrade.cpp at release-5.3.0: MIGRATION_VERSION and
-    # handleSettingKeys), so a qBittorrent.conf is not readable by an older
-    # version once a newer one has opened it.
+    # Its own settings upgrade renames and drops keys and records the version it reached
+    # (src/app/upgrade.cpp at release-5.3.0: MIGRATION_VERSION and handleSettingKeys), so an
+    # older qBittorrent cannot read a file a newer one has opened.
     snapshot: [qBittorrent/qBittorrent.conf]
     questions: []
 
@@ -110,18 +53,17 @@ apps:
     description: TV, from the tracker to the library
     instances: true
     default: true
-    # Its download client, and Prowlarr: Prowlarr syncs each indexer into the
-    # Arr with the indexer's base URL rewritten to <prowlarr>/<indexer id>/, so
-    # a search is an HTTP call from the Arr's pod to Prowlarr
+    # Its download client, and Prowlarr: Prowlarr syncs each indexer into the Arr with its base
+    # URL rewritten to <prowlarr>/<indexer id>/, so a search is an HTTP call from the Arr's pod
     # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs).
     calls: [qbittorrent, sabnzbd, prowlarr]
-    # An Arr's database and the config.xml that points at it, with the SQLite
-    # companions a migration writes beside them (PathExtensions.cs at
-    # v5.0.0.2907: the DB constant, GetDatabase and GetConfigPath). The log
-    # database and MediaCover are not state a migration moves.
+    # An Arr's database and the config.xml that points at it, with the SQLite companions a
+    # migration writes beside them (PathExtensions.cs at v5.0.0.2907: the DB constant,
+    # GetDatabase and GetConfigPath). The log database and MediaCover are not state a migration
+    # moves.
     snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
-    # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not
-    # a values question: `box install sonarr --instance 4k` writes it.
+    # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not a values
+    # question: `box install sonarr --instance 4k` writes it.
     questions: []
 
   radarr:
@@ -131,8 +73,7 @@ apps:
     # The same two as Sonarr, for the same reason
     # (src/NzbDrone.Core/Applications/Radarr/Radarr.cs).
     calls: [qbittorrent, sabnzbd, prowlarr]
-    # The same as Sonarr (PathExtensions.cs at v7.0.0.10815: radarr.db,
-    # config.xml).
+    # The same as Sonarr (PathExtensions.cs at v7.0.0.10815: radarr.db, config.xml).
     snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]
     questions: []
 
@@ -140,14 +81,11 @@ apps:
     description: one indexer list, kept in sync with the Arrs
     instances: false
     default: true
-    # It pushes indexers to the Arrs and tests each application it registers, so
-    # the Arrs are what it dials. It has download clients of its own upstream,
-    # but this chart configures none and nothing grabs through it -- which is
-    # why it names neither qBittorrent nor SABnzbd: an app it does not register
-    # is one it never dials, and naming a disabled app would open nothing.
+    # It pushes indexers to the Arrs and tests each application it registers, so the Arrs are
+    # what it dials. It configures no download client of its own, which is why it names neither
+    # qBittorrent nor SABnzbd: an app it does not register is one it never dials.
     calls: [sonarr, radarr, lidarr]
-    # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db,
-    # config.xml).
+    # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db, config.xml).
     snapshot: [prowlarr.db, prowlarr.db-wal, prowlarr.db-shm, config.xml]
     questions: []
 
@@ -155,20 +93,18 @@ apps:
     description: the media server your players talk to
     instances: false
     default: true
-    # Plex calls nothing in the release: players are outside it, and Tautulli,
-    # Seerr and Maintainerr are the ones that dial it.
-    # Plex's web app writes absolute asset paths (/web/...), so it is served at
-    # plex.<domain> rather than under /plex.
+    # Plex calls nothing in the release: players are outside it, and Tautulli, Seerr and
+    # Maintainerr are the ones that dial it. Its web app writes absolute asset paths (/web/...),
+    # so it is served at plex.<domain> rather than under /plex.
     exposure: host
-    # Plex serves its own clients and issues its own token, so a login in front
-    # of it would be a password no player asks for.
+    # Plex serves its own clients and issues its own token, so a login in front of it would be a
+    # password no player asks for.
     login: own
-    # The library database and the blobs beside it, and Preferences.xml, which
-    # is what a Plex upgrade rewrites in a new shape. Its Metadata tree holds
-    # covers, artwork and bundles: Plex rebuilds it, and copying it would mean
-    # copying the whole library directory on every update. The image keeps
-    # Plex's home under Library/Application Support in the claim (its
-    # PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR), not at the top of /config.
+    # The library database and the blobs beside it, and Preferences.xml, which a Plex upgrade
+    # rewrites in a new shape. Its Metadata tree is covers and bundles Plex rebuilds, and
+    # copying it would mean copying the whole library on every update. The image keeps Plex's
+    # home under Library/Application Support (its PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR),
+    # not at the top of /config.
     snapshot:
       - Library/Application Support/Plex Media Server/Preferences.xml
       - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db
@@ -190,16 +126,13 @@ apps:
     default: true
     # Its PMS link and its history both come from Plex's own API.
     calls: [plex]
-    # It is behind the box's one login: `login: portal` is written out because
-    # the name is in box's frozen legacy set, and an absent value there means
-    # "own" for a chart that predates the key. Its own web login is switched off
-    # by the app's init container (internal/ttlconf: a non-empty http_password
-    # is what makes Tautulli ask for a password), and it is served under
-    # /tautulli rather than at a name of its own.
+    # `login: portal` is written out because the name is in box's frozen legacy set, where an
+    # absent value means "own" for a chart that predates the key. Its own web login is switched
+    # off by the init container (internal/ttlconf), and it is served under /tautulli rather
+    # than at a name of its own.
     login: portal
-    # Watch history and the config.ini that points at the database
-    # (plexpy/database.py at v2.18.2: FILENAME = "tautulli.db";
-    # plexpy/config.py: FILENAME = "config.ini").
+    # Watch history and the config.ini that points at the database (plexpy/database.py at
+    # v2.18.2: FILENAME = "tautulli.db"; plexpy/config.py: FILENAME = "config.ini").
     snapshot: [config.ini, tautulli.db, tautulli.db-wal, tautulli.db-shm]
     questions: []
 
@@ -207,57 +140,44 @@ apps:
     description: a request page for the people you share with
     instances: false
     default: true
-    # Plex for the library and for signing people in, and both Arrs to add what
-    # was requested. The Arrs are the callee side of this: their ingress is what
-    # an unlisted caller never reaches, however open the release's egress is.
+    # Plex for the library and for signing people in, and both Arrs to add what was requested:
+    # an unlisted caller never reaches the Arrs' ingress, however open the egress is.
     calls: [plex, sonarr, radarr]
-    # Same as Plex: Seerr's bundle loads its assets from the site root, so the
-    # path route broke the page and it is served at seerr.<domain>.
+    # As Plex: Seerr's bundle loads its assets from the site root, so the path route broke the
+    # page and it is served at seerr.<domain>.
     exposure: host
     # It signs people in with Plex, so a login here would be a second password.
     login: own
-    # Its settings and its database, which Seerr keeps in a subdirectory of the
-    # config directory (server/lib/settings/index.ts and server/datasource.ts at
-    # v3.5.1: settings.json, db/db.sqlite3).
+    # Its settings and its database, in a subdirectory of the config directory
+    # (server/lib/settings/index.ts and server/datasource.ts at v3.5.1: settings.json,
+    # db/db.sqlite3).
     snapshot: [settings.json, db/db.sqlite3, db/db.sqlite3-wal, db/db.sqlite3-shm]
     questions: []
 
-  # Opt-in: a second media server. Its players are configured with a server
-  # address, so it is served at jellyfin.<domain> rather than under a prefix,
-  # and it signs its players in itself (see below). It transcodes in software
-  # until a GPU is handed to the pod by a device plugin, which is a platform
-  # feature PLAN.md holds back for Plex and Jellyfin together.
+  # Opt-in: a second media server, served at jellyfin.<domain> because its players are
+  # configured with a server address, and signing its players in itself. It transcodes in
+  # software until a GPU is a platform feature.
   jellyfin:
     description: a media server your players talk to, with its own accounts
     instances: false
     default: false
-    # Its players are outside the release and nothing in it calls Jellyfin, so
-    # it names no peer and nothing needs to admit it: its ingress is the
-    # Gateway's and the wiring Job's alone. (Bazarr and Seerr grow an edge here
-    # the day they are wired to it; neither is today -- Seerr stays on Plex and
-    # Bazarr reads the Arrs.)
-    # Jellyfin's web client writes absolute asset paths, so it is served at
-    # jellyfin.<domain> rather than under /jellyfin.
+    # Its players are outside the release and nothing in it calls Jellyfin, so it names no peer:
+    # its ingress is the Gateway's and the wiring Job's alone. Its web client writes absolute
+    # asset paths, so it is served at jellyfin.<domain> rather than under /jellyfin.
     exposure: host
-    # Every Jellyfin client authenticates against the server with its own
-    # token; a login page in front of it is a form no player can answer. Its
-    # host therefore bypasses the edge login, exactly as Plex's does, and the
-    # NetworkPolicy is what keeps the rest of the cluster out. The first-run
-    # window that would otherwise come with that is closed inside the pod, by
-    # an init container that completes the wizard before the server the
-    # Gateway reaches starts (templates/workloads.yaml).
+    # Every Jellyfin client authenticates against the server with its own token, so a login
+    # page in front of it is a form no player can answer; its host bypasses the edge login as
+    # Plex's does, and the NetworkPolicy keeps the cluster out. The first-run window that comes
+    # with that is closed inside the pod (templates/workloads.yaml).
     login: own
-    # The four configuration files a version rewrites, and the library
-    # database with the SQLite companions a running server writes beside it.
-    # data/metadata and data/trickplay are artwork and previews the server
-    # rebuilds from the media, and data/library is its own view of it: copying
-    # any of them would mean copying a library directory on every update.
-    # Jellyfin keeps those trees under JELLYFIN_DATA_DIR=/config and its
-    # settings under JELLYFIN_CONFIG_DIR=/config/config (the image's own
-    # environment).
+    # The four configuration files a version rewrites, and the library database with its SQLite
+    # companions. data/metadata and data/trickplay are artwork the server rebuilds, and
+    # data/library is its own view of the media. Its settings live under
+    # JELLYFIN_CONFIG_DIR=/config/config and its trees under JELLYFIN_DATA_DIR=/config, both
+    # the image's own environment.
     #
-    # An account, an API key and a library's paths are rows in jellyfin.db, not
-    # in the XML, which is why a migrate rewriter has to edit the database.
+    # An account, an API key and a library's paths are rows in jellyfin.db, which is why a
+    # migrate rewriter has to edit the database.
     snapshot:
       - config/*.xml
       - data/jellyfin.db
@@ -265,179 +185,147 @@ apps:
       - data/jellyfin.db-shm
     questions: []
 
-  # Opt-in: a second UI for the same qBittorrent, not something a box should
-  # have because it installed the defaults.
+  # Opt-in: a second UI for the same qBittorrent, not something a box should have because it
+  # installed the defaults.
   qui:
     description: cross-seed and automation for qBittorrent, in one page
     instances: false
     default: false
-    # qui speaks OIDC, so it signs in through the login's own provider rather
-    # than sitting behind a login it cannot see. The chart is what gives it the
-    # issuer and the client secret; this flag is what makes box register the
-    # client, so a second app that speaks OIDC is one entry here (and the
-    # chart's `oidc:` block beside it) rather than a box release.
+    # qui speaks OIDC, so it signs in through the login's own provider rather than behind a
+    # login it cannot see. The chart gives it the issuer and the secret; this flag is what makes
+    # box register the client, so a second OIDC app is one entry here and the chart's `oidc:`
+    # block beside it, never a box release.
     oidc: true
-    # One qBittorrent, its own instance row, and the Arrs: qui's Arr integration
-    # is what resolves a title to the ID it searches for, and the request is made
-    # from qui's own pod. A migrated qui already holds rows the migration has
-    # pointed at the release, so a missing edge here is a connection refused by
-    # the callee with nothing in the app to say so. "sonarr"/"radarr" mean every
-    # instance of that Arr, so an HD/4K pair is the same two names.
+    # One qBittorrent, its own instance row, and the Arrs: qui's Arr integration resolves a
+    # title to the ID it searches for, from qui's own pod. A missing edge here is a connection
+    # the callee refuses with nothing in the app to say so.
     calls: [qbittorrent, sonarr, radarr]
-    # Its database and config.toml, which is where its session secret lives: the
-    # credentials it stores in the database are encrypted with that value, so
-    # the pair has to go back together (internal/config/config.go at v1.35.0:
-    # resolveConfigPath and the qui.db path).
+    # Its database and config.toml, which is where its session secret lives: the credentials it
+    # stores in the database are encrypted with that value, so the pair goes back together
+    # (internal/config/config.go at v1.35.0: resolveConfigPath and the qui.db path).
     snapshot: [config.toml, qui.db, qui.db-wal, qui.db-shm]
     questions: []
 
-  # Opt-in: it watches IRC announces and feeds and hands what it finds to the
-  # download client, and it is idle until the operator configures indexers by
-  # hand -- not something a box should have because it installed the defaults.
+  # Opt-in: it watches IRC announces and feeds and hands what it finds to the download
+  # client, and it is idle until the operator configures indexers by hand.
   autobrr:
     description: grabs a release when it is announced, before the feed catches up
     instances: false
     default: false
-    # autobrr speaks OIDC too, and only OIDC: at v1.90.0 it has no way to run
-    # without a login of its own (no authDisabled, no trusted-header mode), so a
-    # box that served it behind the edge alone would ask for two passwords. The
-    # flag is the whole change: the chart wires the issuer, the secret and the
-    # trust anchor from it, and box registers the client.
+    # autobrr speaks OIDC too, and only OIDC: at v1.90.0 it has no way to run without a login of
+    # its own, so behind the edge alone it would ask for two passwords. The flag is the whole
+    # change: the chart wires the issuer, the secret and the trust anchor from it, and box
+    # registers the client.
     oidc: true
-    # Its download client, and every Arr its actions push to: autobrr's own
-    # client test is an Arr API call, made from autobrr's pod. qui too: its
-    # qBittorrent proxy is a download client autobrr can be pointed at, and a
-    # missing edge here is a policy that drops that connection without a word.
+    # Its download client, and every Arr its actions push to, made from autobrr's pod. qui too:
+    # its qBittorrent proxy is a download client autobrr can be pointed at, and a missing edge
+    # is a policy that drops the connection without a word.
     calls: [qbittorrent, qui, sonarr, radarr, lidarr]
-    # Its SQLite database and config.toml (internal/database/database.go at
-    # v1.90.0: dataSourceName(cfg.ConfigPath, "autobrr.db");
-    # internal/config/config.go: config.toml).
+    # Its SQLite database and config.toml (internal/database/database.go at v1.90.0:
+    # dataSourceName(cfg.ConfigPath, "autobrr.db"); internal/config/config.go: config.toml).
     snapshot: [config.toml, autobrr.db, autobrr.db-wal, autobrr.db-shm]
     questions: []
 
-  # Opt-in: an anti-leech firewall for the download client. It reads
-  # qBittorrent's own peer list and tells it to drop the peers its rules
-  # reject, so it starts acting the moment it is connected -- not something a
-  # box should have because it installed the defaults.
+  # Opt-in: an anti-leech firewall for the download client. It reads qBittorrent's peer list
+  # and tells it to drop the peers its rules reject, so it acts the moment it is connected.
   pbh:
     description: drops the peers that cheat, leech or misbehave
     instances: false
     default: false
-    # Its whole job: read the downloader's peers and drop what its rules ban.
-    # Its GeoIP database and rule subscriptions come from the public internet,
-    # which needs no entry here.
+    # Its whole job: read the downloader's peers and drop what its rules ban. Its GeoIP
+    # database and rule subscriptions come from the public internet, which needs no entry here.
     calls: [qbittorrent]
-    # Its WebUI fetches /api/... from the site root and builds asset URLs
-    # relative to it, so it needs a host name of its own: pbh.<domain>.
+    # Its WebUI fetches /api/... from the site root and builds asset URLs relative to it, so it
+    # needs a host name of its own: pbh.<domain>.
     exposure: host
-    # config.yml, which PBH's own migrations rewrite in place, and the database
-    # in its persist directory (DatabaseDriverConfig.java and
-    # SQLiteDatabaseDriver.java at v9.5.4, with the default sqlite type in
-    # config.yml). The GeoIP database and the rule subscriptions are downloads
-    # PBH fetches again, and the ban history is a log.
+    # config.yml, which PBH's own migrations rewrite in place, and the database in its persist
+    # directory (DatabaseDriverConfig.java and SQLiteDatabaseDriver.java at v9.5.4). The GeoIP
+    # database and subscriptions are downloads, and the ban history is a log.
     snapshot: [config.yml, persist/peerbanhelper-nt.db, persist/peerbanhelper-nt.db-wal, persist/peerbanhelper-nt.db-shm]
     questions: []
 
-  # Opt-in: music, from the tracker to the library. It is an Arr like the other
-  # two, but a box that installs the defaults has no music library, and its
-  # root folder needs a quality profile and a metadata profile the operator
-  # tunes, so it is asked for rather than assumed.
+  # Opt-in: music, and an Arr like the other two, but a box that installs the defaults has no
+  # music library and its root folder needs profiles the operator tunes.
   lidarr:
     description: music, from the tracker to the library
     instances: true
     default: false
-    # The same two as Sonarr and Radarr: its own qBittorrent download client,
-    # and Prowlarr, which syncs each indexer into it over Lidarr's /api/v1
-    # (prowlarr@v3.1.0.5799: src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs,
-    # LidarrSettings.cs and ILidarrV1Proxy).
+    # The same two as Sonarr and Radarr: its qBittorrent client, and Prowlarr, which syncs each
+    # indexer over Lidarr's /api/v1 (prowlarr@v3.1.0.5799:
+    # src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs, LidarrSettings.cs and ILidarrV1Proxy).
     calls: [qbittorrent, sabnzbd, prowlarr]
-    # Its database, the config.xml that points at it, and the SQLite
-    # companions (PathExtensions.cs at v3.1.2.4902: APP_CONFIG_FILE and DB).
+    # Its database, the config.xml that points at it, and the SQLite companions
+    # (PathExtensions.cs at v3.1.2.4902: APP_CONFIG_FILE and DB).
     snapshot: [lidarr.db, lidarr.db-wal, lidarr.db-shm, config.xml]
     questions: []
 
-  # Opt-in: subtitles for the libraries the Arrs already have. Upstream Bazarr
-  # reads exactly one Sonarr and one Radarr per instance, so it is one pod per
-  # Arr pair -- a box with a 4K pair runs bazarr-4k beside bazarr -- and it is
-  # asked for rather than assumed because a box with no libraries has nothing
-  # for it to subtitle.
+  # Opt-in: subtitles for the libraries the Arrs already have. Upstream Bazarr reads one
+  # Sonarr and one Radarr per instance, so it is one pod per Arr pair and a box with a 4K pair
+  # runs bazarr-4k beside bazarr.
   bazarr:
     description: subtitles for the TV and films the Arrs already have
     instances: true
     default: false
-    # The two it reads. Nothing inside the release calls it: the Arrs do not
-    # know it exists.
+    # The two it reads. Nothing inside the release calls it: the Arrs do not know it exists.
     calls: [sonarr, radarr]
-    # Its settings file and its SQLite database, with the WAL companions a
-    # running instance writes beside it (bazarr/app/config.py:519 at v1.6.2:
-    # config/config.yaml relative to the config directory;
-    # bazarr/app/database.py:82-97: db/bazarr.db, journal_mode=WAL).
+    # Its settings file and its SQLite database, with the WAL companions a running instance
+    # writes (bazarr/app/config.py:519 at v1.6.2: config/config.yaml relative to the config
+    # directory; bazarr/app/database.py:82-97: db/bazarr.db, journal_mode=WAL).
     snapshot: [config/config.yaml, db/bazarr.db, db/bazarr.db-wal, db/bazarr.db-shm]
     questions: []
 
-  # Opt-in: usenet. It is the second download client, an alternative to
-  # qBittorrent rather than a companion, so a box that installed the defaults
-  # has one already. Its own login is off when no username and password are set
-  # (sabnzbd/interface.py:358-361 at 5.1.3), which is the state the chart
-  # leaves it in: the edge is the only login.
+  # Opt-in: usenet, the second download client rather than a companion, so a box that
+  # installed the defaults has one already. Its own login is off with no username and
+  # password (sabnzbd/interface.py:358-361 at 5.1.3), which is the state the chart leaves it
+  # in: the edge is the only login.
   #
-  # It calls nothing inside the release: its news servers and indexers are
-  # outside it. The Arrs call it (their usenet download client), which is the
-  # `calls: [sabnzbd]` they carry below.
+  # It calls nothing inside the release: its news servers and indexers are outside it. The
+  # Arrs call it, which is the `calls: [sabnzbd]` they carry.
   sabnzbd:
     description: the usenet download client; it fetches what the Arrs grab
     instances: false
     default: false
-    # Everything SABnzbd knows -- the servers, the categories, the folders and
-    # the switches -- is this one INI file, which its own config writer rewrites
-    # in place as versions add keys. The history database and the queue are not
-    # state a new image rewrites.
+    # Everything SABnzbd knows -- servers, categories, folders, switches -- is this one INI
+    # file, which its own config writer rewrites as versions add keys. The history database and
+    # the queue are not state a new image rewrites.
     snapshot: [sabnzbd.ini]
     questions: []
 
-  # Opt-in: a file manager over the same downloads and library the Arrs and the
-  # download client already keep. A box does not need one to be useful, and it
-  # is the whole data tree in a browser, so it is asked for.
+  # Opt-in: a file manager over the same downloads and library, which a box does not need to
+  # be useful, and the whole data tree in a browser.
   #
-  # It signs in through the login's own provider, like qui and autobrr: at
-  # v2.1.0-stable its only way to grant its admin is a group claim, and its own
-  # password method would be a form nobody's account can answer (its user rows
-  # are made by the provider). `login: portal` is unchanged: the edge's login is
-  # still in front of every request, and the app's round trip is the silent
-  # second half -- the app reaches the same person, so a visit still looks like
-  # one login. Its whole configuration is the chart's config.yaml; the database
-  # is state, and the only thing it needs from box is the client itself, which
-  # the flag below registers.
+  # It signs in through the login's own provider, like qui and autobrr: at v2.1.0-stable its
+  # only way to grant its admin is a group claim, and its own password method would be a form
+  # nobody's account can answer. `login: portal` is unchanged: the edge's login is still in
+  # front, and the app's round trip reaches the same person, so a visit looks like one login.
   filebrowser:
     description: a file manager for the downloads and the library, in a browser
     instances: false
     default: false
     oidc: true
     login: portal
-    # Its database, and the SQLite companions: the app opens it in WAL mode
-    # whatever FILEBROWSER_SQL_WAL says -- that switch is the file index, which
-    # lives in the cache -- because the user store's DSN carries
-    # _journal_mode=WAL at v2.1.0-stable (internal/database/sqldb/sqldb.go).
+    # Its database and its SQLite companions: the app opens it in WAL mode whatever
+    # FILEBROWSER_SQL_WAL says -- that switch is the file index, which lives in the cache --
+    # because the user store's DSN carries _journal_mode=WAL at v2.1.0-stable
+    # (internal/database/sqldb/sqldb.go).
     snapshot: [database.sqlite, database.sqlite-wal, database.sqlite-shm]
     questions: []
 
-  # Opt-in, and louder so: it deletes media and torrents on rules the operator
-  # writes. Nothing here configures it; it is set up in its own UI.
+  # Opt-in, and louder so: it deletes media and torrents on rules the operator writes.
+  # Nothing here configures it; it is set up in its own UI.
   maintainerr:
     description: deletes what nobody watched, once your rules say so
     instances: false
     default: false
-    # Everything it acts on, and every place a rule is written: Plex and
-    # Tautulli for what was watched, Seerr for what was requested, both Arrs to
-    # delete, qBittorrent to retire a torrent. Each setting is filled in its own
-    # UI (v3.32's servarr, seerr, tautulli and download-client API modules),
-    # except Plex: that one is the release's own server, so the wiring Job
-    # connects it with the release Secret's plex-token (internal/apps/maintainerr).
-    # One it cannot reach is a rule that silently never runs.
+    # Everything it acts on and every place a rule is written: Plex and Tautulli for what was
+    # watched, Seerr for what was requested, both Arrs to delete, qBittorrent to retire a
+    # torrent. Each is filled in its own UI (v3.32's servarr, seerr, tautulli and
+    # download-client API modules) except Plex, which the wiring Job connects with the release
+    # Secret's plex-token (internal/apps/maintainerr). One it cannot reach is a rule that
+    # silently never runs.
     calls: [plex, sonarr, radarr, seerr, tautulli, qbittorrent]
-    # Everything it knows is in one SQLite database, at the root of the
-    # directory DATA_DIR moves to /config (apps/server/src/app/config/
-    # dataDir.ts and typeOrmConfig.ts at v3.32.0). The UI bundle it stages
-    # there on every boot and its overlays are rebuilt, not state.
+    # Everything it knows is in one SQLite database at the root of the directory DATA_DIR moves
+    # to /config (apps/server/src/app/config/dataDir.ts and typeOrmConfig.ts at v3.32.0). The UI
+    # bundle it stages there on every boot and its overlays are rebuilt, not state.
     snapshot: [maintainerr.sqlite, maintainerr.sqlite-wal, maintainerr.sqlite-shm]
     questions: []
