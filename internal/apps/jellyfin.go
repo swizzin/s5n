@@ -13,8 +13,9 @@ import (
 // Jellyfin is the media server. It is the one app here whose account is not in
 // a settings file: its users and API keys are rows in data/jellyfin.db, and its
 // first-run wizard is an API of its own. So the Job does not seed a file before
-// the app starts; it completes the wizard, keeps one automation account, and
-// signs in as that account on every later run.
+// the app starts. The chart's init container completes the wizard inside the
+// pod, before the server the Service reaches starts; the Job then keeps one
+// automation account and signs in as that account on every later run.
 //
 // Everything in this file is at v12.4 (jellyfin/jellyfin), the tag
 // charts/s5n/variants.yaml pins:
@@ -25,8 +26,8 @@ import (
 //     handler succeeds for *anyone* while IsStartupWizardCompleted is false
 //     (Jellyfin.Api/Auth/FirstTimeSetupPolicy/FirstTimeSetupHandler.cs). Those
 //     three calls are therefore anonymous until the wizard is done, which is
-//     the reason the chart serves no /Startup path at the edge: whoever reached
-//     a fresh server first could name its first user.
+//     why the chart completes it in the pod's init container and never lets a
+//     wizard-open server answer the Gateway.
 //   - POST /Startup/User refuses once the first user has a password
 //     (StartupController.cs, UpdateStartupUser: a non-empty Password answers
 //     403), which is what makes a re-run harmless rather than a password reset.
@@ -146,12 +147,24 @@ func (j *Jellyfin) CompleteWizard(ctx context.Context) error {
 // AuthenticateByName signs in and returns a session token. Every later call this
 // run makes carries it, and the caller decides what to do with it: the Job never
 // persists a session token, because a session is the app's, not the box's.
+//
+// A refused name or password is a LoginRejectedError, because the caller has to
+// tell it from an app that is down: at v12.4 AuthenticationManager hands the
+// name and password to DefaultAuthenticationProvider.Authenticate, which throws
+// AuthenticationException ("Invalid username or password"), and
+// Jellyfin.Api/Middleware/ExceptionMiddleware.cs maps that to 401. A 403 is not
+// a wrong password -- SessionManager.AuthenticateNewSessionInternal throws it
+// for a device the user may not use and for a user at their session limit -- so
+// it stays an ordinary error.
 func (j *Jellyfin) AuthenticateByName(ctx context.Context, username, password string) (string, error) {
 	var out struct {
 		AccessToken string `json:"AccessToken"`
 	}
 	body := map[string]string{"Username": username, "Pw": password}
 	if err := j.client.Post(ctx, "/Users/AuthenticateByName", body, &out); err != nil {
+		if IsUnauthorized(err) {
+			return "", &LoginRejectedError{App: "jellyfin", Username: username}
+		}
 		return "", err
 	}
 	if strings.TrimSpace(out.AccessToken) == "" {

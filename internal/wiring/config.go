@@ -58,13 +58,15 @@ type Config struct {
 //
 // Unlike every other app here, none of this can be sealed into a file before
 // the app starts. Jellyfin's users, its API keys and its libraries are rows in
-// data/jellyfin.db, and its first-run wizard is an API, so the Job's first
-// conversation with a fresh server is the one that creates the first account.
+// data/jellyfin.db, and its first-run wizard is an API: the chart's init
+// container completes it inside the pod, before the server the Service reaches
+// starts, and the Job checks that it is complete.
 //
 // Username is the account root's login admits (the chart's `login`), so the
 // person's Jellyfin account carries the name they already use on the box.
-// UserPasswordFile and BoxPasswordFile are file references into the mounted
-// Secret; the second is never shown to anyone.
+// UserPasswordFile is the first-run administrator's password, which the Job
+// needs once to make its own account; BoxPasswordFile is that account's, and
+// it is never shown to anyone.
 type JellyfinConfig struct {
 	URL              string            `json:"url"`
 	Username         string            `json:"username"`

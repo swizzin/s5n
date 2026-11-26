@@ -161,11 +161,12 @@ previous run's logs stay readable until then.
 {{- end }}
 {{- if and .Values.apps.jellyfin .Values.apps.jellyfin.enabled }}
 {{- /* Jellyfin keeps its accounts, its API keys and its library paths in
-       jellyfin.db, so nothing can be sealed into a file before it starts: this
-       Job completes the app's own first-run wizard, and every later run signs
-       in as an account of its own. `username` is the account root's login
-       admits, so the person has one name across the box; the two passwords are
-       file references into the mounted Secret, never values here.
+       jellyfin.db, so nothing can be sealed into a file before it starts. The
+       app's own init container completes the first-run wizard before the app
+       container starts, so this Job only checks that it is complete; `username`
+       is the account root's login admits, the name the wizard gives the person's
+       account, and the two passwords are file references into the mounted
+       Secret, never values here.
 
        The libraries are one per Arr instance: the same library directory
        directories this run creates (the dirs step), with the collection type

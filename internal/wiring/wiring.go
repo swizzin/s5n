@@ -166,8 +166,8 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 	case apps.Updated:
 		res.Writes.Updated++
 	case apps.Skipped:
-		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.stepLog(name, "skipped")
+		res.Steps = append(res.Steps, Step{Name: name, Result: stepSkipped})
+		r.stepLog(name, stepSkipped)
 		return nil
 	default:
 		res.Writes.Unchanged++
@@ -192,8 +192,8 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 	case apps.Updated:
 		res.Writes.Updated++
 	case apps.Skipped:
-		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.stepLog(name, "skipped")
+		res.Steps = append(res.Steps, Step{Name: name, Result: stepSkipped})
+		r.stepLog(name, stepSkipped)
 		return nil
 	default:
 		res.Writes.Unchanged++

@@ -305,9 +305,14 @@ apps:
   # jellyfin.<domain> because its players are configured with a server address
   # and a path prefix breaks a subset of them, and it signs its players in
   # itself, so that host bypasses the box's login (catalog.yaml). Its own
-  # first-run wizard is an API: the wiring Job completes it, and the chart
-  # serves no /Startup path at the edge, so nobody outside the cluster can name
-  # the server's first user (templates/workloads.yaml).
+  # first-run wizard is an API, so the chart closes it inside the pod: an init
+  # container runs the app against the same config, bound to localhost, names
+  # the person's account and completes the wizard before the app container
+  # starts (templates/workloads.yaml). While it runs the pod is not Ready, so
+  # there is no moment the Gateway can reach a server with the wizard open. A
+  # second init container follows it on every start and owns network.xml's bind
+  # address, so the loopback that wizard leaves behind can never outlive a pod:
+  # the app binds every interface, and this chart's NetworkPolicy is the gate.
   jellyfin:
     enabled: false
     image:

@@ -3,6 +3,7 @@ package apps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -317,6 +318,49 @@ func (f *jellyfinFake) auth(w http.ResponseWriter, r *http.Request) bool {
 // run must not repeat, and the app's own answer is what tells the run so --
 // /Startup/User answers 403 once the first user has a password, which the Job
 // reads as "the account is there" rather than as a failure.
+// TestJellyfinSignInRefusalIsATypedAnswer: a migrated server's administrator
+// password is one box does not hold, and that refusal has to be tellable from a
+// server that is down or answering 5xx. At v12.4 a wrong name or password is
+// AuthenticationException from DefaultAuthenticationProvider.Authenticate,
+// which Jellyfin.Api/Middleware/ExceptionMiddleware.cs maps to 401; a 403 is the
+// app refusing a *session* for another reason (a device it does not allow, a
+// user at its session limit -- SessionManager.AuthenticateNewSessionInternal)
+// and stays an ordinary error.
+func TestJellyfinSignInRefusalIsATypedAnswer(t *testing.T) {
+	ctx := context.Background()
+	status := http.StatusUnauthorized
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	j := NewJellyfin(srv.URL)
+
+	if _, err := j.AuthenticateByName(ctx, "alice", "wrong"); err == nil {
+		t.Fatal("a refused sign-in was not an error")
+	} else {
+		var rejected *LoginRejectedError
+		if !errors.As(err, &rejected) {
+			t.Fatalf("a 401 is %T (%v), want a LoginRejectedError", err, err)
+		}
+		if rejected.Username != "alice" {
+			t.Fatalf("the refusal names %q, want alice", rejected.Username)
+		}
+	}
+
+	status = http.StatusForbidden
+	if _, err := j.AuthenticateByName(ctx, "alice", "pw"); err == nil {
+		t.Fatal("a 403 from the sign-in was not an error")
+	} else {
+		var rejected *LoginRejectedError
+		if errors.As(err, &rejected) {
+			t.Fatalf("a 403 was read as a wrong password: %v", err)
+		}
+		if !IsForbidden(err) {
+			t.Fatalf("a 403 is %v, want the app's own refusal to stay an HTTP error", err)
+		}
+	}
+}
+
 func TestJellyfinWizardIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)

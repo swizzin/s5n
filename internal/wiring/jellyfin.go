@@ -2,19 +2,13 @@ package wiring
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/swizzin/s5n/internal/apps"
 )
-
-// startUpBudget is how long a fresh server gets to answer the wizard's own
-// read-and-write pair: the account it names does not exist until that read has
-// created it, so the pair is retried together rather than a 404 being read as a
-// failure.
-const startUpBudget = 60 * time.Second
 
 // jellyfinBoxAccount is the account the wiring Job signs in as. It is not the
 // person's: the Job must be able to connect on every re-run, and the person may
@@ -25,19 +19,10 @@ const jellyfinBoxAccount = "s5n"
 
 // stepPending is the receipt's word for a step that left something for a person
 // to decide. It is the same word wiring.go uses for Plex's claim.
-const stepPending = "pending"
-
-// detailStep is ensure with a sentence of its own in place of the bare change
-// word: the step's name says what was checked, and this says what it found.
-func (r *Runner) detailStep(res *Result, name string, change apps.Change, detail string, err error) error {
-	if err := r.ensure(res, name, change, err); err != nil {
-		return err
-	}
-	if detail != "" {
-		res.Steps[len(res.Steps)-1].Detail = detail
-	}
-	return nil
-}
+const (
+	stepPending = "pending"
+	stepSkipped = "skipped"
+)
 
 // wireJellyfin makes a Jellyfin server usable and keeps it that way.
 //
@@ -45,23 +30,33 @@ func (r *Runner) detailStep(res *Result, name string, change apps.Change, detail
 // users, API keys and libraries in data/jellyfin.db, so no file can be sealed
 // before it starts. The order is the whole design:
 //
-//  1. wait for the server and read whether its wizard is done;
-//  2. complete the wizard with the person's account. Until that call lands the
-//     server's /Startup/* and library endpoints answer anyone; the chart is what
-//     keeps those paths off the Gateway (templates/workloads.yaml), and this is
-//     the only caller that can reach them at all;
-//  3. keep an automation account with a password from the release Secret and
-//     sign in as it. The person's password is used for step 2 and for recovery,
-//     and nothing else, so the person changing it does not break wiring;
+//  1. wait for the server and read whether its wizard is done. The wizard is
+//     *not* this Job's: the app's own init container completes it before the
+//     server the Service reaches ever starts (templates/workloads.yaml), so a
+//     server still reporting an open wizard is one whose pod is not the pod
+//     this Job should be wiring, and this Job refuses rather than completing it
+//     from outside the pod;
+//  2. keep an automation account with a password from the release Secret and
+//     sign in as it. The person's password is used only for the first run's
+//     administrator -- the init container named that account, and the Job needs
+//     an administrator to make its own -- so the person changing it does not
+//     break a later run. When neither password opens the server, nothing below
+//     can run: that is the normal state of a migrated box, so it is reported as
+//     a pending login with every session-bound step skipped, and the Job carries
+//     on. An unreachable server or a 5xx is still a failure;
+//  3. check that the account the box login names is on the server. A fresh box
+//     has it (the init container named the first user after it); a migrated
+//     server keeps the accounts it had, and this is reported, never repaired by
+//     renaming or resetting one;
 //  4. prove the server's view of the client address: with KnownProxies empty
 //     Jellyfin ignores X-Forwarded-For completely, so every request through the
 //     Gateway looks local and the endpoints a local caller may use without a
 //     credential would be open to the internet;
 //  5. one library per Arr instance, adopted by path when it already exists.
 //
-// A second run writes nothing: the wizard answers 403 once the first user has a
-// password, the account and the key are looked up before they are made, and a
-// library is adopted by the directory it holds.
+// A second run writes nothing: the wizard is already complete, the account and
+// the key are looked up before they are made, and a library is adopted by the
+// directory it holds.
 func (r *Runner) wireJellyfin(ctx context.Context, res *Result, c *JellyfinConfig) error {
 	userPassword, err := ReadSecret(c.UserPasswordFile)
 	if err != nil {
@@ -78,16 +73,54 @@ func (r *Runner) wireJellyfin(ctx context.Context, res *Result, c *JellyfinConfi
 	if err != nil {
 		return err
 	}
-	if err := r.jellyfinWizard(ctx, res, c, j, userPassword, wizardDone); err != nil {
+	if err := r.jellyfinWizard(res, wizardDone); err != nil {
 		return err
 	}
-	if err := r.jellyfinAccount(ctx, res, c, j, userPassword, boxPassword); err != nil {
+	signedIn, err := r.jellyfinAccount(ctx, res, c, j, userPassword, boxPassword)
+	if err != nil {
+		return err
+	}
+	if !signedIn {
+		// No session, so everything below it is a step this run cannot take.
+		// The receipt says so and the Job goes on: the apps wired after this one
+		// have nothing to do with Jellyfin's accounts, and a migrated box whose
+		// administrator password box does not hold is the normal case, not a
+		// broken release.
+		r.jellyfinNoSession(res, c)
+		return nil
+	}
+	if err := r.jellyfinPerson(ctx, res, c, j); err != nil {
 		return err
 	}
 	if err := r.jellyfinProxies(ctx, res, c, j); err != nil {
 		return err
 	}
 	return r.jellyfinLibraries(ctx, res, j)
+}
+
+// jellyfinNoSession is the receipt of a server box holds no password for: every
+// step that needs a session says why it did not run, as one sentence the person
+// can act on, and nothing is invented to look as if it worked.
+//
+// The string is shared by all of them on purpose: each row is a different part
+// of the server, and repeating the whole reason four times is what makes a
+// receipt unreadable. The reason names no secret -- box never prints the
+// password the Secret holds, only where it is -- and no box command that does
+// not exist: the app's own dashboard is where an administrator changes a
+// password, and this Job cannot open a session to do it for them.
+func (r *Runner) jellyfinNoSession(res *Result, c *JellyfinConfig) {
+	reason := fmt.Sprintf("neither the box's account %q nor %q signs in, so this server holds a password box does not: sign in to Jellyfin as one of its administrators and set %q's password to the release Secret's jellyfin-box-password, or create that account there, then apply again",
+		jellyfinBoxAccount, c.Username, jellyfinBoxAccount)
+	res.Steps = append(res.Steps, Step{Name: "jellyfin/login", Result: stepPending, Detail: reason})
+	r.stepLog("jellyfin/login", stepPending+" (no account signs in)")
+	skipped := []string{"jellyfin/account", "jellyfin/apikey", "jellyfin/person"}
+	for _, lib := range c.Libraries {
+		skipped = append(skipped, "jellyfin/library/"+lib.Name)
+	}
+	for _, name := range skipped {
+		res.Steps = append(res.Steps, Step{Name: name, Result: stepSkipped, Detail: reason})
+		r.stepLog(name, "skipped (no session)")
+	}
 }
 
 // jellyfinReady waits for /System/Info/Public, which carries no [Authorize] at
@@ -110,46 +143,50 @@ func (r *Runner) jellyfinReady(ctx context.Context, res *Result, j *apps.Jellyfi
 	return info.StartupWizardCompleted, nil
 }
 
-// jellyfinWizard names the person's account and closes the wizard, once.
-func (r *Runner) jellyfinWizard(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin, userPassword string, done bool) error {
-	if done {
-		r.okStep(res, "jellyfin/wizard", "complete")
+// jellyfinWizard checks the one thing this Job will not do itself: the app's
+// first-run wizard. The chart's init container completes it inside the pod,
+// before the server the Service reaches starts, and a pod does not become Ready
+// while an init container runs. A server the Job can reach with the wizard still
+// open is therefore a server something else started with its window open -- and
+// completing the wizard over the in-cluster Service would leave that server
+// answering the Gateway. So this refuses and says so.
+func (r *Runner) jellyfinWizard(res *Result, done bool) error {
+	if !done {
+		return r.ensure(res, "jellyfin/wizard", apps.Unchanged,
+			errors.New("the server's first-run wizard is not complete; its pod's startup-wizard init container is what completes it before the server starts, so a server this Job can reach with the wizard open was not started by this release"))
+	}
+	r.okStep(res, "jellyfin/wizard", "complete")
+	return nil
+}
+
+// jellyfinPerson checks that the account the person was told to sign in with is
+// on this server. The app's init container names the server's first account
+// after the box login, so a fresh box has it. A migrated box keeps the accounts
+// the source had -- the database rewriter renames nothing -- and gets box's own
+// automation account beside them, so a login name that names no row there is a
+// decision for the person: this reports it and creates nothing, because an
+// account box invents would have a password box shows to nobody.
+func (r *Runner) jellyfinPerson(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin) error {
+	account, found, err := j.FindUser(ctx, c.Username)
+	if err != nil {
+		return r.ensure(res, "jellyfin/person", apps.Unchanged, err)
+	}
+	if found {
+		r.okStep(res, "jellyfin/person", account.Name)
 		return nil
 	}
-	started := false
-	err := apps.Retry(ctx, startUpBudget, func(ctx context.Context) error {
-		// The wizard's GET is what creates the account. Jellyfin starts with an
-		// empty user table and makes its default one inside
-		// UserManager.InitializeAsync, which only that call reaches; naming it
-		// before it exists is a 404, so the read comes first and the write
-		// follows it in the same attempt.
-		if _, e := j.StartupUser(ctx); e != nil {
-			return e
+	detail := fmt.Sprintf("this server has no account called %q; a migrated server keeps the accounts it had, plus box's own %s, so sign in with one of them or rename it in the dashboard", c.Username, jellyfinBoxAccount)
+	if users, uerr := j.Users(ctx); uerr == nil {
+		names := make([]string, 0, len(users))
+		for _, u := range users {
+			names = append(names, u.Name)
 		}
-		var e error
-		started, e = j.SetFirstUser(ctx, c.Username, userPassword)
-		return e
-	})
-	if err != nil {
-		return r.ensure(res, "jellyfin/wizard", apps.Unchanged, err)
+		sort.Strings(names)
+		detail = fmt.Sprintf("this server has no account called %q; its accounts are %s. A migrated server keeps the accounts it had, plus box's own %s, so sign in with one of them or rename it in the dashboard", c.Username, strings.Join(names, ", "), jellyfinBoxAccount)
 	}
-	change := apps.Created
-	detail := "account " + c.Username
-	if started {
-		// The first account already had a password: the wizard had run, or a
-		// source box's database brought one. Either way it is not ours to rename.
-		change = apps.Unchanged
-		if name, nerr := j.StartupUser(ctx); nerr == nil && name != "" && !strings.EqualFold(name, c.Username) {
-			detail = "first account is " + name
-		}
-	}
-	if err := r.detailStep(res, "jellyfin/wizard", change, detail, nil); err != nil {
-		return err
-	}
-	if err := j.AllowRemoteAccess(ctx); err != nil {
-		return r.ensure(res, "jellyfin/remote-access", apps.Unchanged, err)
-	}
-	return r.ensure(res, "jellyfin/wizard-complete", apps.Unchanged, j.CompleteWizard(ctx))
+	res.Steps = append(res.Steps, Step{Name: "jellyfin/person", Result: stepPending, Detail: detail})
+	r.stepLog("jellyfin/person", stepPending)
+	return nil
 }
 
 // jellyfinAccount makes sure the automation account exists, is an
@@ -157,29 +194,47 @@ func (r *Runner) jellyfinWizard(ctx context.Context, res *Result, c *JellyfinCon
 // as it. Signing in as the person is the fallback rather than the rule: it is
 // how a first run gets an administrator at all, and how a run recovers when the
 // account's password was changed inside the app.
-func (r *Runner) jellyfinAccount(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin, userPassword, boxPassword string) error {
+//
+// It reports false, with no error, when neither account signs in: a server whose
+// accounts are the ones it arrived with, which is what a migrated box is. Only
+// the app's own refusal of the *credential* means that (a 401 for
+// /Users/AuthenticateByName); an unreachable server, a 5xx or a session the app
+// refused for another reason is still a failed step.
+func (r *Runner) jellyfinAccount(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin, userPassword, boxPassword string) (bool, error) {
 	token, err := j.AuthenticateByName(ctx, jellyfinBoxAccount, boxPassword)
 	if err == nil {
 		j.SetToken(token)
 		r.okStep(res, "jellyfin/login", jellyfinBoxAccount)
-		return r.jellyfinAPIKey(ctx, res, j)
+		return true, r.jellyfinAPIKey(ctx, res, j)
+	}
+	if !isRejected(err) {
+		return false, r.ensure(res, "jellyfin/login", apps.Unchanged, err)
 	}
 	person, err := j.AuthenticateByName(ctx, c.Username, userPassword)
 	if err != nil {
-		return r.ensure(res, "jellyfin/login", apps.Unchanged,
-			fmt.Errorf("neither the box account nor %s signs in: %w", c.Username, err))
+		if !isRejected(err) {
+			return false, r.ensure(res, "jellyfin/login", apps.Unchanged, err)
+		}
+		return false, nil
 	}
 	j.SetToken(person)
 	if err := r.jellyfinMakeAccount(ctx, res, j, boxPassword); err != nil {
-		return err
+		return false, err
 	}
 	token, err = j.AuthenticateByName(ctx, jellyfinBoxAccount, boxPassword)
 	if err != nil {
-		return r.ensure(res, "jellyfin/login", apps.Unchanged, err)
+		return false, r.ensure(res, "jellyfin/login", apps.Unchanged, err)
 	}
 	j.SetToken(token)
 	r.okStep(res, "jellyfin/login", jellyfinBoxAccount)
-	return r.jellyfinAPIKey(ctx, res, j)
+	return true, r.jellyfinAPIKey(ctx, res, j)
+}
+
+// isRejected reports whether an app refused the credential it was given, as
+// opposed to being unreachable or refusing the session for another reason.
+func isRejected(err error) bool {
+	var rejected *apps.LoginRejectedError
+	return errors.As(err, &rejected)
 }
 
 // jellyfinMakeAccount creates the automation account, or puts the release

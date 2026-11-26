@@ -68,6 +68,12 @@ func IsNotFound(err error) bool { return statusIs(err, http.StatusNotFound) }
 // counts failures (PBH blacklists an address after ten) must not be retried.
 func IsForbidden(err error) bool { return statusIs(err, http.StatusForbidden) }
 
+// IsUnauthorized reports whether err is a 401 from this package: the app
+// answering that the credential names no account it accepts. It is narrower
+// than "the request was refused" -- an app that refuses for another reason
+// answers 403 (Jellyfin's session rules do), and that is not a wrong password.
+func IsUnauthorized(err error) bool { return statusIs(err, http.StatusUnauthorized) }
+
 // IsConflict reports whether err is a 409 from this package.
 func IsConflict(err error) bool { return statusIs(err, http.StatusConflict) }
 

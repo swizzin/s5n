@@ -242,7 +242,10 @@ apps:
     # Every Jellyfin client authenticates against the server with its own
     # token; a login page in front of it is a form no player can answer. Its
     # host therefore bypasses the edge login, exactly as Plex's does, and the
-    # NetworkPolicy is what keeps the rest of the cluster out.
+    # NetworkPolicy is what keeps the rest of the cluster out. The first-run
+    # window that would otherwise come with that is closed inside the pod, by
+    # an init container that completes the wizard before the server the
+    # Gateway reaches starts (templates/workloads.yaml).
     login: own
     # The four configuration files a version rewrites, and the library
     # database with the SQLite companions a running server writes beside it.

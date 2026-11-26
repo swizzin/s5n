@@ -437,26 +437,216 @@ spec:
             - name: tmp
               mountPath: /tmp
         {{- else if eq $inst.app "jellyfin" }}
-        # Jellyfin reads the peers whose forwarded address it honours once, at
-        # startup: AddJellyfinApi builds ASP.NET's ForwardedHeadersOptions from
-        # NetworkConfiguration, and a value written through the API afterwards
-        # changes nothing until the process restarts (internal/jellyconf, which
-        # cites it). So the list is in network.xml before the app reads it, on
-        # every start, and the app's own saves carry it from there.
+        # The first-run wizard, closed before the server the Gateway reaches
+        # ever starts.
         #
-        # The list is what makes a request through the Gateway look like the
-        # person's rather than the Gateway proxy's pod address, which Jellyfin
-        # counts as its own network -- and a local caller reaches the endpoints
-        # it answers without a credential. A box with no list gets no init
-        # container: the chart writes nothing it cannot stand behind.
-        {{- with $cfg.knownProxies }}
+        # Until its wizard is complete Jellyfin's StartupController answers
+        # *anyone* -- its policy is FirstTimeSetupOrElevated, and that handler
+        # succeeds for every request while IsStartupWizardCompleted is false
+        # (Jellyfin.Api/Auth/FirstTimeSetupPolicy/FirstTimeSetupHandler.cs at
+        # v12.4). The window is not only /Startup: EnvironmentController (the
+        # filesystem browser), SystemController.GetSystemInfo and
+        # LocalizationController carry the same policy. POST /Startup/User is
+        # where the first user -- the server's administrator -- is named and
+        # passworded, so whoever reached a fresh server first would own it.
+        #
+        # A route rule at the edge is the wrong place to close it: Gateway API
+        # path matching is case-sensitive and ASP.NET's routing is not, so
+        # /startup/user reaches the same endpoint, and an administrator would
+        # lose /Library/VirtualFolders and /Environment for ever. So the chart
+        # closes it inside the pod instead: this container runs the app's own
+        # image against the same /config before the app container starts, waits
+        # for the server it started, completes the wizard, stops that server
+        # with SIGTERM and waits for it (so jellyfin.db and its WAL are
+        # flushed), and exits. A pod does not become Ready while an init
+        # container runs, so the Service has no endpoint and the Gateway has
+        # nowhere to send a request: there is no moment a server answers the
+        # outside with the wizard open. The server this container starts binds
+        # 127.0.0.1 only, from network.xml's LocalNetworkAddresses
+        # (MediaBrowser.Common/Net/NetworkConfiguration.cs, read at startup by
+        # Jellyfin.Networking.Manager.NetworkManager), so even the pod network
+        # cannot reach it.
+        #
+        # It leaves that 127.0.0.1 in the file on purpose: the next container in
+        # this pod start, network-config, owns the bind address and puts it back
+        # on every start. A restore here could not be trusted -- a trap does not
+        # run on SIGKILL (an OOM kill, an eviction, a reboot, a pod deleted past
+        # its grace period) -- and it would throw away what this server's own
+        # /Startup/RemoteAccess save wrote to the file.
+        #
+        # The person's password is the release Secret's jellyfin-user-password,
+        # mounted here and nowhere else in this pod. A server whose
+        # system.xml already says the wizard is done (a migrated box, a
+        # restart) exits at once without starting anything.
+        - name: startup-wizard
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              config=/config/config
+              net="$config/network.xml"
+              serverlog=/cache/.s5n-startup.log
+              port={{ $cfg.port }}
+              pid=
+              # stop the server this container started, and wait for it: that is
+              # what flushes jellyfin.db and its WAL. The trap runs on every exit
+              # of this shell, including the error exits below; a SIGKILL is the
+              # runtime's, and it kills every process in this container with it,
+              # so no server outlives this container either way.
+              stop() {
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                  kill -TERM "$pid" 2>/dev/null || true
+                  n=0
+                  while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 60 ]; do
+                    n=$((n + 1))
+                    sleep 1
+                  done
+                  kill -KILL "$pid" 2>/dev/null || true
+                  wait "$pid" 2>/dev/null || true
+                fi
+              }
+              trap stop EXIT
+              if [ -f "$config/system.xml" ] && grep -q '<IsStartupWizardCompleted>true<' "$config/system.xml"; then
+                echo "startup wizard: already complete"
+                exit 0
+              fi
+              mkdir -p "$config"
+              # The server this container starts is bound to the loopback: it is
+              # the only server that may answer with the wizard open, and nothing
+              # outside this pod can reach a loopback. The file is left that way;
+              # network-config, next, clears it on every start.
+              if [ -f "$net" ]; then
+                if grep -q '<LocalNetworkAddresses>' "$net"; then
+                  sed -i 's|<LocalNetworkAddresses>.*</LocalNetworkAddresses>|<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>|' "$net"
+                elif grep -q '<LocalNetworkAddresses */>' "$net"; then
+                  sed -i 's|<LocalNetworkAddresses */>|<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>|' "$net"
+                else
+                  sed -i 's|</NetworkConfiguration>|  <LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>\n</NetworkConfiguration>|' "$net"
+                fi
+              else
+                printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<NetworkConfiguration>' '  <LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>' '</NetworkConfiguration>' >"$net"
+              fi
+              echo "startup wizard: starting the server on 127.0.0.1:$port"
+              /jellyfin/jellyfin --nowebclient >"$serverlog" 2>&1 &
+              pid=$!
+              login="${S5N_LOGIN:?S5N_LOGIN is the person's account name}"
+              password="$(cat /etc/s5n/keys/jellyfin-user-password)"
+              # This read is the readiness gate as well as the wizard's first
+              # one: the setup server answers 503 here until the real host is
+              # up, and the read is also what creates the first user
+              # (UserManager.InitializeAsync only runs from it).
+              first=
+              n=0
+              while :; do
+                body="$(curl -sS "http://127.0.0.1:$port/Startup/User" 2>/dev/null || true)"
+                case "$body" in
+                *'"Name"'*)
+                  first="$(printf '%s' "$body" | sed -n 's/.*"Name":"\([^"]*\)".*/\1/p')"
+                  break
+                  ;;
+                esac
+                n=$((n + 1))
+                if [ "$n" -gt 180 ]; then
+                  echo "startup wizard: the server did not answer in 180s:" >&2
+                  tail -n 20 "$serverlog" >&2 || true
+                  exit 1
+                fi
+                sleep 1
+              done
+              grep -m1 'Kestrel is listening on' "$serverlog" | sed 's/^/startup wizard: /' || true
+              code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "$(curl -fsS "http://127.0.0.1:$port/Startup/Configuration")" "http://127.0.0.1:$port/Startup/Configuration")"
+              case "$code" in
+              204) ;;
+              *)
+                echo "startup wizard: saving the configuration answered $code" >&2
+                exit 1
+                ;;
+              esac
+              code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"Name\":\"$login\",\"Password\":\"$password\"}" "http://127.0.0.1:$port/Startup/User")"
+              case "$code" in
+              204) echo "startup wizard: account '$login' named" ;;
+              403) echo "startup wizard: the first account already has a password; left as '$first'" ;;
+              *)
+                echo "startup wizard: naming the first account answered $code" >&2
+                exit 1
+                ;;
+              esac
+              code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":true}' "http://127.0.0.1:$port/Startup/RemoteAccess")"
+              case "$code" in
+              204) ;;
+              *)
+                echo "startup wizard: remote access answered $code" >&2
+                exit 1
+                ;;
+              esac
+              code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port/Startup/Complete")"
+              case "$code" in
+              204) ;;
+              *)
+                echo "startup wizard: completing the wizard answered $code" >&2
+                exit 1
+                ;;
+              esac
+              sleep 1
+              curl -fsS "http://127.0.0.1:$port/System/Info/Public" | grep -q '"StartupWizardCompleted":true' || {
+                echo "startup wizard: the server still reports it incomplete" >&2
+                exit 1
+              }
+              echo "startup wizard: complete"
+          env:
+            - name: S5N_LOGIN
+              value: {{ required "login: Jellyfin's first account is named after the box login, so the chart needs it (box writes it from the grant)" $root.Values.login | quote }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+        # network.xml's two settings, on every start, after the wizard and
+        # before the app.
+        #
+        # LocalNetworkAddresses is the interfaces Jellyfin binds, and empty means
+        # every interface the pod has (MediaBrowser.Common/Net/NetworkConfiguration.cs
+        # at v12.4: "the interface addresses which Jellyfin will bind to. If
+        # empty, all interfaces will be used"; NetworkManager.GetAllBindInterfaces
+        # is what Kestrel is built from). Empty is the only value this chart can
+        # stand behind: inside a pod, Jellyfin on 127.0.0.1 is a server nothing
+        # outside its own pod can reach, and the NetworkPolicy -- not the bind
+        # address -- is the gate. So this container runs on every start, with or
+        # without a proxy list, and always writes that element empty. That is what
+        # makes the startup-wizard's loopback value safe to leave behind: nothing
+        # is restored from a backup (a trap does not run on SIGKILL, and a
+        # restored file is one Jellyfin's own save then contradicts), the file is
+        # simply put right before the app reads it. A server whose system.xml says
+        # the wizard is complete skips the wizard entirely, which is exactly the
+        # start this container is what makes reachable.
+        #
+        # KnownProxies is written even when the box names none. With it empty
+        # Jellyfin ignores X-Forwarded-For completely (ConfigureForwardHeaders),
+        # so a list an earlier values file had written must not survive in the
+        # app's own saves; a box with no list is a wiring receipt line, not a
+        # silent trust.
+        #
+        # Both are read at startup and the app rewrites the whole file when its
+        # own settings change, so this runs before every start and edits those two
+        # elements only; every other byte, Jellyfin's own writes included, is left
+        # alone (internal/jellyconf).
         - name: network-config
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
           args:
             - jellyfin-config
             - --conf=/config/config/network.xml
-            {{- range . }}
+            {{- range $cfg.knownProxies }}
             - --known-proxy={{ . }}
             {{- end }}
           securityContext:
@@ -465,7 +655,6 @@ spec:
             - name: config
               mountPath: /config
               subPath: {{ $inst.name }}
-        {{- end }}
         {{- else if eq $inst.app "pbh" }}
         # PeerBanHelper's config file, prepared before the app reads it. The
         # token comes from the environment (PBH_APITOKEN), so the one thing this
@@ -1096,6 +1285,17 @@ spec:
             items:
               - key: {{ printf "%s-apikey" $inst.name }}
                 path: {{ printf "%s-apikey" $inst.name }}
+        {{- else if eq $inst.app "jellyfin" }}
+        # The person's password, in the pod only for the wizard's init
+        # container: the app container never mounts it, so the server that
+        # serves the Gateway cannot read the credential its player uses.
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: jellyfin-user-password
+                path: jellyfin-user-password
         {{- else if eq $inst.app "sabnzbd" }}
         # The API key the init container seals into sabnzbd.ini and the app's
         # entrypoint re-applies from SABNZBD__API_KEY, so the file, the app and
@@ -1207,41 +1407,6 @@ spec:
               type: ReplaceFullPath
               replaceFullPath: {{ printf "%s/" $urlBase }}
             statusCode: 301
-    {{- end }}
-    {{- if eq $inst.app "jellyfin" }}
-    # The first-run window, and the reason this app's host is safe to serve
-    # without the edge login.
-    #
-    # Until its wizard is complete Jellyfin's StartupController answers
-    # *anyone*: the controller carries
-    # [Authorize(Policy = Policies.FirstTimeSetupOrElevated)], and that policy's
-    # handler succeeds for every request while IsStartupWizardCompleted is
-    # false (Jellyfin.Api/Auth/FirstTimeSetupPolicy/FirstTimeSetupHandler.cs at
-    # v12.4). POST /Startup/User is where the first user -- the server's
-    # administrator -- is named and passworded, so whoever reached a fresh
-    # server first would own it. LibraryStructureController carries the same
-    # policy, so a fresh server also takes anonymous libraries.
-    #
-    # The job of naming the first user is the wiring Job's, and the Job reaches
-    # the app through its Service inside the cluster, where these rules do not
-    # apply. So the two anonymous prefixes are never served from the Gateway at
-    # all: a request for them is sent to the server's own page. The person can
-    # not lose a race they can not enter, and after the wizard both prefixes are
-    # administrator-only anyway, so nothing a signed-in person needs is lost.
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /Startup
-        - path:
-            type: PathPrefix
-            value: /Library/VirtualFolders
-      filters:
-        - type: RequestRedirect
-          requestRedirect:
-            path:
-              type: ReplaceFullPath
-              replaceFullPath: /
-            statusCode: 302
     {{- end }}
     {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}    # The live task stream is a Server-Sent Events connection that has to stay
     # open, and Envoy's route timeout defaults to 15s, which would cut it: the

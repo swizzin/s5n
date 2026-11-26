@@ -409,3 +409,48 @@ if [ -n "$qui_problems" ]; then
 fi
 echo "== qui render: every Sonarr and Radarr instance admits qui"
 
+# Jellyfin's first-run window is closed inside its pod, and nowhere else: an
+# init container runs the app's own image, binds it to loopback and completes the
+# wizard before the app container starts, so the route carries no /Startup rule
+# to be bypassed in another case spelling. The person's password is mounted by
+# that init container alone -- not by the app container the Gateway reaches.
+#
+# The pod's second init container owns the bind address, and it comes after the
+# wizard on every start: the wizard leaves 127.0.0.1 in network.xml (a trap cannot
+# be relied on -- SIGKILL runs none), and a start that skips the wizard, because
+# system.xml says it is complete, must still clear it or the app binds loopback
+# and nothing outside the pod can reach it again.
+jf_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
+jf=$(awk 'BEGIN{RS="\n---\n"} /kind: StatefulSet/ && /\n  name: jellyfin\n/ {print; exit}' <<<"$jf_render")
+[ -n "$jf" ] || { echo "the catalog render has no jellyfin StatefulSet"; exit 1; }
+grep -q 'name: startup-wizard' <<<"$jf" ||
+  { echo "jellyfin's pod has no startup-wizard init container"; exit 1; }
+grep -q '<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>' <<<"$jf" ||
+  { echo "the wizard's server is not bound to loopback: a pod-network peer could reach the open wizard"; exit 1; }
+jf_inits=$(awk '/^      initContainers:/{f=1; next} /^      containers:/{f=0} f && /^        - name: /{print $3}' <<<"$jf")
+[ "$jf_inits" = "$(printf 'startup-wizard\nnetwork-config')" ] ||
+  { echo "jellyfin's init containers are '$(echo $jf_inits)': the wizard runs first and network-config, which owns the bind address, runs last"; exit 1; }
+if grep -q 'value: /Startup' <<<"$jf_render" || grep -q 'value: /Library/VirtualFolders' <<<"$jf_render"; then
+  echo "an HTTPRoute rule names a Jellyfin first-run prefix: the window is closed in the pod, not at the edge"
+  exit 1
+fi
+jf_init_keys=$(awk '/^      initContainers:/{f=1} /^      containers:/{f=0} f && /^            - name: keys$/' <<<"$jf")
+jf_main_keys=$(awk '/^      containers:/{f=1} f && /^            - name: keys$/' <<<"$jf")
+[ -n "$jf_init_keys" ] ||
+  { echo "the wizard's init container does not mount the person's password"; exit 1; }
+[ -z "$jf_main_keys" ] ||
+  { echo "the jellyfin app container mounts the person's password"; exit 1; }
+# A box whose values name no proxy still gets the container that writes the bind
+# address: it is the only writer of that element, so without it a wizard's
+# loopback value would stand for ever.
+jf_noproxy_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml \
+  --set-json 'apps.jellyfin.knownProxies=[]')
+jf_noproxy=$(awk 'BEGIN{RS="\n---\n"} /kind: StatefulSet/ && /\n  name: jellyfin\n/ {print; exit}' <<<"$jf_noproxy_render")
+[ -n "$jf_noproxy" ] || { echo "the render with no knownProxies has no jellyfin StatefulSet"; exit 1; }
+grep -q 'name: network-config' <<<"$jf_noproxy" ||
+  { echo "a box with no knownProxies renders no network-config container: nothing would clear the bind address"; exit 1; }
+if grep -q -- '--known-proxy=' <<<"$jf_noproxy"; then
+  echo "a box with no knownProxies renders a --known-proxy flag"
+  exit 1
+fi
+echo "== jellyfin: the wizard runs in an init container on loopback, network-config owns the bind address after it, the app container never sees its password"

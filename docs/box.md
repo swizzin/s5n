@@ -284,28 +284,55 @@ from the settings its snapshot carried), and names `seerr.<domain>` — never a
 (decided).** Its players authenticate against the server with its own tokens, so it
 is served at `jellyfin.<domain>` and that host bypasses the login, like Plex's. Its
 users, its API keys and its libraries are rows in `data/jellyfin.db`, and its first-run
-wizard is an API, so nothing can be sealed into a file before it starts: the wiring Job
-completes the wizard with the person's account (the box login's name), keeps an
-automation account of its own for every later run, and gives each Arr instance's
-library directory a library. The person's password is the one app credential box
-makes and shows once, at the end of the first run, and the release Secret is its only
-copy, so a person who changes it in the app breaks nothing and a re-run never resets
-it.
+wizard is an API, so nothing can be sealed into a file before it starts. The chart
+closes that wizard inside the pod: an init container runs the app's own image
+against the same `/config`, bound to localhost only, waits for the server it
+started, names the person's account (the box login's name) with the generated
+password, completes the wizard, stops that server with `SIGTERM` and waits for it so
+the database and its WAL are flushed, then exits. A pod is not Ready while an init
+container runs, so the Service has no endpoint and the Gateway has nowhere to send a
+request: there is no moment a server answers the outside with the wizard open. The
+wiring Job then keeps an automation account of its own for every later run and gives
+each Arr instance's library directory a library.
 
-That wizard is also the reason the chart serves no `/Startup` path at the edge. Until
-the wizard is complete Jellyfin's own authorization policy answers anyone on
-`/Startup/*` and `/Library/VirtualFolders`, and this host has no login in front of it,
-so whoever reached a fresh server first would name its first account. The chart sends
-those two prefixes to the app's own page instead, and the Job -- which reaches the
-Service inside the cluster -- is the only caller that can make either call. The same
-host has to be told whose forwarded address to trust (`KnownProxies`): with the list
-empty Jellyfin ignores `X-Forwarded-For` and every request through the Gateway counts
-as local, and a local caller reaches the endpoints Jellyfin answers without a
-credential. `init` reads the cluster's pod network from its Nodes' `podCIDR`s and
-records it in the grant, and the chart writes it into `network.xml` before the app
-starts -- the app builds its forwarded-header handling once, at startup, so a value
-written through the API afterwards would not take -- so the range is a fact about the
-cluster rather than a guess in a file.
+The pod's second init container owns `network.xml`'s bind address, and runs after the
+wizard on *every* start. The wizard leaves `LocalNetworkAddresses=127.0.0.1` behind --
+that is what keeps the server it starts off the pod network -- and a restore in the
+wizard could not be trusted with it, because a trap does not run on `SIGKILL` (an OOM
+kill, an eviction, a reboot, a pod deleted past its grace period), and the start after
+that one never runs the wizard again: `system.xml` says the wizard is complete, so
+nothing would put the file back and the app would bind loopback, unreachable and never
+Ready, for good. So the second container writes that element empty (every interface,
+the only value that leaves the app reachable from outside its pod; the NetworkPolicy is
+the gate) and edits nothing else, on every start. It is also the container that clears
+a proxy list the values no longer justify, and it runs whether or not the box names
+proxies at all.
+
+The person's password is the one app credential box shows, once, on the run that
+made it: the chart generates it into the release Secret and box reads it back after
+that apply, so no values file and no later run carries it. The release Secret is its
+only copy, so a person who changes it in the app breaks nothing and a re-run never
+resets it. A migrated server keeps the accounts it had -- the database rewriter
+renames nothing -- and box's automation account is added beside them; when the
+source's own administrator password is not one box holds, the receipt names the
+accounts it found rather than renaming or resetting one. When box holds no password
+that opens the server at all -- the normal state of a server it did not create -- the
+receipt says so as one `pending` login line naming the account to give the Secret's
+password to, the steps that need a session are `skipped` with the same sentence, and
+the Job carries on to every other app: nothing about a Jellyfin password is a reason
+to leave a box's Arrs unwired. A server that is unreachable or answers 5xx is still a
+failed step.
+
+That same host has to be told whose forwarded address to trust (`KnownProxies`): with
+the list empty Jellyfin ignores `X-Forwarded-For` and every request through the
+Gateway counts as local, and a local caller reaches the endpoints Jellyfin answers
+without a credential. `init` reads the cluster's pod network from its Nodes'
+`podCIDR`s and records it in the grant, and the chart writes it into `network.xml`
+before every app start -- the app builds its forwarded-header handling once, at
+startup, so a value written through the API afterwards would not take -- so the range
+is a fact about the cluster rather than a guess in a file. It is the same container
+that owns the bind address, and it writes the list even when the box names none: the
+app saves the file whole, so an earlier values file's list would otherwise outlive it.
 
 Seerr stays on Plex: nothing in this release wires a Jellyfin server to it, so a box
 that runs both has one media server per requester rather than a shared library.

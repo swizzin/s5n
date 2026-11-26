@@ -1197,9 +1197,9 @@ for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}" "jellyfi
   http_listener=$($K -n s5n-gateway get gateway s5n \
     -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
   route_host=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.hostnames[0]}' || true)
-  # The last rule is the app's own catch-all: Jellyfin's route also carries the
-  # two prefixes that are never served (its first-run endpoints), and every
-  # other app's route is one rule.
+  # Every app's route is one catch-all rule on its own host: Jellyfin's
+  # first-run window is closed inside its pod, so its route carries no rule the
+  # others do not.
   route_path=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.rules[-1:].matches[0].path.value}' || true)
   echo "  ${host}: route ${route_host}${route_path}, listener https-${label} -> ${listener}, http-${label} on ${http_listener}"
   [ "$route_host" = "$host" ] || { echo "the ${app} route is on ${route_host}, want its own host"; fail=1; }
@@ -1266,22 +1266,43 @@ done
 
 # ---- Jellyfin: its own accounts, a closed first-run window, real addresses ---
 # Jellyfin keeps its accounts, its API keys and its library paths in
-# data/jellyfin.db, so nothing can seed it before it starts: the wiring Job
-# completes its first-run wizard and every later run signs in as an account of
-# its own. The two passwords are the release Secret's, and the person's is the
-# one box made and showed once.
+# data/jellyfin.db, so nothing can seed it before it starts: the chart's
+# startup-wizard init container completes the first-run wizard inside the pod,
+# on localhost only, before the app container starts. The two passwords are the
+# release Secret's, and the person's is the one box made and showed once.
 jf_user_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-user-password}' | base64 -d || true)
 jf_box_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-box-password}' | base64 -d || true)
-[ -n "$jf_user_pw" ] || { echo "the release Secret has no jellyfin-user-password: the Job had no account to make"; fail=1; }
+[ -n "$jf_user_pw" ] || { echo "the release Secret has no jellyfin-user-password: the chart did not make one"; fail=1; }
 [ -n "$jf_box_pw" ] || { echo "the release Secret has no jellyfin-box-password"; fail=1; }
 
+# The init container is what completed the wizard, and the proof is its own
+# record: it ran to success, it bound the server it started to loopback, and the
+# app container never had the person's password mounted.
+jf_init_exit=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.status.initContainerStatuses[?(@.name=="startup-wizard")].state.terminated.exitCode}' || true)
+echo "startup-wizard init container exit: ${jf_init_exit}"
+[ "$jf_init_exit" = 0 ] || { echo "the wizard's init container did not succeed (${jf_init_exit}): the app should not be serving"; fail=1; }
+jf_init_log=$($K -n "$NS" logs jellyfin-0 -c startup-wizard 2>/dev/null || true)
+printf '%s\n' "$jf_init_log" | grep -q 'startup wizard: complete' ||
+  { echo "the init container has no 'startup wizard: complete' line: the wizard was not closed in the pod"; fail=1; }
+printf '%s\n' "$jf_init_log" | grep -q 'Kestrel is listening on 127.0.0.1' ||
+  { echo "the init container's server did not bind loopback: a pod-network peer could have reached the open wizard"; fail=1; }
+jf_main_mounts=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{range .spec.containers[?(@.name=="jellyfin")]}{range .volumeMounts[*]}{.name}{"\n"}{end}{end}' || true)
+if printf '%s\n' "$jf_main_mounts" | grep -qxF keys; then
+  echo "the app container mounts the person's Jellyfin password"
+  fail=1
+fi
+jf_init_mounts=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{range .spec.initContainers[?(@.name=="startup-wizard")]}{range .volumeMounts[*]}{.name}{"\n"}{end}{end}' || true)
+printf '%s\n' "$jf_init_mounts" | grep -qxF keys ||
+  { echo "the wizard's init container does not mount the person's password"; fail=1; }
+
 # The host serves the app from its own root, and its public info is both the
-# readiness probe and the wizard's own answer.
+# readiness probe and the wizard's own answer. This is the first request this
+# run makes to the host, and the wizard is already complete.
 code=$(host_get "$JELLYFIN_HOST" /System/Info/Public "$WORK/jf-info.json")
 echo "GET https://${JELLYFIN_HOST}/System/Info/Public -> ${code}"
 [ "$code" = 200 ] || fail=1
 grep -q '"StartupWizardCompleted":true' "$WORK/jf-info.json" ||
-  { echo "Jellyfin reports the wizard incomplete: the wiring Job did not finish it"; fail=1; }
+  { echo "Jellyfin reports the wizard incomplete: the init container did not finish it"; fail=1; }
 code=$(curl -sS -L --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
   -o "$WORK/jellyfin.html" -w '%{http_code}' "https://${JELLYFIN_HOST}/" || true)
 echo "GET https://${JELLYFIN_HOST}/ -> ${code}"
@@ -1329,24 +1350,29 @@ PYKEY
 )
 [ -n "$jf_key" ] || { echo "the s5n key has no token"; fail=1; }
 
-# The libraries, one per Arr instance over the Arrs' own directories. This is
-# the one assertion that cannot go through the Gateway: /Library/VirtualFolders
-# is a prefix the chart deliberately does not serve (a fresh server answers it
-# anonymously, and this host has no login in front of it), so the call is made
-# the way the Job makes it -- on the pod's own port, through a port-forward,
-# which is also where an API key belongs.
-port_forward jellyfin-0 8096 || fail=1
-: >"$WORK/jf-libs.json"
-curl -sS --max-time 30 -H "Authorization: ${jf_client}, Token=\"${jf_key}\"" \
-  -o "$WORK/jf-libs.json" -w '%{http_code}' "http://127.0.0.1:${PF_PORT}/Library/VirtualFolders" >"$WORK/jf-libs.code" || true
-port_forward_stop
-echo "GET /Library/VirtualFolders as the s5n key -> $(cat "$WORK/jf-libs.code")"
-[ "$(cat "$WORK/jf-libs.code")" = 200 ] ||
-  { echo "the box key could not list the libraries: $(cat "$WORK/jf-libs.code")"; fail=1; }
+# The libraries, one per Arr instance over the Arrs' own directories. The person
+# is the server's administrator, so the endpoint they manage libraries with is
+# served to them through the Gateway -- that is the thing the old edge rule took
+# away, and it must answer 200 today.
+jf_libs_code=$(jf_api "$jf_user_token" -o "$WORK/jf-libs.json" -w '%{http_code}' \
+  "https://${JELLYFIN_HOST}/Library/VirtualFolders" || true)
+echo "GET /Library/VirtualFolders as ${APP_LOGIN} -> ${jf_libs_code}"
+[ "$jf_libs_code" = 200 ] ||
+  { echo "the person cannot manage their own libraries: /Library/VirtualFolders answered ${jf_libs_code}"; fail=1; }
 for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
   grep -q "\"${dir}\"" "$WORK/jf-libs.json" ||
     { echo "Jellyfin has no library over ${dir}: the Job's library step did not run"; fail=1; }
 done
+# And the box's own key lists them too: the same call, made where an API key
+# belongs rather than a session.
+port_forward jellyfin-0 8096 || fail=1
+: >"$WORK/jf-key-libs.json"
+curl -sS --max-time 30 -H "Authorization: ${jf_client}, Token=\"${jf_key}\"" \
+  -o "$WORK/jf-key-libs.json" -w '%{http_code}' "http://127.0.0.1:${PF_PORT}/Library/VirtualFolders" >"$WORK/jf-key-libs.code" || true
+port_forward_stop
+echo "GET /Library/VirtualFolders as the s5n key -> $(cat "$WORK/jf-key-libs.code")"
+[ "$(cat "$WORK/jf-key-libs.code")" = 200 ] ||
+  { echo "the box key could not list the libraries: $(cat "$WORK/jf-key-libs.code")"; fail=1; }
 
 # KnownProxies. Through the Gateway the app's peer is the proxy's *pod*, whose
 # address is in the cluster's pod network, so a server that trusts nothing
@@ -1393,85 +1419,102 @@ if any(addr in net for net in trusted):
 print("  KnownProxies: %s; the client it recorded: %s (outside them)" % (", ".join(proxies), remote))
 PYNET
 
-# The first-run window, last because it moves the server's own setting. Until
-# the wizard is complete Jellyfin answers anyone on the endpoints that create
-# its first user, and this host deliberately has no edge login in front of it
-# (players sign in themselves), so those responses are the app's whole first
-# account. The chart serves those prefixes from the app's own page instead, and
-# the Job -- inside the cluster -- is the only caller that can reach them.
-#
-# The flag is an administrator's setting, which is what makes the window
-# testable while it is open: reopen it, try to claim the server from the host,
-# and close it again.
-jf_wizard() { # jf_wizard <token> <true|false>: set the wizard flag, then report what the app serves
-  local token=$1 want=$2 i
-  jf_api "$token" "https://${JELLYFIN_HOST}/System/Configuration" >"$WORK/jf-config.json" || true
-  python3 - "$WORK/jf-config.json" "$WORK/jf-config-next.json" "$want" <<'PYEOF'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-doc["IsStartupWizardCompleted"] = sys.argv[3] == "true"
-json.dump(doc, open(sys.argv[2], "w"))
-PYEOF
-  jf_api "$token" -H 'Content-Type: application/json' -X POST \
-    --data-binary "@$WORK/jf-config-next.json" "https://${JELLYFIN_HOST}/System/Configuration" >/dev/null || true
-  # The app serves the flag it has written; it is read a few times rather than
-  # once, because a request that lands in the moment the file is being replaced
-  # can still see the old value.
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    host_get "$JELLYFIN_HOST" /System/Info/Public "$WORK/jf-info.json" >/dev/null
-    grep -q "\"StartupWizardCompleted\":${want}" "$WORK/jf-info.json" && return 0
-    sleep 1
-  done
-  return 1
-}
-
-jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
-if jf_wizard "$jf_user_token" false; then
-  echo "the wizard's window is open"
-  # None of the anonymous-until-wizard endpoints may be served from outside: the
-  # claim is a redirect to the app's own page, never the 204 that naming the
-  # first user answers.
-  : >"$WORK/jf-startup-headers"
+# The first-run window, as an outsider sees it now: the server is past its
+# wizard, and every call that was anonymous during it is the app's own refusal.
+# The spellings matter because Gateway API path matching is case-sensitive and
+# ASP.NET's routing is not: a rule that named /Startup would not have been a
+# closure, and this is the check that no rule is doing the job.
+for spelling in /Startup/User /startup/user /STARTUP/USER; do
   code=$(curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
-    -H "Authorization: ${jf_client}" \
-    -d '{"Name":"intruder","Password":"intruder-password"}' \
-    -D "$WORK/jf-startup-headers" -o "$WORK/jf-startup-body" -w '%{http_code}' \
+    -d '{"Name":"intruder","Password":"intruder-password"}' -o /dev/null -w '%{http_code}' \
     --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-    "https://${JELLYFIN_HOST}/Startup/User" || true)
-  echo "POST https://${JELLYFIN_HOST}/Startup/User while the wizard is open -> ${code} (want a redirect, never 204)"
+    "https://${JELLYFIN_HOST}${spelling}" || true)
+  echo "POST https://${JELLYFIN_HOST}${spelling} from outside -> ${code} (want 401/403)"
   case "$code" in
-    2*) echo "an outsider's /Startup/User was served (${code}): the first-run window is reachable"; fail=1 ;;
+    401|403) ;;
+    *) echo "an outsider's ${spelling} was not refused by Jellyfin (${code})"; fail=1 ;;
   esac
-  loc=$(sed -n 's/^[Ll]ocation: *//p' "$WORK/jf-startup-headers" | tr -d '\r' | head -1)
-  case "$loc" in
-    "/"|"https://${JELLYFIN_HOST}/"|"http://${JELLYFIN_HOST}/") ;;
-    *) echo "/Startup/User answered ${code} with location '${loc}', want the app's own page"; fail=1 ;;
-  esac
-  code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-    -H "Authorization: ${jf_client}" \
-    --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-    "https://${JELLYFIN_HOST}/Library/VirtualFolders" || true)
-  echo "GET https://${JELLYFIN_HOST}/Library/VirtualFolders while the wizard is open -> ${code} (want a redirect)"
-  case "$code" in
-    2*) echo "anonymous /Library/VirtualFolders was served (${code})"; fail=1 ;;
-  esac
-  # And the attempt did not land: that name has no account, and the person's
-  # still signs in.
-  [ -z "$(jf_signin intruder intruder-password)" ] ||
-    { echo "an outsider claimed Jellyfin: /Startup/User created an account"; fail=1; }
-  [ -n "$(jf_signin "$APP_LOGIN" "$jf_user_pw")" ] ||
-    { echo "the person cannot sign in to Jellyfin after the claim attempt"; fail=1; }
-  # Close it again: a later run's Job would do it on the next apply, and the
-  # second upgrade below must not have to.
-  jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
-  if jf_wizard "$jf_user_token" true; then
-    echo "the wizard's window is closed again"
-  else
-    echo "the wizard did not move back to complete: $(cat "$WORK/jf-info.json")"; fail=1
-  fi
-else
-  echo "the wizard did not move to open, so the window was not tested: $(cat "$WORK/jf-info.json")"; fail=1
-fi
+done
+code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+  --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+  "https://${JELLYFIN_HOST}/Environment/Drives" || true)
+echo "GET https://${JELLYFIN_HOST}/Environment/Drives unauthenticated -> ${code} (want 401/403)"
+case "$code" in
+  401|403) ;;
+  *) echo "an outsider browsed the server's filesystem (/Environment/Drives answered ${code})"; fail=1 ;;
+esac
+[ -z "$(jf_signin intruder intruder-password)" ] ||
+  { echo "an outsider claimed Jellyfin: /Startup/User created a sign-in"; fail=1; }
+[ -n "$(jf_signin "$APP_LOGIN" "$jf_user_pw")" ] ||
+  { echo "the person cannot sign in to Jellyfin after the claim attempt"; fail=1; }
+
+# ---- Jellyfin: a start that repairs a killed wizard's loopback --------------
+# The wizard binds the server it starts to the loopback by writing
+# LocalNetworkAddresses=127.0.0.1 into the app's own network.xml, and a trap does
+# not run on SIGKILL: an OOM kill, an eviction, a reboot or a pod deleted past its
+# grace period leaves the value in the file. The next start is the one that
+# matters, and it is also the one that never runs the wizard again -- system.xml
+# already says the wizard is complete, so a pod that restored the file from a
+# backup has nothing to restore it with and the app binds loopback, unreachable
+# and never Ready, for good. So the pod is put in exactly that state and
+# restarted here: a complete system.xml, and a network.xml naming 127.0.0.1. The
+# chart's network-config container owns that element on every start and must put
+# it back.
+jf_net=/srv/s5n/config/jellyfin/config/network.xml
+jf_before=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.metadata.uid}')
+docker exec "${CLUSTER}-control-plane" bash -c '
+  set -eu
+  net="$1"
+  sys=/srv/s5n/config/jellyfin/config/system.xml
+  test -f "$net" || { echo "no ${net}: the app saved no network.xml"; exit 1; }
+  grep -q "<IsStartupWizardCompleted>true<" "$sys" ||
+    { echo "system.xml does not say the wizard is complete"; exit 1; }
+  sed -i "s|<LocalNetworkAddresses */>|<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>|" "$net"
+  # An element the app wrote across several lines is collapsed the same way, so
+  # the file this seeds is the loopback in either of the spellings the wizard
+  # leaves behind.
+  awk "
+    /<LocalNetworkAddresses>/ && !/<\/LocalNetworkAddresses>/ {
+      print \"  <LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>\"; skip = 1; next
+    }
+    skip && /<\/LocalNetworkAddresses>/ { skip = 0; next }
+    skip { next }
+    { print }
+  " "$net" >"$net.new" && mv "$net.new" "$net"
+  chown 1000:1000 "$net"
+  chmod 0644 "$net"
+  grep -q "<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>" "$net" ||
+    { echo "the seeded network.xml does not name the loopback"; exit 1; }
+  echo "  seeded network.xml: $(grep -o "<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>" "$net")"' _ "$jf_net" ||
+  fail=1
+$K -n "$NS" delete pod jellyfin-0 --wait=true --timeout=180s >/dev/null
+$K -n "$NS" wait --for=condition=Ready pod/jellyfin-0 --timeout=300s >/dev/null ||
+  { echo "jellyfin-0 did not come back Ready after the seeded loopback: the app is bound where nothing can reach it"; fail=1; }
+jf_after=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.metadata.uid}')
+[ -n "$jf_after" ] && [ "$jf_after" != "$jf_before" ] ||
+  { echo "jellyfin-0 was not replaced: the restart this check needs did not happen"; fail=1; }
+jf_wiz_again=$($K -n "$NS" logs jellyfin-0 -c startup-wizard 2>/dev/null || true)
+printf '%s\n' "$jf_wiz_again" | grep -q 'startup wizard: already complete' ||
+  { echo "the restarted pod did not skip a complete wizard"; fail=1; }
+jf_net_exit=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.status.initContainerStatuses[?(@.name=="network-config")].state.terminated.exitCode}' || true)
+jf_net_log=$($K -n "$NS" logs jellyfin-0 -c network-config 2>/dev/null || true)
+echo "network-config on the restart: exit ${jf_net_exit}, $(printf '%s\n' "$jf_net_log" | grep -m1 'jellyfin-config:' || true)"
+[ "$jf_net_exit" = 0 ] || { echo "network-config did not succeed on the restart (${jf_net_exit}): the bind address is not cleared"; fail=1; }
+printf '%s\n' "$jf_net_log" | grep -q 'binds every interface' ||
+  { echo "network-config did not clear the bind address on the restart"; fail=1; }
+jf_live_net=$(docker exec "${CLUSTER}-control-plane" grep -o '<LocalNetworkAddresses[^>]*>' "$jf_net" | head -1 || true)
+echo "network.xml after the restart: ${jf_live_net}"
+case "$jf_live_net" in
+  *127.0.0.1*) echo "the app's network.xml still binds the loopback: nothing outside the pod can reach it"; fail=1 ;;
+esac
+# And the app answers where the person reaches it, with its own data intact.
+code=$(host_get "$JELLYFIN_HOST" /System/Info/Public "$WORK/jf-info-restart.json")
+echo "GET https://${JELLYFIN_HOST}/System/Info/Public after the restart -> ${code}"
+[ "$code" = 200 ] || { echo "Jellyfin did not come back through the Gateway after a killed wizard's loopback (${code})"; fail=1; }
+grep -q '"StartupWizardCompleted":true' "$WORK/jf-info-restart.json" ||
+  { echo "the restarted server does not report its wizard complete"; fail=1; }
+[ -n "$(jf_signin "$APP_LOGIN" "$jf_user_pw")" ] ||
+  { echo "the person cannot sign in after the restart: the repaired start is not the same server"; fail=1; }
 
 # ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
 # The app is served from its own host, and its own WebUI login is switched off:

@@ -3056,9 +3056,11 @@ PYPBH
   # redirect's. The renewal below observes the solver route while it exists.
 
   # ---- Jellyfin: its own accounts and a closed first-run window -------------
-  # The app keeps its accounts in its database, so the wiring Job completes its
-  # first-run wizard and box makes the person's password and shows it once: the
-  # line below is that once, and the release Secret is the only copy.
+  # The app keeps its accounts in its database, so the chart's startup-wizard
+  # init container completes its first-run wizard inside the pod, on localhost,
+  # before the app container starts. box makes the person's password, the chart
+  # keeps it in the release Secret and box shows it once: the line below is that
+  # once, and the Secret is the only copy.
   log "Jellyfin: the person's account, the Job's account, and no window in front"
   jf_user_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-user-password}' | base64 -d || true)
   jf_box_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-box-password}' | base64 -d || true)
@@ -3069,13 +3071,30 @@ PYPBH
   grep -qF "sign in to Jellyfin as ${LOGIN}" "$WORK/bootstrap1.txt" ||
     { echo "the shown password does not name the account it belongs to (${LOGIN})"; fail=1; }
 
+  # The init container is what completed the wizard, and the proof is its own
+  # record: it succeeded, it bound its server to loopback, and the app container
+  # never had the person's password mounted.
+  jf_init_exit=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.status.initContainerStatuses[?(@.name=="startup-wizard")].state.terminated.exitCode}' || true)
+  echo "  startup-wizard init container exit: ${jf_init_exit}"
+  [ "$jf_init_exit" = 0 ] || { echo "the wizard's init container did not succeed (${jf_init_exit})"; fail=1; }
+  jf_init_log=$($K -n "$NS" logs jellyfin-0 -c startup-wizard 2>/dev/null || true)
+  printf '%s\n' "$jf_init_log" | grep -q 'startup wizard: complete' ||
+    { echo "the init container has no 'startup wizard: complete' line"; fail=1; }
+  printf '%s\n' "$jf_init_log" | grep -q 'Kestrel is listening on 127.0.0.1' ||
+    { echo "the init container's server did not bind loopback"; fail=1; }
+  jf_main_mounts=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{range .spec.containers[?(@.name=="jellyfin")]}{range .volumeMounts[*]}{.name}{"\n"}{end}{end}' || true)
+  if printf '%s\n' "$jf_main_mounts" | grep -qxF keys; then
+    echo "the app container mounts the person's Jellyfin password"
+    fail=1
+  fi
+
   jf_code=$(curl -sS -o "$WORK/jf-info.json" -w '%{http_code}' \
     --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${JELLYFIN_HOST}/System/Info/Public" 2>/dev/null || true)
   echo "  GET https://${JELLYFIN_HOST}/System/Info/Public: ${jf_code}"
   [ "$jf_code" = 200 ] || fail=1
   grep -q '"StartupWizardCompleted":true' "$WORK/jf-info.json" ||
-    { echo "Jellyfin reports the wizard incomplete: the Job did not finish it"; fail=1; }
+    { echo "Jellyfin reports the wizard incomplete: the init container did not finish it"; fail=1; }
   jf_ui=$(curl -sS -L -o "$WORK/jellyfin.html" -w '%{http_code}' \
     --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${JELLYFIN_HOST}/" 2>/dev/null || true)
@@ -3104,11 +3123,7 @@ except Exception: print("")' || true
       -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\", Token=\"${token}\"" "$@"
   }
   # The libraries the Job created, from the receipt it published: one per Arr
-  # instance, over the directories the Arrs write. The live API is not asked
-  # through the host on purpose -- /Library/VirtualFolders is a prefix the chart
-  # never serves there (a fresh server answers it anonymously) -- and the
-  # receipt is the Job's own record of the same work. The kind e2e reads the API
-  # on the pod's port, where the box's key belongs.
+  # instance, over the directories the Arrs write.
   jf_status=$($K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.status\.json}' 2>/dev/null || true)
   echo "$jf_status" >"$WORK/jf-status.json"
   # The receipt is code the Job wrote, so a read that cannot parse is one line
@@ -3127,24 +3142,55 @@ if missing:
     print("  the receipt has no ok row for %s: the Job built no library for them" % ", ".join(missing))
     sys.exit(1)
 PYLIBS
+  # The person is the server's administrator, so the endpoint they manage
+  # libraries with answers them through the Gateway -- the thing an edge rule
+  # took away. The box's key lists the same libraries beside it.
+  jf_libs_code=$(jf_api "$jf_user_token" -o "$WORK/jf-libs.json" -w '%{http_code}' \
+    "https://${JELLYFIN_HOST}/Library/VirtualFolders" || true)
+  echo "  GET /Library/VirtualFolders as ${LOGIN}: ${jf_libs_code}"
+  [ "$jf_libs_code" = 200 ] ||
+    { echo "the person cannot manage their own libraries: ${jf_libs_code}"; fail=1; }
+  # This scenario runs the plain Arr pair and Lidarr, not the 4K instances, so
+  # the libraries are those three trees.
+  for dir in /data/media/movies /data/media/tv /data/media/music; do
+    grep -q "\"${dir}\"" "$WORK/jf-libs.json" ||
+      { echo "Jellyfin has no library over ${dir}"; fail=1; }
+  done
   jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
   grep -q '"AppName":"s5n"' "$WORK/jf-keys.json" ||
     { echo "the Job minted no API key named s5n"; fail=1; }
-  # The window: this host has no edge login in front of it (players sign in
-  # themselves), so the anonymous-until-wizard endpoints must never be served
-  # from the Gateway at all.
-  : >"$WORK/jf-startup-headers"
-  jf_startup=$(curl -sS -X POST -H 'Content-Type: application/json' \
-    -d '{"Name":"intruder","Password":"intruder-password"}' \
-    -D "$WORK/jf-startup-headers" -o /dev/null -w '%{http_code}' \
+  # The window, as an outsider sees it: the server is past its wizard, every
+  # call that was anonymous during it is the app's own refusal, and the
+  # spellings matter because Gateway API path matching is case-sensitive and
+  # ASP.NET's routing is not.
+  for spelling in /Startup/User /startup/user /STARTUP/USER; do
+    jf_startup=$(curl -sS -X POST -H 'Content-Type: application/json' \
+      -d '{"Name":"intruder","Password":"intruder-password"}' \
+      -o /dev/null -w '%{http_code}' \
+      --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${JELLYFIN_HOST}${spelling}" 2>/dev/null || true)
+    echo "  POST https://${JELLYFIN_HOST}${spelling} from outside: ${jf_startup} (want 401/403)"
+    case "$jf_startup" in
+      401|403) ;;
+      *) echo "an outsider's ${spelling} was not refused by Jellyfin (${jf_startup})"; fail=1 ;;
+    esac
+  done
+  jf_drives=$(curl -sS -o /dev/null -w '%{http_code}' \
     --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
-    "https://${JELLYFIN_HOST}/Startup/User" 2>/dev/null || true)
-  echo "  POST https://${JELLYFIN_HOST}/Startup/User from outside: ${jf_startup} (want a redirect)"
-  case "$jf_startup" in
-    2*) echo "an outsider's /Startup/User was served (${jf_startup})"; fail=1 ;;
+    "https://${JELLYFIN_HOST}/Environment/Drives" 2>/dev/null || true)
+  echo "  GET https://${JELLYFIN_HOST}/Environment/Drives unauthenticated: ${jf_drives} (want 401/403)"
+  case "$jf_drives" in
+    401|403) ;;
+    *) echo "an outsider browsed the server's filesystem (${jf_drives})"; fail=1 ;;
   esac
   [ -z "$(jf_token intruder intruder-password)" ] ||
     { echo "an outsider claimed Jellyfin through the Gateway"; fail=1; }
+  # A new sign-in for the same device replaces the session token, so the token
+  # the forwarded-address check below uses is the one this sign-in made.
+  jf_user_token=$(jf_token "$LOGIN" "$jf_user_pw")
+  [ -n "$jf_user_token" ] ||
+    { echo "the person cannot sign in after the claim attempt"; fail=1; }
+
   # The forwarded address. Through the Gateway the peer is the proxy's pod, so
   # an app that trusts nothing records that pod's address as the client and
   # reads every request as its own network -- and the endpoints Jellyfin answers
