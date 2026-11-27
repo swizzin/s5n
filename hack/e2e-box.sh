@@ -156,7 +156,7 @@ take_slot() {
   done
 }
 
-ALL_SCENARIOS=(fresh preinstalled foreign-gateway update upgrade migrate migrate-keep)
+ALL_SCENARIOS=(fresh jellyfin preinstalled foreign-gateway update upgrade migrate migrate-keep)
 
 # ---- all: build once, then the scenarios at once ------------------------------
 # The seven scenarios are separate processes, each with its own work directory, cluster,
@@ -233,6 +233,7 @@ fi
 
 case "$SCENARIO" in
   fresh) CLUSTER=s5n-box; DOMAIN=box.example.test ;;
+  jellyfin) CLUSTER=s5n-jf; DOMAIN=jf.example.test ;;
   preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
   update) CLUSTER=s5n-box-update; DOMAIN=box.update.example.test ;;
@@ -548,6 +549,9 @@ fi
 # the whole catalog in front of it; the one step that proves a box with nothing
 # on sets it to `none`, the word for the empty list.
 APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,filebrowser,prowlarr,plex,tautulli,seerr,jellyfin,qui,autobrr,maintainerr,pbh"
+# The jellyfin scenario is the one box that runs no Plex: its request page is then the
+# Jellyfin-mode Seerr, which is what it exists to prove.
+[ "$SCENARIO" = jellyfin ] && APPS="qbittorrent,sonarr,radarr,prowlarr,jellyfin,seerr"
 
 # box_bootstrap_args <extra...>: what every bootstrap here passes, without the flag
 # that decides whether it asks. --record points the cluster decision at this work
@@ -4189,6 +4193,148 @@ EOF
     sleep 2
   done
   MANUAL_POOL=$pool
+}
+
+# ---- scenario: jellyfin ------------------------------------------------------
+# A box whose one media server is Jellyfin, not Plex. Seerr talks to exactly one server,
+# so this release's request page is the Jellyfin-mode one: its owner is the person's own
+# Jellyfin account -- which the Job signs in itself, because the password is in the
+# release Secret -- and the libraries the release made on the server are the ones it can
+# be asked for. What this asserts is the whole chain: the Job's setup, and the person
+# signing in to Seerr afterwards and seeing those libraries.
+jellyfin_box() {
+  UNIT_ARGS=(--unit-dir "$WORK/units")
+
+  # Nothing here resolves on this machine, so root decides on a self-signed certificate:
+  # the anchor it writes into the namespace is what the curls below trust. --yes answers
+  # the install's one question, so no terminal is needed.
+  log "box bootstrap: the platform layer, then a Jellyfin-only seedbox"
+  if bootstrap "$WORK/bootstrap1.txt"; then
+    cat "$WORK/bootstrap1.txt"
+  else
+    cat "$WORK/bootstrap1.txt"; fail=1; return 0
+  fi
+  has_receipt "$WORK/bootstrap1.txt" ||
+    { echo "the install printed no wiring receipt row"; fail=1; }
+  apps_ready jellyfin "after the install"
+
+  # The Job's entry for Seerr names the server this release runs, and the address people
+  # reach it at: Seerr stores it and builds its own links from it.
+  $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.wiring\.json}' >"$WORK/wiring.json" ||
+    { echo "the release published no wiring config"; fail=1; return 0; }
+  python3 - "$WORK/wiring.json" "${JELLYFIN_HOST}" <<'PY' || fail=1
+import json, sys
+seerr = json.load(open(sys.argv[1], encoding="utf-8"))["seerr"]
+problems = []
+if seerr.get("mediaServer") != "jellyfin":
+    problems.append(f"the Job's Seerr entry is a {seerr.get('mediaServer')!r} one")
+if seerr.get("mediaServerUrl") != f"https://{sys.argv[2]}":
+    problems.append(f"it names {seerr.get('mediaServerUrl')!r} as the server's address, want https://{sys.argv[2]}")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PY
+
+  # The Job's own rows: the sign-in that made the person's account the owner, the
+  # libraries it switched on, the server's address, and the initialize.
+  for row in seerr/ready seerr/login seerr/libraries seerr/media-server seerr/initialize; do
+    result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='${row}'][0]" 2>/dev/null || true)
+    echo "  receipt: ${row} ${result:-missing}"
+    [ "$result" = ok ] || { echo "the receipt's ${row} is ${result:-missing}, want ok"; fail=1; }
+  done
+  # A Plex-mode row would mean the Job treated this box as the other server's.
+  if plex_row=$(status_field "[s['result'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null); then
+    echo "a Jellyfin-only box printed a Plex-mode Seerr row (${plex_row})"
+    fail=1
+  fi
+
+  # ---- the person signs in to Seerr -----------------------------------------
+  jf_user_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-user-password}' | base64 -d || true)
+  [ -n "$jf_user_pw" ] || { echo "the release Secret has no jellyfin-user-password"; fail=1; return 0; }
+  anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  [ -n "$anchor" ] || { echo "a self-signed box wrote no s5n-host-ca for this namespace"; fail=1; return 0; }
+  printf '%s' "$anchor" >"$WORK/anchor.pem"
+  gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}') ||
+    { echo "the Gateway has no address to ask Seerr at"; fail=1; return 0; }
+
+  # Seerr's public settings say what this instance is: set up, against Jellyfin.
+  curl -sS --max-time 30 -o "$WORK/seerr-public.json" \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    "https://${SEERR_HOST}/api/v1/settings/public" 2>/dev/null || true
+  python3 - "$WORK/seerr-public.json" <<'PY' || fail=1
+import json, sys
+try:
+    public = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    sys.exit(f"Seerr's public settings could not be read: {exc}")
+problems = []
+if public.get("initialized") is not True:
+    problems.append("the instance is not initialized")
+# MediaServerType: JELLYFIN is 2 (server/constants/server.ts at v3.5.2).
+if public.get("mediaServerType") != 2:
+    problems.append(f"mediaServerType is {public.get('mediaServerType')!r}, want 2 (Jellyfin)")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PY
+
+  # The account box showed the person, on Seerr's own host, through the login the app's
+  # form makes: username and password, and the session it answers with.
+  python3 - "$LOGIN" "$jf_user_pw" >"$WORK/seerr-login.json" <<'PY'
+import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2], "email": sys.argv[1]}))
+PY
+  login_code=$(curl -sS --max-time 30 -o "$WORK/seerr-login-out.json" -c "$WORK/seerr-cookies" \
+    -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    -H 'Content-Type: application/json' --data-binary @"$WORK/seerr-login.json" \
+    "https://${SEERR_HOST}/api/v1/auth/jellyfin" 2>/dev/null || true)
+  echo "  POST https://${SEERR_HOST}/api/v1/auth/jellyfin as ${LOGIN}: ${login_code}"
+  [ "$login_code" = 200 ] ||
+    { echo "the person cannot sign in to Seerr with their own Jellyfin account: ${login_code}"; fail=1; }
+  # Seerr's first user is its owner: the account that signed in is user 1.
+  python3 - "$WORK/seerr-login-out.json" <<'PY' || fail=1
+import json, sys
+try:
+    user = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    sys.exit(f"the sign-in answered no user: {exc}")
+if user.get("id") != 1:
+    sys.exit(f"the account that signed in is user {user.get('id')!r}, want 1 (Seerr's owner)")
+PY
+
+  # And it sees the libraries the release made, switched on.
+  libs_code=$(curl -sS --max-time 30 -o "$WORK/seerr-libs.json" -b "$WORK/seerr-cookies" \
+    -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    "https://${SEERR_HOST}/api/v1/settings/jellyfin" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/api/v1/settings/jellyfin as ${LOGIN}: ${libs_code}"
+  [ "$libs_code" = 200 ] ||
+    { echo "the owner cannot read Seerr's media-server settings: ${libs_code}"; fail=1; }
+  python3 - "$WORK/seerr-libs.json" "${JELLYFIN_HOST}" <<'PY' || fail=1
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    sys.exit(f"Seerr's media-server settings could not be read: {exc}")
+enabled = sorted(lib["name"] for lib in row.get("libraries") or [] if lib.get("enabled"))
+problems = []
+if enabled != ["radarr", "sonarr"]:
+    problems.append(f"the libraries Seerr can be asked for are {enabled}, want the release's radarr and sonarr")
+if row.get("externalHostname") != f"https://{sys.argv[2]}":
+    problems.append(f"Seerr's external hostname is {row.get('externalHostname')!r}, want https://{sys.argv[2]}")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PY
+
+  # The page itself: a bundle that did not load is a request page nobody can use.
+  seerr_ui=$(curl -sS -L -o "$WORK/seerr.html" -w '%{http_code}' --max-time 30 \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/: ${seerr_ui}"
+  [ "$seerr_ui" = 200 ] && grep -qi '<!doctype html' "$WORK/seerr.html" ||
+    { echo "Seerr's host did not serve its UI: ${seerr_ui}"; fail=1; }
 }
 
 # ---- scenario: preinstalled --------------------------------------------------
@@ -10339,6 +10485,8 @@ no_dev_notice() {
 
 if [ "$SCENARIO" = fresh ]; then
   fresh
+elif [ "$SCENARIO" = jellyfin ]; then
+  jellyfin_box
 elif [ "$SCENARIO" = preinstalled ]; then
   preinstalled
 elif [ "$SCENARIO" = update ]; then
