@@ -63,6 +63,90 @@ func TestProbeTreatsAnUnresolvableNameAsClosed(t *testing.T) {
 	}
 }
 
+// TestProbeListenIsTheTargetHalfOfANetworkProof: the listener answers a dial and
+// keeps answering, because a proof's target outlives the client that dials it.
+func TestProbeListenIsTheTargetHalfOfANetworkProof(t *testing.T) {
+	port := freePort(t)
+	var out, errOut bytes.Buffer
+	done := make(chan int, 1)
+	go func() { done <- probeArgs([]string{"listen", "--port", port}, &out, &errOut) }()
+
+	var conn net.Conn
+	var err error
+	for i := 0; i < 200; i++ {
+		if conn, err = net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("dial the probe's listener: %v (stdout %q, stderr %q)", err, out.String(), errOut.String())
+	}
+	conn.Close()
+	// Still listening: a second dial opens too, which is what a --settle run needs.
+	again, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+	if err != nil {
+		t.Fatalf("second dial: %v", err)
+	}
+	again.Close()
+	select {
+	case code := <-done:
+		t.Fatalf("the listener exited %d, want it to keep listening (stdout %q, stderr %q)", code, out.String(), errOut.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestProbeListenRefusesWhatItCannotDo: no port is a refusal, and so is a port
+// something else holds.
+func TestProbeListenRefusesWhatItCannotDo(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		output string
+	}{
+		{"no port", []string{"listen"}, "no --port"},
+		{"bad port", []string{"listen", "--port", "0"}, "no --port"},
+		{"no such subcommand", []string{"listen-to"}, "usage: s5n probe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := probeArgs(tc.args, &out, &errOut); code != exitBroken {
+				t.Errorf("exit = %d, want %d (stdout %q, stderr %q)", code, exitBroken, out.String(), errOut.String())
+			}
+			if !strings.Contains(out.String()+errOut.String(), tc.output) {
+				t.Errorf("output = %q / %q, want it to contain %q", out.String(), errOut.String(), tc.output)
+			}
+		})
+	}
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer held.Close()
+	_, port, _ := net.SplitHostPort(held.Addr().String())
+	var out, errOut bytes.Buffer
+	if code := probeArgs([]string{"listen", "--port", port}, &out, &errOut); code != exitBroken {
+		t.Errorf("exit = %d, want %d: the port was taken (stdout %q, stderr %q)", code, exitBroken, out.String(), errOut.String())
+	}
+}
+
+// freePort is a port nothing holds, as a string: a listener is named then closed,
+// which the kernel does not hand out again inside the test.
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	ln.Close()
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	return port
+}
+
 func TestProbeSettleWaitsForThePolicyToLand(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

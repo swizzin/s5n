@@ -63,7 +63,7 @@ commands:
   bazarr-config    seed Bazarr's api key and URL base into config/config.yaml
   sabnzbd-config   seed SABnzbd's URL base, download paths and API key into sabnzbd.ini
   jellyfin-config  set the interfaces Jellyfin binds and the proxies it trusts in config/network.xml
-  probe            dial one address and report whether it opened, for box's lock proof
+  probe            dial an address and report whether it opened, or listen on a port, for box's network proofs
   version          print the build version
 `)
 	os.Exit(2)
