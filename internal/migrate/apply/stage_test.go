@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 func TestCopyTreePreservesWhatAnAppReads(t *testing.T) {
@@ -208,17 +210,28 @@ func TestCopyFileRefusesAFileSwappedAfterItsCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	c := &copier{dst: dst, src: src}
-	for _, swapped := range []string{link, other} {
-		into := filepath.Join(dst, filepath.Base(swapped))
-		if _, err := c.copyFile(into, swapped, info); err == nil {
+	c := &copier{src: openTree(t, src), dst: openTree(t, dst)}
+	for _, swapped := range []string{"link.conf", "other.conf"} {
+		if _, err := c.copyFile(filepath.Base(swapped), swapped, info); err == nil {
 			t.Fatalf("%s was copied in place of the file that was checked", swapped)
 		}
-		if _, err := os.Lstat(into); !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("%s was written: %v", into, err)
+		if _, err := os.Lstat(filepath.Join(dst, swapped)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("a copy of %s was written: %v", swapped, err)
 		}
 	}
-	if _, err := c.copyFile(filepath.Join(dst, "checked.conf"), checked, info); err != nil {
+	if _, err := c.copyFile("checked.conf", "checked.conf", info); err != nil {
 		t.Fatalf("the checked file itself: %v", err)
 	}
+}
+
+// openTree opens a directory as the copier does, for a test that drives one call
+// rather than a whole copy.
+func openTree(t *testing.T, dir string) *safefs.Tree {
+	t.Helper()
+	tree, err := safefs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tree.Close() })
+	return tree
 }

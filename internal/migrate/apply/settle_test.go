@@ -171,6 +171,9 @@ func (r *rehearsal) settleInput() SettleInput {
 func (r *rehearsal) snapshotConfigs() string {
 	r.t.Helper()
 	dir := filepath.Join(r.dir, "snapshot", "config")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		r.t.Fatal(err)
+	}
 	for app := range r.plan().Apps {
 		if _, err := copyTree(filepath.Join(dir, app), r.path(app), os.Geteuid(), os.Getegid()); err != nil {
 			r.t.Fatalf("copy %s into the snapshot: %v", app, err)
