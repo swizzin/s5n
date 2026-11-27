@@ -663,6 +663,9 @@ func runApply(ctx context.Context, args []string) {
 	}
 
 	opts.BoxValues = boxValues(kc)
+	// A cluster box did not install is proved to enforce NetworkPolicy once, here:
+	// no app is installed behind a policy the CNI ignores.
+	opts.NetworkProof = networkPolicyProof(kc, bootstrap.RecordPath, out)
 	// Per-host TLS writes a listener before the release moves, so no apply
 	// leaves an app host unreachable (docs/box.md).
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}

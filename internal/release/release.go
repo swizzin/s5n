@@ -320,6 +320,10 @@ type Options struct {
 	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
 	// Snapshots copies apps before their images move; only `box apply` sets it.
 	Snapshots Snapshotter
+	// NetworkProof proves the cluster's CNI enforces NetworkPolicy before any app
+	// exists. Nil means this cluster needs no proof, because box installed it or
+	// one run already proved it.
+	NetworkProof NetworkProof
 	// HostIssuers is init's per-host issuer, so a host just moved reaches the
 	// step even with tls.issuer empty. Nil decides from tls.issuer or DNS.
 	HostIssuers map[string]string
@@ -380,6 +384,13 @@ type Result struct {
 	Revision         int
 	Receipt          Receipt
 }
+
+// NetworkProof proves the cluster's CNI enforces NetworkPolicy. It runs after the
+// confirm and after the seedbox's namespace exists, because that namespace is
+// where its pods go, and before any app: a cluster that ignores policy must not
+// have one installed behind one. The chart and its rendered values are the
+// release's own, so the proof runs the image the release does.
+type NetworkProof func(ctx context.Context, namespace string, chart Chart, values map[string]any) error
 
 // Applier is `box apply`'s whole decision.
 type Applier struct {
@@ -745,6 +756,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		if err := reconcileLogin(); err != nil {
+			return res, err
+		}
+	}
+
+	// The cluster's policy enforcement is proved here: the namespace exists, no app
+	// does, and a refusal costs the namespace alone.
+	if opts.NetworkProof != nil {
+		if err := opts.NetworkProof(ctx, namespace, chart, values); err != nil {
 			return res, err
 		}
 	}

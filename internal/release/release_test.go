@@ -236,6 +236,8 @@ type fakes struct {
 	snaps *fakeSnapshots
 	// secret is the release Secret; nil for tests about something else.
 	secret SecretKeys
+	// netProof is the cluster's policy proof; nil means this cluster needs none.
+	netProof func(context.Context, string, Chart, map[string]any) error
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -322,6 +324,7 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	if f.secret != nil {
 		f.app.OpenSecret = func(string) (SecretKeys, error) { return f.secret, nil }
 	}
+	opts.NetworkProof = f.netProof
 	return f.app.Apply(context.Background(), opts)
 }
 
@@ -356,6 +359,83 @@ func copyFile(t *testing.T, from, to string) {
 	}
 	if err := os.WriteFile(to, data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestTheNetworkProofRunsBeforeAnyAppExists: the proof needs the namespace, and
+// nothing may be installed before it says the policies are enforced.
+func TestTheNetworkProofRunsBeforeAnyAppExists(t *testing.T) {
+	f := newFakes(t)
+	var gotNamespace string
+	var gotApps map[string]any
+	f.netProof = func(_ context.Context, namespace string, _ Chart, values map[string]any) error {
+		gotNamespace = namespace
+		gotApps, _ = values["apps"].(map[string]any)
+		f.events = append(f.events, "netproof")
+		return nil
+	}
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if gotNamespace != "testbox" {
+		t.Errorf("proof namespace = %q, want the release's own", gotNamespace)
+	}
+	if _, ok := gotApps["sonarr"]; !ok {
+		t.Errorf("proof values carry no app: %v", gotApps)
+	}
+	at := func(name string) int {
+		for i, e := range f.events {
+			if e == name {
+				return i
+			}
+		}
+		return -1
+	}
+	if at("netproof") < 0 {
+		t.Fatalf("the proof never ran: %v", f.events)
+	}
+	if at("netproof") < at("namespace") {
+		t.Errorf("the proof ran before the namespace it puts pods in: %v", f.events)
+	}
+	if at("netproof") > at("helm") {
+		t.Errorf("an app was installed before the proof: %v", f.events)
+	}
+}
+
+// TestAFailedNetworkProofInstallsNothing: a cluster whose CNI ignores policy gets
+// no apps, however much of the plan was already read.
+func TestAFailedNetworkProofInstallsNothing(t *testing.T) {
+	f := newFakes(t)
+	f.netProof = func(context.Context, string, Chart, map[string]any) error {
+		f.events = append(f.events, "netproof")
+		return errors.New("this cluster's network plugin does not enforce NetworkPolicy")
+	}
+	_, err := f.apply(t)
+	if err == nil || !strings.Contains(err.Error(), "does not enforce NetworkPolicy") {
+		t.Fatalf("apply = %v, want the proof's refusal", err)
+	}
+	if f.rel.upgrades != 0 {
+		t.Errorf("upgrades = %d, want none", f.rel.upgrades)
+	}
+	if len(f.store.applied) != 0 {
+		t.Errorf("wrote %v before the proof", f.store.applied)
+	}
+	if len(f.events) != 2 || f.events[1] != "netproof" {
+		t.Errorf("events = %v, want only the namespace and the refusal", f.events)
+	}
+}
+
+// TestNoNetworkProofWhenTheClusterNeedsNone: a k0s box, or one already proved, is
+// a release with no hook at all.
+func TestNoNetworkProofWhenTheClusterNeedsNone(t *testing.T) {
+	f := newFakes(t)
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	for _, e := range f.events {
+		if e == "netproof" {
+			t.Fatalf("a proof ran with no hook set: %v", f.events)
+		}
 	}
 }
 

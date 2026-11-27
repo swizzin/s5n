@@ -66,6 +66,47 @@ func TestRecordDoesNotWriteRetiredFeaturesKey(t *testing.T) {
 	}
 }
 
+// A proof of NetworkPolicy enforcement is the one thing about a cluster box
+// cannot re-read cheaply: it needs pods running, so the record carries it and a
+// re-run that finds it does not prove it again. Absent is "never proved", which
+// is every record written before the proof existed.
+func TestRecordCarriesTheNetworkPolicyProof(t *testing.T) {
+	in := &Record{
+		Source:              SourceExternal,
+		Kubeconfig:          "/home/example/.kube/config",
+		Distribution:        DistK3s,
+		Nodes:               1,
+		Platform:            DefaultPlatform(),
+		NetworkPolicyProved: true,
+	}
+	out, err := parseRecord(encodeRecord(in))
+	if err != nil {
+		t.Fatalf("parseRecord: %v", err)
+	}
+	if !out.NetworkPolicyProved {
+		t.Fatalf("the proof did not survive the round trip:\n%s", encodeRecord(in))
+	}
+	if !strings.Contains(string(encodeRecord(in)), "netpolProof: passed") {
+		t.Errorf("the record does not say how it was proved:\n%s", encodeRecord(in))
+	}
+
+	// A record without the line is one never proved, not a broken file.
+	unproved, err := parseRecord(encodeRecord(&Record{Source: SourceK0sManaged, Kubeconfig: K0sAdminConfig, Distribution: DistK0s, Nodes: 1, Platform: DefaultPlatform()}))
+	if err != nil {
+		t.Fatalf("parseRecord: %v", err)
+	}
+	if unproved.NetworkPolicyProved {
+		t.Error("a record with no proof line reads as proved")
+	}
+	if strings.Contains(string(encodeRecord(unproved)), "netpolProof") {
+		t.Errorf("a record with no proof writes the line:\n%s", encodeRecord(unproved))
+	}
+
+	if _, err := parseRecord([]byte(strings.Replace(string(encodeRecord(in)), "netpolProof: passed", "netpolProof: maybe", 1))); err == nil {
+		t.Error("parseRecord accepted a proof it does not know")
+	}
+}
+
 func TestParseRecordRejectsBadInput(t *testing.T) {
 	base := `source: external
 kubeconfig: "/home/example/.kube/config"

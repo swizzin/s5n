@@ -33,7 +33,15 @@ type Record struct {
 	// the cluster serves it: asking again could silently move a box's routes. It must
 	// still be Accepted and owned by Envoy Gateway's controller.
 	GatewayClass string
+	// NetworkPolicyProved says a run wrote pods and a policy here and saw the
+	// cluster's CNI enforce it. The proof costs a few pods, so it is kept rather
+	// than repeated by every apply; a cluster box installed itself never needs it.
+	NetworkPolicyProved bool
 }
+
+// provedMark is the one value netpolProof takes: a record either carries the
+// passed proof or says nothing.
+const provedMark = "passed"
 
 // encodeRecord renders a Record as the fixed schema; the path is quoted so spaces
 // survive.
@@ -56,6 +64,9 @@ func encodeRecord(r *Record) []byte {
 	fmt.Fprintf(&b, "  cert-manager: %s\n", r.Platform.CertManager)
 	if r.GatewayClass != "" {
 		fmt.Fprintf(&b, "gatewayClass: %q\n", r.GatewayClass)
+	}
+	if r.NetworkPolicyProved {
+		fmt.Fprintf(&b, "netpolProof: %s\n", provedMark)
 	}
 	return []byte(b.String())
 }
@@ -104,6 +115,11 @@ func parseRecord(data []byte) (*Record, error) {
 				inPlatform = true
 			case "gatewayClass":
 				rec.GatewayClass = unquote(val)
+			case "netpolProof":
+				if unquote(strings.TrimSpace(val)) != provedMark {
+					return nil, fmt.Errorf("cluster.yaml: netpolProof %q: only %q is a proof", val, provedMark)
+				}
+				rec.NetworkPolicyProved = true
 			case "assumeGatewayFeatures":
 				// The key only existed for a class publishing no feature list, and box
 				// accepts only Envoy Gateway. Refused by name, so an operator upgrading
