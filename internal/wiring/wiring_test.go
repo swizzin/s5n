@@ -798,6 +798,36 @@ func TestWiringCorrectsNearMissSavePath(t *testing.T) {
 	}
 }
 
+// An incomplete directory the operator chose -- a migrated one, often a faster
+// filesystem mounted inside the downloads tree -- is kept: setting it moves every
+// automatic torrent's partial files, and anywhere under /data is reachable.
+func TestWiringKeepsAnIncompleteDirectoryUnderData(t *testing.T) {
+	h := newHarness(t)
+	h.stack.prefs = map[string]any{"save_path": "/data/downloads", "temp_path": "/data/downloads/incomplete/",
+		"use_category_paths_in_manual_mode": true}
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	if got := h.stack.prefs["temp_path"]; got != "/data/downloads/incomplete/" {
+		t.Fatalf("temp_path = %v, want the operator's /data/downloads/incomplete/ left alone", got)
+	}
+}
+
+// One outside /data is where nothing is mounted, so the Job puts it at the default.
+func TestWiringMovesAnIncompleteDirectoryOutsideData(t *testing.T) {
+	h := newHarness(t)
+	h.stack.prefs = map[string]any{"save_path": "/data/downloads", "temp_path": "/database/temp",
+		"use_category_paths_in_manual_mode": true}
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	if got := h.stack.prefs["temp_path"]; got != "/data/downloads/temp" {
+		t.Fatalf("temp_path = %v, want /data/downloads/temp", got)
+	}
+}
+
 // Every download/library pair is proven: a separate filesystem under one library is
 // caught even when the first pair links.
 func TestWiringProvesEveryPair(t *testing.T) {

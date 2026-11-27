@@ -292,3 +292,29 @@ func TestQuote(t *testing.T) {
 		}
 	}
 }
+
+// qBittorrent 5.3 reads the session's paths from [BitTorrent] (sessionimpl.cpp:610-613
+// at release-5.3.1). Seal writes the save root and category-path mode there so the
+// first start already holds the data contract, and never the incomplete directory:
+// that one is the operator's, and a migrated one is kept.
+func TestSealWritesTheSessionKeysQbittorrentReads(t *testing.T) {
+	existing := []byte("[BitTorrent]\nSession\\TempPath=/data/downloads/incomplete\nSession\\TempPathEnabled=true\n")
+	out, _, err := Seal(existing, "admin", "s3cret", 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := Parse(out)
+	for key, want := range map[string]string{
+		`Session\DefaultSavePath`:              "/data/downloads",
+		`Session\UseCategoryPathsInManualMode`: "true",
+		`Session\TempPath`:                     "/data/downloads/incomplete",
+		`Session\TempPathEnabled`:              "true",
+	} {
+		if got, ok := doc.Get("BitTorrent", key); !ok || got != want {
+			t.Errorf("[BitTorrent] %s = %q (present %v), want %q", key, got, ok, want)
+		}
+	}
+	if _, ok := doc.Get("Preferences", `Session\TempPath`); ok {
+		t.Errorf("Seal wrote [Preferences] Session\\TempPath, a key qBittorrent 5 never reads:\n%s", out)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -14,6 +15,14 @@ import (
 // SaveRoot is where every download must live: the release's data claim, which the
 // library is hardlinked from. internal/qbtconf imports this constant.
 const SaveRoot = "/data/downloads"
+
+// dataRoot is the release's data claim. An incomplete directory anywhere under it is
+// reachable, and a migrated one is often a faster filesystem mounted inside it.
+const dataRoot = "/data"
+
+// defaultTempPath is the incomplete directory a qBittorrent gets when its own is
+// outside the claim: qBittorrent's own default, <save path>/temp.
+const defaultTempPath = SaveRoot + "/temp"
 
 // Qbit is the qBittorrent WebUI API. Every call after Login rides the session
 // cookie, so the client owns a jar.
@@ -85,12 +94,6 @@ func (q *Qbit) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(s), err
 }
 
-// dataContract is what qBittorrent must report for the /data contract to hold.
-var dataContract = map[string]string{
-	"save_path": SaveRoot,
-	"temp_path": SaveRoot + "/temp",
-}
-
 // EnsureDataContract makes the settings the /data contract depends on match, then
 // reads them back. The image starts with its save path on the config volume and
 // ignores category paths in manual mode, so a download would land outside /data and
@@ -104,9 +107,11 @@ func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
 	if contractDrift(prefs) == "" {
 		return Unchanged, nil
 	}
-	desired := map[string]any{"use_category_paths_in_manual_mode": true}
-	for k, v := range dataContract {
-		desired[k] = v
+	desired := map[string]any{"use_category_paths_in_manual_mode": true, "save_path": SaveRoot}
+	// Setting the incomplete directory moves every automatic torrent's partial
+	// files, so one the operator chose under the claim is never rewritten.
+	if temp, _ := prefs["temp_path"].(string); !underDataRoot(temp) {
+		desired["temp_path"] = defaultTempPath
 	}
 	payload, err := json.Marshal(desired)
 	if err != nil {
@@ -145,19 +150,25 @@ func (q *Qbit) preferences(ctx context.Context) (Item, error) {
 }
 
 // contractDrift describes the first way prefs break the data contract, or "" when
-// they hold. Paths are compared exactly: "somewhere under /data" is not the
-// contract, because the Arrs' folders are derived from this root.
+// they hold. The save path is compared exactly, because the Arrs' folders are
+// derived from it; the incomplete directory only has to be under the claim.
 func contractDrift(prefs Item) string {
-	for _, key := range []string{"save_path", "temp_path"} {
-		got, _ := prefs[key].(string)
-		if strings.TrimRight(got, "/") != dataContract[key] {
-			return fmt.Sprintf("%s is %q, want %q", key, got, dataContract[key])
-		}
+	if got, _ := prefs["save_path"].(string); strings.TrimRight(got, "/") != SaveRoot {
+		return fmt.Sprintf("save_path is %q, want %q", got, SaveRoot)
+	}
+	if got, _ := prefs["temp_path"].(string); !underDataRoot(got) {
+		return fmt.Sprintf("temp_path is %q, which is not under %s", got, dataRoot)
 	}
 	if on, _ := prefs["use_category_paths_in_manual_mode"].(bool); !on {
 		return "category paths are not applied in manual mode, so categorised downloads ignore their category's save path"
 	}
 	return ""
+}
+
+// underDataRoot says whether a path is a directory below the data claim.
+func underDataRoot(p string) bool {
+	clean := path.Clean(p)
+	return strings.HasPrefix(clean, dataRoot+"/") && path.IsAbs(p)
 }
 
 // Category is one qBittorrent category.

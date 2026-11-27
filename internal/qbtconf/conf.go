@@ -290,6 +290,9 @@ func (d *Document) Render() []byte {
 	return []byte(b.String())
 }
 
+// iniTrue is how QSettings writes a boolean that is on.
+const iniTrue = "true"
+
 // Seal writes the WebUI section qBittorrent should run with. The image only
 // generates its config when none exists, so the init container is the authority:
 // a file seeded with nothing but credentials would leave the rest to the build's
@@ -307,13 +310,14 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 
 	desired := []struct{ section, key, value string }{
 		{"WebUI", "Username", quote(username)},
-		// The data contract in one setting each: qBittorrent defaults its save
-		// path onto the config volume and ignores a category's path unless
-		// manual-mode category paths are on, so a download would never be
-		// hardlinkable. qBittorrent 5 nests these under [Preferences].
-		{"Preferences", `Session\DefaultSavePath`, saveRoot},
-		{"Preferences", `Session\TempPath`, saveRoot + "/temp"},
-		{"Preferences", `Session\UseCategoryPathsInManualMode`, "true"},
+		// The data contract: qBittorrent defaults its save path onto the config
+		// volume and ignores a category's path unless manual-mode category paths
+		// are on, so a download would never be hardlinkable. The session reads both
+		// from [BitTorrent] (sessionimpl.cpp:610,613 at release-5.3.1). The
+		// incomplete directory is the operator's and is never written: absent, it
+		// defaults to <save path>/temp.
+		{"BitTorrent", `Session\DefaultSavePath`, saveRoot},
+		{"BitTorrent", `Session\UseCategoryPathsInManualMode`, iniTrue},
 		{"WebUI", "Address", "*"},
 		{"WebUI", "Port", strconv.Itoa(port)},
 		{"WebUI", "ServerDomains", "*"},
@@ -324,13 +328,13 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 		// loopback (port-forward) and for the private ranges pods and the Gateway
 		// sit in. See authBypassSubnets.
 		{"WebUI", "LocalHostAuth", "false"},
-		{"WebUI", "AuthSubnetWhitelistEnabled", "true"},
+		{"WebUI", "AuthSubnetWhitelistEnabled", iniTrue},
 		{"WebUI", "AuthSubnetWhitelist", subnetListValue()},
 		// A same-site page holding the edge's cookie could POST here, the WebUI's own
 		// login being skipped for the Gateway's address; a client with neither Origin
 		// nor Referer passes (src/webui/webapplication.cpp:969 at release-5.3.1).
-		{"WebUI", "CSRFProtection", "true"},
-		{"LegalNotice", "Accepted", "true"},
+		{"WebUI", "CSRFProtection", iniTrue},
+		{"LegalNotice", "Accepted", iniTrue},
 	}
 	if storedHash != "" {
 		desired = append(desired, struct{ section, key, value string }{
