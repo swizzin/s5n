@@ -1358,6 +1358,13 @@ docker exec "${CLUSTER}-control-plane" bash -c '
   echo "  seeded network.xml: $(grep -o "<LocalNetworkAddresses><string>127.0.0.1</string></LocalNetworkAddresses>" "$net")"' _ "$jf_net" ||
   fail=1
 $K -n "$NS" delete pod jellyfin-0 --wait=true --timeout=180s >/dev/null
+# The StatefulSet makes the new pod a moment after the old one is gone, and `wait` on a
+# name that does not exist yet fails at once rather than waiting for it.
+for _ in $(seq 1 60); do
+  uid=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  [ -n "$uid" ] && [ "$uid" != "$jf_before" ] && break
+  sleep 1
+done
 $K -n "$NS" wait --for=condition=Ready pod/jellyfin-0 --timeout=300s >/dev/null ||
   { echo "jellyfin-0 did not come back Ready after the seeded loopback: the app is bound where nothing can reach it"; fail=1; }
 jf_after=$($K -n "$NS" get pod jellyfin-0 -o jsonpath='{.metadata.uid}')
