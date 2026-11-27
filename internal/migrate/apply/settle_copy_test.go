@@ -35,9 +35,10 @@ func TestTheCopyACheckReadsIsTheStateAndNotItsLibrary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "not-plex.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &settler{in: SettleInput{Catalog: rehearsalCatalog}, dir: t.TempDir()}
+	work := t.TempDir()
+	s := &settler{in: SettleInput{Catalog: rehearsalCatalog}, dir: work, root: anchorFor(t, work)}
 	dst := filepath.Join(s.dir, "plex")
-	if err := s.stageForCheck(appPlex, dst, src); err != nil {
+	if err := s.stageForCheck(appPlex, "plex", src); err != nil {
 		t.Fatalf("the copy a check reads: %v", err)
 	}
 	const where = "Library/Application Support/Plex Media Server"
@@ -63,7 +64,7 @@ func TestTheCopyACheckReadsIsTheStateAndNotItsLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := filepath.Join(s.dir, "sonarr")
-	if err := s.stageForCheck("sonarr", other, plain); err != nil {
+	if err := s.stageForCheck("sonarr", "sonarr", plain); err != nil {
 		t.Fatalf("the copy a check reads: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(other, "config.xml")); err != nil {

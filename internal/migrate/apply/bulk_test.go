@@ -11,6 +11,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // fakeBulk is a snapshot's copy of one app's config: the numbers the pass that
@@ -32,9 +33,9 @@ func (b *fakeBulk) Measure(instance string) (Staged, error) {
 	return Staged{Files: b.files, Bytes: b.bytes}, nil
 }
 
-func (b *fakeBulk) Stage(instance, dst string, uid, gid int) (Staged, error) {
+func (b *fakeBulk) Stage(instance string, config *safefs.Anchor, dst string, uid, gid int) (Staged, error) {
 	b.staged = append(b.staged, instance)
-	if _, err := copyTree(dst, b.tree, uid, gid); err != nil {
+	if _, err := copyTree(config, dst, b.tree, uid, gid); err != nil {
 		return Staged{}, err
 	}
 	return Staged{Files: b.files, Bytes: b.bytes}, nil

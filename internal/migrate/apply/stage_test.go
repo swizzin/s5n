@@ -45,11 +45,12 @@ func TestCopyTreePreservesWhatAnAppReads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dst := filepath.Join(t.TempDir(), "copy")
+	base := t.TempDir()
+	dst := filepath.Join(base, "copy")
 	// The copy is as read-only as the source; the test's own cleanup needs the
 	// directory writable again before it can remove it.
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dst, "readonly"), 0o755) })
-	st, err := copyTree(dst, src, os.Geteuid(), os.Getegid())
+	st, err := copyTree(anchorFor(t, base), "copy", src, os.Geteuid(), os.Getegid())
 	if err != nil {
 		t.Fatalf("copy: %v", err)
 	}
@@ -132,8 +133,8 @@ func TestCopyTreeRefusesWhatCanLeave(t *testing.T) {
 			src := t.TempDir()
 			writeFile(t, filepath.Join(src, "keep.txt"), "keep", 0o600)
 			tc.make(t, src)
-			dst := filepath.Join(t.TempDir(), "copy")
-			_, err := copyTree(dst, src, os.Geteuid(), os.Getegid())
+			base := t.TempDir()
+			_, err := copyTree(anchorFor(t, base), "copy", src, os.Geteuid(), os.Getegid())
 			if err == nil {
 				t.Fatal("the copy went ahead")
 			}
@@ -154,8 +155,9 @@ func TestCopyTreeSkipsAKernelLink(t *testing.T) {
 	if err := os.Symlink("/proc/self/fd/1", filepath.Join(logs, "qbittorrent.log")); err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(t.TempDir(), "copy")
-	if _, err := copyTree(dst, src, os.Geteuid(), os.Getegid()); err != nil {
+	base := t.TempDir()
+	dst := filepath.Join(base, "copy")
+	if _, err := copyTree(anchorFor(t, base), "copy", src, os.Geteuid(), os.Getegid()); err != nil {
 		t.Fatalf("a config whose log is the container's stdout was refused: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(dst, "qBittorrent", "logs", "qbittorrent.log")); !os.IsNotExist(err) {
@@ -169,9 +171,10 @@ func TestCopyTreeSkipsAKernelLink(t *testing.T) {
 func TestCopyTreeChownsToTheRelease(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a", "b.txt"), "b", 0o600)
-	dst := filepath.Join(t.TempDir(), "copy")
+	base := t.TempDir()
+	dst := filepath.Join(base, "copy")
 	uid, gid := os.Geteuid(), os.Getegid()
-	if _, err := copyTree(dst, src, uid, gid); err != nil {
+	if _, err := copyTree(anchorFor(t, base), "copy", src, uid, gid); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	for _, rel := range []string{"", "a", "a/b.txt"} {
@@ -228,7 +231,7 @@ func TestCopyFileRefusesAFileSwappedAfterItsCheck(t *testing.T) {
 // rather than a whole copy.
 func openTree(t *testing.T, dir string) *safefs.Tree {
 	t.Helper()
-	tree, err := safefs.Open(dir)
+	tree, err := safefs.OpenAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

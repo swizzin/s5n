@@ -25,6 +25,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // The synthetic source's API key. It is in the fixture so a test can prove the
@@ -296,11 +297,29 @@ func (f *fakeOwned) Write(_ context.Context, data []byte) error {
 // state is the record the run left, read back through the real loader.
 func (f *fixture) state(id string) *State {
 	f.t.Helper()
-	st, err := loadState(stateDir(f.configRoot, id))
+	st, err := loadState(anchorFor(f.t, f.configRoot), stateName(id))
 	if err != nil {
 		f.t.Fatalf("read the state: %v", err)
 	}
 	return st
+}
+
+// anchorFor opens dir as the root a test names things inside, which is how a run
+// holds the config root it works in.
+func anchorFor(t *testing.T, dir string) *safefs.Anchor {
+	t.Helper()
+	anchor, err := safefs.OpenOwned(dir, os.Geteuid())
+	if err != nil {
+		t.Fatalf("open %s: %v", dir, err)
+	}
+	t.Cleanup(func() { anchor.Close() })
+	return anchor
+}
+
+// exists reports whether anything is at path: a test asking the host, not a run.
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // readFile reads one file of the fixture, failing the test when it is absent.

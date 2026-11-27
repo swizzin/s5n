@@ -207,12 +207,9 @@ func TestPreflightExcusesOnlyWhatItRecorded(t *testing.T) {
 	p, raw := f.plan()
 	env := f.env(&fakeValues{}, &fakeOwned{}, yes(t, &Summary{}))
 	// A run that moved both instances and renamed the downloads, then stopped.
-	dir := stateDir(f.configRoot, PlanID(raw))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	config := anchorFor(t, f.configRoot)
 	st := &State{Plan: PlanDigest(raw), Renamed: []string{"Downloads"}, Moved: []string{"qbittorrent", "sonarr"}}
-	if err := saveState(dir, st); err != nil {
+	if err := saveState(config, stateName(PlanID(raw)), st); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"sonarr", "qbittorrent"} {

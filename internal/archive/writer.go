@@ -160,7 +160,7 @@ func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skippe
 	if !info.IsDir() {
 		return nil, fmt.Errorf("add %s: not a directory", dir)
 	}
-	tree, err := safefs.Open(dir)
+	tree, err := openThrough(dir)
 	if err != nil {
 		return nil, fmt.Errorf("add %s: %w", dir, err)
 	}
@@ -330,7 +330,7 @@ func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, err
 	if !info.IsDir() {
 		return res, fmt.Errorf("add %s: not a directory", dir)
 	}
-	tree, err := safefs.Open(dir)
+	tree, err := openThrough(dir)
 	if err != nil {
 		return res, fmt.Errorf("add %s: %w", dir, err)
 	}
@@ -615,6 +615,11 @@ func (w *Writer) addFileFrom(name string, tree *safefs.Tree, rel string, info fs
 	}
 	return w.write(name, f, info.Size(), info.Mode().Perm(), info.ModTime())
 }
+
+// openThrough opens the tree an AddTree walks, through the directory that holds it:
+// someone else's config directory is a tree box only reads, and a tree whose name is
+// a link out of that directory is refused rather than read.
+func openThrough(dir string) (*safefs.Tree, error) { return safefs.OpenAt(dir) }
 
 // openSource opens one file of a tree: the descriptor has to be the regular file the
 // walk listed, or a link, a fifo or another file swapped in since would be read into

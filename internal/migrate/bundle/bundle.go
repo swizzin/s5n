@@ -19,6 +19,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/space"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // Dir is where box keeps snapshots: what discover writes and apply with no file
@@ -427,13 +428,13 @@ func (o *Opened) parts() error {
 	return nil
 }
 
-// Stage writes one instance's whole tree out of the snapshot into dst, owned by
-// uid:gid: the other half of Open's filter, straight from the archive, so the bulk
-// is never a second copy on the host. Bytes are checked against the manifest
-// again.
-func (o *Opened) Stage(instance, dst string, uid, gid int) (Contents, error) {
+// Stage writes one instance's whole tree out of the snapshot into name, inside the
+// config root the caller holds, owned by uid:gid: the other half of Open's filter,
+// straight from the archive, so the bulk is never a second copy on the host. Bytes
+// are checked against the manifest again.
+func (o *Opened) Stage(instance string, config *safefs.Anchor, name string, uid, gid int) (Contents, error) {
 	prefix := archive.ConfigPrefix + "/" + instance
-	if err := archive.ExtractTree(o.Path, dst, prefix, o.manifest, &archive.Owner{UID: uid, GID: gid}); err != nil {
+	if err := archive.ExtractTree(config, name, o.Path, prefix, o.manifest, &archive.Owner{UID: uid, GID: gid}); err != nil {
 		return Contents{}, err
 	}
 	return o.Contents[instance], nil

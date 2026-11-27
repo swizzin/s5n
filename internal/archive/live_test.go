@@ -79,7 +79,7 @@ func TestALargeFileThatChangedSinceItsStatIsRefused(t *testing.T) {
 // opens one.
 func liveTree(t *testing.T, dir string) *safefs.Tree {
 	t.Helper()
-	tree, err := safefs.Open(dir)
+	tree, err := safefs.OpenAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

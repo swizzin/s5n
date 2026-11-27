@@ -8,10 +8,18 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 
-	"github.com/swizzin/s5n/internal/atomicfile"
+	"github.com/swizzin/s5n/internal/safefs"
 )
+
+// stateRoot is the directory under the config root that holds every plan's staging
+// and record.
+const stateRoot = ".box/migrate"
+
+// stateFileName is the record inside one plan's directory.
+const stateFileName = "state.json"
 
 // State is `<config>/.box/migrate/<plan-id>/state.json`: what one plan has done. A
 // crash can leave the config and data roots half-changed, so this file makes the
@@ -46,44 +54,74 @@ func PlanDigest(planBytes []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// stateDir is where one plan stages and records: `<config>/.box/migrate/<id>`.
+// stateDir is where one plan stages and records on the host: `<config>/.box/migrate/<id>`.
 // subPath of the same claim at /config and never a second volume.
 func stateDir(configRoot, id string) string {
 	return filepath.Join(configRoot, ".box", "migrate", id)
 }
 
-// stateFile is the record inside stateDir.
-func stateFile(dir string) string { return filepath.Join(dir, "state.json") }
+// stateName is the same directory named inside the config root's handle, which is
+// what every read and write of it is resolved from.
+func stateName(id string) string { return path.Join(stateRoot, id) }
 
-// loadState reads one plan's record. An absent file is an empty record: a plan
-func loadState(dir string) (*State, error) {
-	raw, err := os.ReadFile(stateFile(dir))
+// stateFile is the record inside stateDir.
+func stateFile(dir string) string { return filepath.Join(dir, stateFileName) }
+
+// loadState reads one plan's record, by name inside the config root. An absent file
+// is an empty record: a plan
+func loadState(config *safefs.Anchor, dir string) (*State, error) {
+	name := path.Join(dir, stateFileName)
+	raw, err := config.Root().ReadFile(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &State{}, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", stateFile(dir), err)
+		return nil, fmt.Errorf("read %s: %w", config.Path(name), config.Err(name, err))
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, fmt.Errorf("%s: %w; a half-written record cannot be trusted, so remove %s and run migrate again from the start",
-			stateFile(dir), err, dir)
+			config.Path(name), err, config.Path(dir))
 	}
 	return &st, nil
 }
 
 // saveState writes the record atomically, keeping the staging directory. Every
 // so a crash loses at most the step in flight.
-func saveState(dir string, st *State) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+//
+// The temporary file is a name inside the config root like any other, renamed into
+// place by the root itself: a state saved by host path lands wherever a swapped `.box`
+// points, and root would have written it there.
+func saveState(config *safefs.Anchor, dir string, st *State) error {
+	root := config.Root()
+	if err := root.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", config.Path(dir), config.Err(dir, err))
 	}
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
-		return fmt.Errorf("record %s: %w", stateFile(dir), err)
+		return fmt.Errorf("record %s: %w", stateFile(config.Path(dir)), err)
 	}
-	if err := atomicfile.Write(stateFile(dir), append(raw, '\n'), 0o600); err != nil {
-		return err
+	name := path.Join(dir, stateFileName)
+	tmp := name + ".tmp"
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", config.Path(tmp), config.Err(tmp, err))
+	}
+	_, err = f.Write(append(raw, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = root.Chmod(tmp, 0o600)
+	}
+	if err == nil {
+		err = root.Rename(tmp, name)
+	}
+	if err != nil {
+		return fmt.Errorf("write %s: %w", config.Path(name), config.Err(tmp, err))
 	}
 	return nil
 }
@@ -91,27 +129,33 @@ func saveState(dir string, st *State) error {
 // otherPlan refuses a run while another plan is half done.
 // Two plans share the data root and the config root, and the second one would
 // never ran is therefore a stop, not something to work around: the operator
-func otherPlan(root, own string, digest string) error {
-	entries, err := os.ReadDir(root)
+func otherPlan(config *safefs.Anchor, own string, digest string) error {
+	root := config.Root()
+	f, err := root.Open(stateRoot)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("read %s: %w", root, err)
+		return fmt.Errorf("read %s: %w", config.Path(stateRoot), config.Err(stateRoot, err))
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
+	if err != nil {
+		return fmt.Errorf("read %s: %w", config.Path(stateRoot), config.Err(stateRoot, err))
 	}
 	for _, e := range entries {
 		if !e.IsDir() || e.Name() == own {
 			continue
 		}
-		dir := filepath.Join(root, e.Name())
-		st, err := loadState(dir)
+		dir := path.Join(stateRoot, e.Name())
+		st, err := loadState(config, dir)
 		if err != nil {
 			return err
 		}
 		if st.Plan == "" || st.Values || st.Plan == digest {
 			continue
 		}
-		return fmt.Errorf("another migration is half done: %s; run `box migrate apply` on that plan again, or remove the directory if the source is untouched", dir)
+		return fmt.Errorf("another migration is half done: %s; run `box migrate apply` on that plan again, or remove the directory if the source is untouched", config.Path(dir))
 	}
 	return nil
 }

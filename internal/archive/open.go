@@ -77,29 +77,35 @@ func Open(archive, dir string) (*Manifest, error) {
 // entry it skips has to have been checked already by Verify. What it does not write
 // is still checked as it is skipped.
 func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
-	return extractInto(archive, dir, "", m, keep, own)
-}
-
-// ExtractTree writes the subtree under prefix into dir, with the prefix taken off its
-// paths: config/<instance>/ becomes the instance's config directory, which is what a
-// run stages at the config root. Its bytes are checked against the manifest again as
-// they are written.
-func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
-	return extractInto(archive, dir, path.Clean(prefix), m, nil, own)
-}
-
-// extractInto makes dir and fills it. The tree stays box's own, 0700, until every
-// entry is written and none of the work goes through a path resolved outside it, so
-// the seedbox's user -- who can write the directory holding it, and who would be
-// handed the link's target by a chown by path -- cannot reach anything under it
-// while it is being filled. dir is given to the owner last.
-func extractInto(archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
-	if _, err := os.Lstat(dir); err == nil {
-		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	at, err := safefs.OpenAnchor(filepath.Dir(dir))
+	if err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
-	tree, err := safefs.Make(dir, 0o700)
+	defer at.Close()
+	return extractInto(at, filepath.Base(dir), archive, dir, "", m, keep, own)
+}
+
+// ExtractTree writes the subtree under prefix into name, which must not exist yet and
+// is named inside the root the caller holds: config/<instance>/ becomes the instance's
+// config directory at the config root, whose user can write it, so the tree is made
+// through the run's own handle rather than a path resolved again. The prefix is taken
+// off the paths, and the bytes are checked against the manifest as they are written.
+func ExtractTree(at *safefs.Anchor, name, archive, prefix string, m *Manifest, own *Owner) error {
+	return extractInto(at, name, archive, at.Path(name), path.Clean(prefix), m, nil, own)
+}
+
+// extractInto makes name inside at and fills it. The tree stays box's own, 0700,
+// until every entry is written and none of the work goes through a path resolved
+// outside it, so the seedbox's user -- who can write the directory holding it, and
+// who would be handed the link's target by a chown by path -- cannot reach anything
+// under it while it is being filled. The tree is given to the owner last.
+func extractInto(at *safefs.Anchor, name, archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
+	if _, err := at.Root().Lstat(name); err == nil {
+		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("extract to %s: %w", dir, at.Err(name, err))
+	}
+	tree, err := safefs.Make(at, name, 0o700)
 	if err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}

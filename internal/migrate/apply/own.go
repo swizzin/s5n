@@ -12,28 +12,36 @@ package apply
 import (
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
+
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // own is step 6: every path under every staged instance belongs to the
-// seedbox's user.
+// seedbox's user. The walk is resolved from the staged tree's own handle, and a
+// chown names the entry inside it: a path walked by name would follow a `.box` the
+// user had swapped out of the config root and hand away whatever it names.
 func (m *migration) own() error {
 	chown := m.env.Chown
-	if chown == nil {
-		chown = os.Lchown
-	}
 	for _, name := range planApps(m.p) {
-		root := m.staging(name)
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		tree, err := safefs.Open(m.root, m.stagingName(name))
+		if err != nil {
+			return fmt.Errorf("hand the staged %s to the seedbox's user %d:%d: %w", name, m.env.PUID, m.env.PGID, err)
+		}
+		err = fs.WalkDir(tree.Root().FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				return tree.Err(rel, err)
 			}
-			if err := chown(path, m.env.PUID, m.env.PGID); err != nil {
-				return fmt.Errorf("hand %s to the seedbox's user %d:%d: %w", path, m.env.PUID, m.env.PGID, err)
+			if chown != nil {
+				err = chown(tree.Path(rel), m.env.PUID, m.env.PGID)
+			} else {
+				err = tree.Root().Lchown(rel, m.env.PUID, m.env.PGID)
+			}
+			if err != nil {
+				return fmt.Errorf("hand %s to the seedbox's user %d:%d: %w", tree.Path(rel), m.env.PUID, m.env.PGID, err)
 			}
 			return nil
 		})
+		tree.Close()
 		if err != nil {
 			return err
 		}

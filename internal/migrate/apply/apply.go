@@ -21,6 +21,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 	"github.com/swizzin/s5n/internal/migrate/space"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // ErrCancelled says the operator answered no, or could not be asked. Nothing
@@ -39,7 +40,7 @@ type Env struct {
 	// PUID and PGID own everything staged: the pod's user is not box's.
 	PUID, PGID int
 	// Chown hands a staged path to the seedbox's user, never following a link
-	// (own.go). Nil means os.Lchown.
+	// (own.go). Nil means the staged tree's own Lchown, which is what box runs.
 	Chown func(path string, uid, gid int) error
 	// Disk answers the room question (carry.go); nil means the host's own.
 	Disk space.Disk
@@ -265,10 +266,16 @@ type migration struct {
 	p   *plan.Plan
 	env Env
 	id  string
-	// dir is `<config>/.box/migrate/<plan-id>`: staging and the state record.
-	dir string
-	st  *State
-	res Result
+	// root is the config root opened once for the whole run: staging, the record and
+	// the move into place are all named inside it, so a .box swapped for a link
+	// cannot steer a create, a write or a rename out of the tree.
+	root *safefs.Anchor
+	// dir is `<config>/.box/migrate/<plan-id>` on the host, name the same
+	// directory inside root: staging is one app's copy in it.
+	dir  string
+	name string
+	st   *State
+	res  Result
 	// checks is every app's Check report, which Write is held to.
 	checks map[string]rewrite.Report
 	// deferred are the apps whose rewriter needs the app's image, checked later.
@@ -280,6 +287,26 @@ type migration struct {
 	// summary.
 	keys     []keptKey
 	keyNames []string
+}
+
+// open anchors the run on its config root, which it works in until close.
+func (m *migration) open() error {
+	config, err := openRoot(m.env.ConfigRoot, m.env)
+	if err != nil {
+		return err
+	}
+	m.root = config
+	m.dir = stateDir(m.env.ConfigRoot, m.id)
+	m.name = stateName(m.id)
+	return nil
+}
+
+// close releases the root the run worked in.
+func (m *migration) close() {
+	if m.root != nil {
+		m.root.Close()
+		m.root = nil
+	}
 }
 
 // Run performs steps 2 to 10. A plan whose steps are recorded returns Done
@@ -294,8 +321,11 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 	if err := Preflight(p, planBytes, env); err != nil {
 		return res, err
 	}
-	m.dir = stateDir(env.ConfigRoot, m.id)
-	st, err := loadState(m.dir)
+	if err := m.open(); err != nil {
+		return res, err
+	}
+	defer m.close()
+	st, err := loadState(m.root, m.name)
 	if err != nil {
 		return res, err
 	}
@@ -357,23 +387,9 @@ func Preflight(p *plan.Plan, planBytes []byte, env Env) error {
 	if p == nil {
 		return errors.New("no plan: migrate applies a plan written by `box migrate discover`")
 	}
-	var items []string
-	id := PlanID(planBytes)
-	dir := stateDir(env.ConfigRoot, id)
-	st, err := loadState(dir)
+	items, err := preflight(p, planBytes, env)
 	if err != nil {
 		return err
-	}
-	if err := otherPlan(filepath.Join(env.ConfigRoot, ".box", "migrate"), id, PlanDigest(planBytes)); err != nil {
-		items = append(items, err.Error())
-	}
-	if !isDir(env.ConfigRoot) {
-		items = append(items, fmt.Sprintf("storage.config.path %s is not a directory: migrate adopts into the config root an installed seedbox already has, so run `box init` first", env.ConfigRoot))
-	}
-	items = append(items, preflightData(p, env, st)...)
-	names := planApps(p)
-	for _, name := range names {
-		items = append(items, preflightApp(p, env, st, name)...)
 	}
 	if len(items) > 0 {
 		return &problems{lead: "this plan cannot be applied to this seedbox", items: items}
@@ -381,40 +397,94 @@ func Preflight(p *plan.Plan, planBytes []byte, env Env) error {
 	return nil
 }
 
-// preflightData checks the data root and the two directories a rename moves.
-func preflightData(p *plan.Plan, env Env, st *State) []string {
+// openRoot opens a host directory as the root a pass works in: for a run, one the
+// seedbox's user or root owns; for a survey, box's own private directory beside the
+// snapshot, where nothing is the seedbox's yet (surveyEnv).
+func openRoot(dir string, env Env) (*safefs.Anchor, error) {
+	if env.deferred {
+		return safefs.OpenAnchor(dir)
+	}
+	return safefs.OpenOwned(dir, env.PUID)
+}
+
+// preflight is every check, writing nothing. The two roots are opened as the run
+// opens them, so a config root that is a link, or one somebody else owns, is a
+// refusal before the first read rather than a surprise after the question.
+func preflight(p *plan.Plan, planBytes []byte, env Env) ([]string, error) {
+	id := PlanID(planBytes)
+	config, err := openRoot(env.ConfigRoot, env)
+	if err != nil {
+		if !isDir(env.ConfigRoot) {
+			return []string{fmt.Sprintf("storage.config.path %s is not a directory: migrate adopts into the config root an installed seedbox already has, so run `box init` first", env.ConfigRoot)}, nil
+		}
+		return []string{err.Error()}, nil
+	}
+	defer config.Close()
+	var items []string
+	st, err := loadState(config, stateName(id))
+	if err != nil {
+		return nil, err
+	}
+	if err := otherPlan(config, id, PlanDigest(planBytes)); err != nil {
+		items = append(items, err.Error())
+	}
+	data, derr := dataRoot(p, env)
+	if derr != nil {
+		items = append(items, derr.Error())
+	}
+	if data != nil {
+		defer data.Close()
+	}
+	items = append(items, preflightData(p, env, st, data)...)
+	for _, name := range planApps(p) {
+		items = append(items, preflightApp(p, env, st, config, name)...)
+	}
+	return items, nil
+}
+
+// dataRoot opens the data root a plan renames in, or nothing when it renames nothing:
+// a rehearsal moves no data, so it needs no root.
+func dataRoot(p *plan.Plan, env Env) (*safefs.Anchor, error) {
+	if p.Data == nil || env.Rehearsal {
+		return nil, nil
+	}
+	if path.Clean(env.DataRoot) != path.Clean(p.Data.Root) {
+		return nil, fmt.Errorf("data.root is %s and this seedbox's storage.data.path is %s: a migration adopts the data where it is, so the plan's root has to be the grant's path", p.Data.Root, env.DataRoot)
+	}
+	data, err := openRoot(env.DataRoot, env)
+	if err != nil {
+		return nil, fmt.Errorf("storage.data.path %s is not a directory migrate can rename in: %w", env.DataRoot, err)
+	}
+	return data, nil
+}
+
+// preflightData checks the two directories a rename moves, and the library's own,
+// naming each inside the data root's handle: a path the plan's user could have
+// pointed elsewhere is never what is checked.
+func preflightData(p *plan.Plan, env Env, st *State, data *safefs.Anchor) []string {
 	d := p.Data
-	if d == nil {
+	if d == nil || data == nil {
 		return nil
-	}
-	if env.Rehearsal {
-		// A rehearsal adopts no data: nothing is renamed, torrents start stopped,
-		// and config paths are still rewritten for a real run.
-		return nil
-	}
-	root := path.Clean(env.DataRoot)
-	if root != path.Clean(d.Root) {
-		return []string{fmt.Sprintf("data.root is %s and this seedbox's storage.data.path is %s: a migration adopts the data where it is, so the plan's root has to be the grant's path", d.Root, env.DataRoot)}
 	}
 	var items []string
 	for _, pair := range [][2]string{{d.Downloads, plan.DownloadsDir}, {d.Media, plan.MediaDir}} {
-		from, to := filepath.Join(env.DataRoot, pair[0]), filepath.Join(env.DataRoot, pair[1])
-		if has(st.Renamed, pair[0]) {
+		from, to := pair[0], pair[1]
+		if has(st.Renamed, from) {
 			// An earlier run made the rename; the source name is gone by design.
 			continue
 		}
-		if !isDir(from) {
-			items = append(items, fmt.Sprintf("data: %s is not a directory: the plan says the source downloaded into %s under %s", from, pair[0], env.DataRoot))
+		if !rootIsDir(data.Root(), from) {
+			items = append(items, fmt.Sprintf("data: %s is not a directory: the plan says the source downloaded into %s under %s", data.Path(from), from, env.DataRoot))
 			continue
 		}
-		if pair[0] == pair[1] || !exists(to) {
+		if from == to || !rootExists(data.Root(), to) {
 			continue
 		}
 		// Only a target holding a file is the operator's data; an empty box-made
 		// directory is removed by the rename.
-		if empty, err := emptyTree(to); err != nil || !empty {
+		if empty, err := rootEmptyTree(data.Root(), to); err != nil || !empty {
 			items = append(items, fmt.Sprintf("data: %s already exists and is not empty, and %s has to become %s: move its contents into %s by hand first",
-				to, pair[0], pair[1], from))
+				data.Path(to), from, to, data.Path(from)))
 		}
 	}
 	// The library's own directories: one rename each, inside the media
@@ -423,23 +493,22 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 		if has(st.Renamed, mediaKey(pair[0])) {
 			continue
 		}
-		from, to, ok := mediaRename(env.DataRoot, d, pair)
+		from, to, ok := mediaRename(data.Root(), d, pair)
 		if !ok {
-			if exists(to) {
+			if rootExists(data.Root(), to) {
 				// A rename an earlier run made without recording it.
 				continue
 			}
-			problems := fmt.Sprintf("data: %s is not a directory: the plan says %s becomes media/%s, so name the directory the source's library has",
-				from, pair[0], pair[1])
-			items = append(items, problems)
+			items = append(items, fmt.Sprintf("data: %s is not a directory: the plan says %s becomes media/%s, so name the directory the source's library has",
+				data.Path(from), pair[0], pair[1]))
 			continue
 		}
-		if !exists(to) {
+		if !rootExists(data.Root(), to) {
 			continue
 		}
-		if empty, err := emptyTree(to); err != nil || !empty {
+		if empty, err := rootEmptyTree(data.Root(), to); err != nil || !empty {
 			items = append(items, fmt.Sprintf("data: %s already exists and is not empty, and %s has to become %s: move its contents into %s by hand first",
-				to, from, to, from))
+				data.Path(to), from, to, data.Path(from)))
 		}
 	}
 	return items
@@ -447,7 +516,7 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 
 // preflightApp checks one instance: that this box can rewrite the app at all,
 // that the seedbox is not already running it, that its source config is there,
-func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
+func preflightApp(p *plan.Plan, env Env, st *State, config *safefs.Anchor, name string) []string {
 	app := p.Apps[name]
 	catalog := CatalogApp(name, env.Catalog)
 	if catalog == "" {
@@ -473,8 +542,8 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 		if env.Enabled != nil && env.Enabled(name) {
 			items = append(items, fmt.Sprintf("apps.%s: this seedbox already runs %s; migrate adopts into a seedbox whose apps are off, so run `box init` with %s left off and apply again", name, name, name))
 		}
-		if exists(dst) {
-			if empty, err := emptyDir(dst); err != nil || !empty {
+		if rootExists(config.Root(), name) {
+			if empty, err := rootEmptyDir(config.Root(), name); err != nil || !empty {
 				items = append(items, fmt.Sprintf("apps.%s: %s is not empty; the plan moves %s's config there, so move what is in it first", name, dst, name))
 			}
 		}
@@ -510,8 +579,8 @@ func planApps(p *plan.Plan) []string {
 // the staging tree; less, for an app whose config is more than its state, when
 // this run finds no room for the whole of it (carry.go).
 func (m *migration) stage(ctx context.Context) error {
-	if err := os.MkdirAll(m.dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", m.dir, err)
+	if err := m.root.Root().MkdirAll(m.name, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", m.dir, m.root.Err(m.name, err))
 	}
 	if err := m.decideCarry(); err != nil {
 		return err
@@ -520,9 +589,9 @@ func (m *migration) stage(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		dst := m.staging(name)
-		if err := os.RemoveAll(dst); err != nil {
-			return fmt.Errorf("clear %s: %w", dst, err)
+		dst := m.stagingName(name)
+		if err := m.root.Root().RemoveAll(dst); err != nil {
+			return fmt.Errorf("clear %s: %w", m.staging(name), m.root.Err(dst, err))
 		}
 		src := filepath.Join(m.env.Configs, name)
 		staged, err := m.copyInto(name, dst, src)
@@ -565,22 +634,26 @@ func (m *migration) copyInto(name, dst, src string) (Staged, error) {
 			for i, f := range state.Files {
 				names[i] = f.Path
 			}
-			return measureFiles(dst, carriedDir(src, state.Sub), names)
+			return measureFiles(m.root, dst, carriedDir(src, state.Sub), names)
 		}
-		return measureTree(dst, src)
+		return measureTree(m.root, dst, src)
 	}
 	if treeApp && !carry.Full {
-		return stageTrimmed(dst, src, plex.Snapshot(false), m.env.PUID, m.env.PGID)
+		return stageTrimmed(m.root, dst, src, plex.Snapshot(false), m.env.PUID, m.env.PGID)
 	}
 	if treeApp && m.env.Bulk != nil {
 		// The whole of it, once, out of the snapshot: the bulk was never
-		return m.env.Bulk.Stage(name, dst, m.env.PUID, m.env.PGID)
+		return m.env.Bulk.Stage(name, m.root, dst, m.env.PUID, m.env.PGID)
 	}
-	return copyTree(dst, src, m.env.PUID, m.env.PGID)
+	return copyTree(m.root, dst, src, m.env.PUID, m.env.PGID)
 }
 
-// staging is one instance's staged config directory.
+// staging is one instance's staged config directory on the host, which is what a
+// rewriter is handed and what a message prints.
 func (m *migration) staging(name string) string { return filepath.Join(m.dir, name) }
+
+// stagingName is the same directory inside the run's config root.
+func (m *migration) stagingName(name string) string { return path.Join(m.name, name) }
 
 // check is step 3: every app's Check pass, all of them, before any Write. A
 // Survey pass (before the install) leaves the apps whose rewriter runs the app's
@@ -863,41 +936,50 @@ func flattenChanges(changes []rewrite.Change) []string {
 // names box's contract uses, and then the library's own directories, renamed to
 // the categories the release lays out. A rename is the only write migrate makes
 // to the data, and it is a rename because that is what keeps the hardlinks.
+//
+// Every name is resolved from one handle on the data root: that root is the
+// seedbox's user's, so a parent swapped for a link under it would otherwise make
+// root rename whatever the link names.
 func (m *migration) renameData() error {
 	if m.p.Data == nil || m.env.Rehearsal {
 		// A rehearsal never renames: the source may be live, and the data may
 		// not even be on this host.
 		return nil
 	}
+	data, err := safefs.OpenOwned(m.env.DataRoot, m.env.PUID)
+	if err != nil {
+		return err
+	}
+	defer data.Close()
 	for _, pair := range m.p.Data.Renames() {
-		from, to := filepath.Join(m.env.DataRoot, pair[0]), filepath.Join(m.env.DataRoot, pair[1])
-		if has(m.st.Renamed, pair[0]) {
+		from, to := pair[0], pair[1]
+		if has(m.st.Renamed, from) {
 			continue
 		}
-		if !exists(from) && exists(to) {
+		if !rootExists(data.Root(), from) && rootExists(data.Root(), to) {
 			// A re-run of a run that renamed but did not record it: the
 			// target is what this step leaves behind, so it is done.
-			if err := m.recordRenamed(pair[0]); err != nil {
+			if err := m.recordRenamed(from); err != nil {
 				return err
 			}
 			continue
 		}
-		if exists(to) {
+		if rootExists(data.Root(), to) {
 			// A box's own release makes /data/downloads/<category> for every
 			// Arr it runs, so a target of empty directories is the box's, not
-			if err := m.removeEmptyTarget(to); err != nil {
+			if err := removeEmptyTarget(data, to); err != nil {
 				return err
 			}
 		}
-		if err := os.Rename(from, to); err != nil {
-			return fmt.Errorf("rename %s to %s: %w", from, to, err)
+		if err := data.Root().Rename(from, to); err != nil {
+			return fmt.Errorf("rename %s to %s: %w", data.Path(from), data.Path(to), data.Err(from, err))
 		}
-		if err := m.recordRenamed(pair[0]); err != nil {
+		if err := m.recordRenamed(from); err != nil {
 			return err
 		}
-		m.res.Renamed = append(m.res.Renamed, pair[0]+" to "+pair[1])
+		m.res.Renamed = append(m.res.Renamed, from+" to "+to)
 	}
-	return m.renameLibrary()
+	return m.renameLibrary(data)
 }
 
 // renameLibrary is the second half of step 6: every directory the source kept an
@@ -908,16 +990,16 @@ func (m *migration) renameData() error {
 // the library, the folders move in the one box gives it. A parent a rename
 // emptied -- the source's 4K/ holding 4K/Movies and 4K/TV -- goes too, and only
 // when it is empty.
-func (m *migration) renameLibrary() error {
+func (m *migration) renameLibrary(data *safefs.Anchor) error {
 	var parents []string
 	for _, pair := range m.p.Data.MediaRenames() {
 		key := mediaKey(pair[0])
 		if has(m.st.Renamed, key) {
 			continue
 		}
-		from, to, ok := mediaRename(m.env.DataRoot, m.p.Data, pair)
+		from, to, ok := mediaRename(data.Root(), m.p.Data, pair)
 		if !ok {
-			if exists(to) {
+			if rootExists(data.Root(), to) {
 				// A rename an earlier run made without recording it: the
 				// target is what this step leaves behind.
 				if err := m.recordRenamed(key); err != nil {
@@ -925,32 +1007,32 @@ func (m *migration) renameLibrary() error {
 				}
 				continue
 			}
-			return fmt.Errorf("%s is not a directory, and the plan says %s becomes media/%s", from, pair[0], pair[1])
+			return fmt.Errorf("%s is not a directory, and the plan says %s becomes media/%s", data.Path(from), pair[0], pair[1])
 		}
-		if exists(to) {
-			if err := m.removeEmptyTarget(to); err != nil {
+		if rootExists(data.Root(), to) {
+			if err := removeEmptyTarget(data, to); err != nil {
 				return err
 			}
 		}
-		if err := os.Rename(from, to); err != nil {
-			return fmt.Errorf("rename %s to %s: %w", from, to, err)
+		if err := data.Root().Rename(from, to); err != nil {
+			return fmt.Errorf("rename %s to %s: %w", data.Path(from), data.Path(to), data.Err(from, err))
 		}
 		if err := m.recordRenamed(key); err != nil {
 			return err
 		}
 		m.res.Renamed = append(m.res.Renamed, "media/"+pair[0]+" to media/"+pair[1])
-		if parent := filepath.Dir(from); parent != filepath.Dir(to) {
+		if parent := path.Dir(from); parent != path.Dir(to) {
 			parents = append(parents, parent)
 		}
 	}
 	// Deepest first, so 4K/Movies and 4K/TV leaving 4K empty removes it once.
 	sort.Slice(parents, func(i, j int) bool { return len(parents[i]) > len(parents[j]) })
 	for _, parent := range parents {
-		empty, err := emptyDir(parent)
+		empty, err := rootEmptyDir(data.Root(), parent)
 		if err != nil || !empty {
 			continue
 		}
-		_ = os.Remove(parent)
+		_ = data.Root().Remove(parent)
 	}
 	return nil
 }
@@ -958,16 +1040,16 @@ func (m *migration) renameLibrary() error {
 // removeEmptyTarget removes a rename's target when it holds nothing but empty
 // directories, which is what a box's own release leaves behind, and refuses one
 // that holds a file.
-func (m *migration) removeEmptyTarget(to string) error {
-	empty, err := emptyTree(to)
+func removeEmptyTarget(data *safefs.Anchor, to string) error {
+	empty, err := rootEmptyTree(data.Root(), to)
 	if err != nil {
-		return fmt.Errorf("inspect %s: %w", to, err)
+		return fmt.Errorf("inspect %s: %w", data.Path(to), data.Err(to, err))
 	}
 	if !empty {
-		return fmt.Errorf("%s appeared while this migration ran and is not empty; what has to become a rename of another directory, so move that directory's contents elsewhere by hand", to)
+		return fmt.Errorf("%s appeared while this migration ran and is not empty; what has to become a rename of another directory, so move that directory's contents elsewhere by hand", data.Path(to))
 	}
-	if err := removeEmptyTree(to); err != nil {
-		return fmt.Errorf("remove the empty %s: %w", to, err)
+	if err := rootRemoveEmptyTree(data.Root(), to); err != nil {
+		return fmt.Errorf("remove the empty %s: %w", data.Path(to), data.Err(to, err))
 	}
 	return nil
 }
@@ -977,46 +1059,48 @@ func (m *migration) removeEmptyTarget(to string) error {
 func mediaKey(from string) string { return plan.MediaDir + "/" + from }
 
 // mediaRename is one library directory as apply moves it: the directory the
-func mediaRename(dataRoot string, d *plan.Data, pair [2]string) (from, to string, ok bool) {
-	base := filepath.Join(dataRoot, plan.MediaDir)
-	if !isDir(filepath.Join(base, pair[0])) {
-		base = filepath.Join(dataRoot, d.Media)
+// source kept it in, and the one box's release uses, both named inside the data
+// root a handler resolved.
+func mediaRename(root *os.Root, d *plan.Data, pair [2]string) (from, to string, ok bool) {
+	base := plan.MediaDir
+	if !rootIsDir(root, path.Join(base, pair[0])) {
+		base = d.Media
 	}
-	from = filepath.Join(base, pair[0])
-	return from, filepath.Join(base, pair[1]), isDir(from)
+	from = path.Join(base, pair[0])
+	return from, path.Join(base, pair[1]), rootIsDir(root, from)
 }
 
 // recordRenamed writes one rename into the state before the next step starts.
 func (m *migration) recordRenamed(name string) error {
 	m.st.Renamed = append(m.st.Renamed, name)
-	return saveState(m.dir, m.st)
+	return saveState(m.root, m.name, m.st)
 }
 
 // move is step 7: each staged config becomes the instance's directory under the
-// config root.
+// config root, both names inside the run's one handle on it.
 func (m *migration) move() error {
 	for _, name := range planApps(m.p) {
 		if has(m.st.Moved, name) {
 			continue
 		}
-		src, dst := m.staging(name), filepath.Join(m.env.ConfigRoot, name)
-		if exists(dst) {
-			empty, err := emptyDir(dst)
+		src, dst := m.stagingName(name), name
+		if rootExists(m.root.Root(), dst) {
+			empty, err := rootEmptyDir(m.root.Root(), dst)
 			if err != nil {
-				return fmt.Errorf("inspect %s: %w", dst, err)
+				return fmt.Errorf("inspect %s: %w", m.root.Path(dst), m.root.Err(dst, err))
 			}
 			if !empty {
-				return fmt.Errorf("%s appeared while this migration ran and is not empty; migrate moves %s there and will not replace it", dst, name)
+				return fmt.Errorf("%s appeared while this migration ran and is not empty; migrate moves %s there and will not replace it", m.root.Path(dst), name)
 			}
-			if err := os.Remove(dst); err != nil {
-				return fmt.Errorf("remove the empty %s: %w", dst, err)
+			if err := m.root.Root().Remove(dst); err != nil {
+				return fmt.Errorf("remove the empty %s: %w", m.root.Path(dst), m.root.Err(dst, err))
 			}
 		}
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("move %s into %s: %w", src, dst, err)
+		if err := m.root.Root().Rename(src, dst); err != nil {
+			return fmt.Errorf("move %s into %s: %w", m.staging(name), m.root.Path(dst), m.root.Err(src, err))
 		}
 		m.st.Moved = append(m.st.Moved, name)
-		if err := saveState(m.dir, m.st); err != nil {
+		if err := saveState(m.root, m.name, m.st); err != nil {
 			return err
 		}
 		m.res.Moved = append(m.res.Moved, name)
@@ -1057,7 +1141,7 @@ func (m *migration) adoptOwned(ctx context.Context) error {
 	}
 	m.res.Owned = seeded
 	m.st.Owned = true
-	return saveState(m.dir, m.st)
+	return saveState(m.root, m.name, m.st)
 }
 
 // apps is the instance-to-catalog-app map the ownership seed needs.
@@ -1086,22 +1170,27 @@ func (m *migration) enable() error {
 		m.res.Enabled = append(m.res.Enabled, name)
 	}
 	m.st.Values = true
-	return saveState(m.dir, m.st)
+	return saveState(m.root, m.name, m.st)
 }
 
 // cleanStaging removes the staged copies and the runner's files once every step
 // is recorded. The record stays: it is what makes a re-run a no-op and what
 // stops a second plan from starting over a migration that did not finish.
 func (m *migration) cleanStaging() {
-	entries, err := os.ReadDir(m.dir)
+	f, err := m.root.Root().Open(m.name)
+	if err != nil {
+		return
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if e.Name() == "state.json" {
+		if e.Name() == stateFileName {
 			continue
 		}
-		os.RemoveAll(filepath.Join(m.dir, e.Name()))
+		_ = m.root.Root().RemoveAll(path.Join(m.name, e.Name()))
 	}
 }
 

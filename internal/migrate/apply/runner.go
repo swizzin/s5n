@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 
+	"github.com/swizzin/s5n/internal/safefs"
 	"github.com/swizzin/s5n/internal/wait"
 )
 
@@ -85,38 +87,45 @@ func (r *JobRunner) Run(ctx context.Context, app string, argv []string, stdin []
 	r.mu.Unlock()
 
 	name := fmt.Sprintf("%s-%d", dnsLabel(app), n)
-	dir := filepath.Join(r.cfg.ConfigRoot, ".box", "migrate", r.cfg.PlanID, runnerDir)
-	if err := os.MkdirAll(dir, 0o770); err != nil {
-		return nil, fmt.Errorf("create %s: %w", dir, err)
-	}
-	if err := r.own(dir, 0o770); err != nil {
+	config, err := safefs.OpenOwned(r.cfg.ConfigRoot, r.cfg.PUID)
+	if err != nil {
 		return nil, err
 	}
-	in := filepath.Join(dir, name+".in")
-	if err := os.WriteFile(in, stdin, 0o640); err != nil {
-		return nil, fmt.Errorf("write %s's input: %w", app, err)
+	defer config.Close()
+	dir := path.Join(stateRoot, r.cfg.PlanID, runnerDir)
+	root := config.Root()
+	if err := root.MkdirAll(dir, 0o770); err != nil {
+		return nil, fmt.Errorf("create %s: %w", config.Path(dir), config.Err(dir, err))
 	}
-	if err := r.own(in, 0o640); err != nil {
+	if err := r.own(root, dir, 0o770); err != nil {
+		return nil, err
+	}
+	in := path.Join(dir, name+".in")
+	if err := root.WriteFile(in, stdin, 0o640); err != nil {
+		return nil, fmt.Errorf("write %s's input: %w", app, config.Err(in, err))
+	}
+	if err := r.own(root, in, 0o640); err != nil {
 		return nil, err
 	}
 
 	job, err := r.start(ctx, app, name, argv)
 	if err != nil {
-		r.remove(dir, name)
+		r.remove(root, dir, name)
 		return nil, err
 	}
 	defer r.delete(context.WithoutCancel(ctx), job)
-	return r.collect(ctx, app, name, argv[0], dir, job)
+	return r.collect(ctx, app, name, argv[0], root, dir, job)
 }
 
 // own hands the exchange to the pod's user: box runs as root, and what it writes
-// 0600 for itself the PUID:PGID pod cannot read or write.
-func (r *JobRunner) own(path string, mode os.FileMode) error {
-	if err := os.Chmod(path, mode); err != nil {
-		return fmt.Errorf("set the mode of %s: %w", path, err)
+// 0600 for itself the PUID:PGID pod cannot read or write. Both calls name the entry
+// inside the config root, so a swapped `.box` is never followed.
+func (r *JobRunner) own(root *os.Root, name string, mode os.FileMode) error {
+	if err := root.Chmod(name, mode); err != nil {
+		return fmt.Errorf("set the mode of %s: %w", root.Name()+"/"+name, err)
 	}
-	if err := os.Chown(path, r.cfg.PUID, r.cfg.PGID); err != nil {
-		return fmt.Errorf("hand %s to the pod's user %d:%d: %w", path, r.cfg.PUID, r.cfg.PGID, err)
+	if err := root.Lchown(name, r.cfg.PUID, r.cfg.PGID); err != nil {
+		return fmt.Errorf("hand %s to the pod's user %d:%d: %w", root.Name()+"/"+name, r.cfg.PUID, r.cfg.PGID, err)
 	}
 	return nil
 }
@@ -132,7 +141,7 @@ func (r *JobRunner) start(ctx context.Context, app, name string, argv []string) 
 }
 
 // collect waits for the Job, reads its files, and errors on a non-zero status.
-func (r *JobRunner) collect(ctx context.Context, app, name, command, dir string, job *batchv1.Job) ([]byte, error) {
+func (r *JobRunner) collect(ctx context.Context, app, name, command string, root *os.Root, dir string, job *batchv1.Job) ([]byte, error) {
 	finished := false
 	waited, err := wait.Until(ctx, r.timeout(), r.poll(), func(ctx context.Context) (bool, error) {
 		got, err := r.cfg.Client.BatchV1().Jobs(r.cfg.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
@@ -146,16 +155,16 @@ func (r *JobRunner) collect(ctx context.Context, app, name, command, dir string,
 		return finished, nil
 	})
 	if err != nil {
-		r.remove(dir, name)
+		r.remove(root, dir, name)
 		return nil, err
 	}
 	if !waited.Done || !finished {
-		r.remove(dir, name)
+		r.remove(root, dir, name)
 		return nil, fmt.Errorf("%s: the job that runs %s did not finish within %s", app, command, r.timeout())
 	}
 
-	stdout, stderr, code, readErr := r.read(dir, name)
-	r.remove(dir, name)
+	stdout, stderr, code, readErr := r.read(root, dir, name)
+	r.remove(root, dir, name)
 	if readErr != nil {
 		return nil, fmt.Errorf("%s: the job that runs %s finished without leaving its result: %w", app, command, readErr)
 	}
@@ -170,19 +179,19 @@ func (r *JobRunner) collect(ctx context.Context, app, name, command, dir string,
 }
 
 // read returns the three files the Job left, and the exit status.
-func (r *JobRunner) read(dir, name string) (stdout, stderr []byte, code int, err error) {
+func (r *JobRunner) read(root *os.Root, dir, name string) (stdout, stderr []byte, code int, err error) {
 	var rc []byte
-	if rc, err = os.ReadFile(filepath.Join(dir, name+".rc")); err != nil {
+	if rc, err = root.ReadFile(path.Join(dir, name+".rc")); err != nil {
 		return nil, nil, 0, err
 	}
 	n, perr := strconv.Atoi(strings.TrimSpace(string(rc)))
 	if perr != nil {
 		return nil, nil, 0, fmt.Errorf("%s.rc holds %q, which is not an exit status: %w", name, strings.TrimSpace(string(rc)), perr)
 	}
-	if stdout, err = os.ReadFile(filepath.Join(dir, name+".out")); err != nil {
+	if stdout, err = root.ReadFile(path.Join(dir, name+".out")); err != nil {
 		return nil, nil, 0, err
 	}
-	if stderr, err = os.ReadFile(filepath.Join(dir, name+".err")); err != nil {
+	if stderr, err = root.ReadFile(path.Join(dir, name+".err")); err != nil {
 		return nil, nil, 0, err
 	}
 	return stdout, stderr, n, nil
@@ -276,9 +285,9 @@ func (r *JobRunner) delete(ctx context.Context, job *batchv1.Job) {
 
 // remove clears the four files one run made, so a later run's numbering is the
 // only thing between two calls.
-func (r *JobRunner) remove(dir, name string) {
+func (r *JobRunner) remove(root *os.Root, dir, name string) {
 	for _, ext := range []string{".in", ".out", ".err", ".rc"} {
-		os.Remove(filepath.Join(dir, name+ext))
+		_ = root.Remove(path.Join(dir, name+ext))
 	}
 }
 

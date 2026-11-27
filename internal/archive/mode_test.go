@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // modeTree is a config directory with a script, a group-readable file and a
@@ -117,8 +119,14 @@ func TestExtractTreeWritesTheSourceModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	dst := filepath.Join(t.TempDir(), "app")
-	if err := ExtractTree(path, dst, "config/app", m, &Owner{UID: os.Geteuid(), GID: os.Getegid()}); err != nil {
+	base := t.TempDir()
+	dst := filepath.Join(base, "app")
+	root, err := safefs.OpenAnchor(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ExtractTree(root, "app", path, "config/app", m, &Owner{UID: os.Geteuid(), GID: os.Getegid()}); err != nil {
 		t.Fatalf("ExtractTree: %v", err)
 	}
 	checkModes(t, dst, map[string]os.FileMode{

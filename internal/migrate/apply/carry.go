@@ -15,6 +15,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/space"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // Bulk is what a snapshot holds beyond the extract the checks read: Plex's artwork
@@ -26,8 +27,9 @@ type Bulk interface {
 	// Measure is what staging one instance writes at the config root, counted as
 	// the snapshot was verified.
 	Measure(instance string) (Staged, error)
-	// Stage writes one instance's whole config into dst, owned by uid:gid.
-	Stage(instance, dst string, uid, gid int) (Staged, error)
+	// Stage writes one instance's whole config into dst, a name inside the run's
+	// config root, owned by uid:gid.
+	Stage(instance string, config *safefs.Anchor, dst string, uid, gid int) (Staged, error)
 }
 
 // carryDecision is one app's carry for this run: whether its whole data is
@@ -135,12 +137,12 @@ func appText(name, line string) string {
 
 // stageTrimmed stages the state under the app's home, not at the mount's top: an
 // migration must not cause.
-func stageTrimmed(dst, src string, state plex.Scope, uid, gid int) (Staged, error) {
+func stageTrimmed(config *safefs.Anchor, dst, src string, state plex.Scope, uid, gid int) (Staged, error) {
 	names := make([]string, len(state.Files))
 	for i, f := range state.Files {
 		names[i] = path.Join(homeRelative(src, state), f.Path)
 	}
-	return copyFiles(dst, src, names, uid, gid)
+	return copyFiles(config, dst, src, names, uid, gid)
 }
 
 // homeRelative is the app's home inside its config directory, empty for the root.

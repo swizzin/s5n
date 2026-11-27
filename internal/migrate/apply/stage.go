@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,29 +39,30 @@ type Staged struct {
 	Bytes int64
 }
 
-// copyTree copies src into dst, which must not exist: modes and mtimes kept, every
-// file and directory owned by uid:gid, and kernel files refused.
-func copyTree(dst, src string, uid, gid int) (Staged, error) {
-	return copy(dst, src, uid, gid, false, true)
+// copyTree copies src into dst, a name inside the run's config root, which must not
+// exist: modes and mtimes kept, every file and directory owned by uid:gid, and kernel
+// files refused.
+func copyTree(at *safefs.Anchor, dst, src string, uid, gid int) (Staged, error) {
+	return copy(at, dst, src, uid, gid, false, true)
 }
 
 // copyForCheck copies a tree for a read-only pass, from a source that may still be
 // running: a device, socket or fifo is left out rather than refused.
-func copyForCheck(dst, src string, uid, gid int) (Staged, error) {
-	return copy(dst, src, uid, gid, true, true)
+func copyForCheck(at *safefs.Anchor, dst, src string, uid, gid int) (Staged, error) {
+	return copy(at, dst, src, uid, gid, true, true)
 }
 
 // measureTree copies for measurement only: no owner is needed, and it is what a
 // pass before an install does to count a tree it does not keep.
-func measureTree(dst, src string) (Staged, error) {
-	return copy(dst, src, 0, 0, false, false)
+func measureTree(at *safefs.Anchor, dst, src string) (Staged, error) {
+	return copy(at, dst, src, 0, 0, false, false)
 }
 
 // copyFiles copies the named files with their directories, under copyTree's rules;
 // a missing one is not a refusal, since a -wal exists only while the database has
 // it open.
-func copyFiles(dst, src string, files []string, uid, gid int) (Staged, error) {
-	c, err := newCopier(dst, src, uid, gid, true, true)
+func copyFiles(at *safefs.Anchor, dst, src string, files []string, uid, gid int) (Staged, error) {
+	c, err := newCopier(at, dst, src, uid, gid, true, true)
 	if err != nil {
 		return Staged{}, err
 	}
@@ -70,8 +72,8 @@ func copyFiles(dst, src string, files []string, uid, gid int) (Staged, error) {
 
 // measureFiles is copyFiles for a pass that throws the copy away: the same files,
 // counted.
-func measureFiles(dst, src string, files []string) (Staged, error) {
-	c, err := newCopier(dst, src, 0, 0, true, false)
+func measureFiles(at *safefs.Anchor, dst, src string, files []string) (Staged, error) {
+	c, err := newCopier(at, dst, src, 0, 0, true, false)
 	if err != nil {
 		return Staged{}, err
 	}
@@ -81,17 +83,17 @@ func measureFiles(dst, src string, files []string) (Staged, error) {
 
 // newCopier opens both trees. The one written stays box's own, 0700, until the last
 // entry is in it, and every read and write below goes through its os.Root: the
-// source is the seedbox's user's, and the copy's own tree hangs off a config root
-// it can write, so a path resolved twice is a link followed once.
-func newCopier(dst, src string, uid, gid int, skipKernel, own bool) (*copier, error) {
-	from, err := safefs.Open(src)
+// source is the seedbox's user's, and the copy's own tree hangs off a config root it
+// can write, so a path resolved twice is a link followed once.
+func newCopier(at *safefs.Anchor, dst, src string, uid, gid int, skipKernel, own bool) (*copier, error) {
+	from, err := safefs.OpenAt(src)
 	if err != nil {
 		return nil, err
 	}
-	to, err := safefs.Make(dst, 0o700)
+	to, err := safefs.Make(at, dst, 0o700)
 	if err != nil {
 		from.Close()
-		return nil, fmt.Errorf("create %s: %w", dst, err)
+		return nil, fmt.Errorf("create %s: %w", at.Path(dst), err)
 	}
 	return &copier{src: from, dst: to, uid: uid, gid: gid, skipKernel: skipKernel, own: own}, nil
 }
@@ -120,8 +122,8 @@ func (c *copier) files(src string, files []string) (Staged, error) {
 }
 
 // copy is the walk, with kernel files left out or refused.
-func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
-	c, err := newCopier(dst, src, uid, gid, skipKernel, own)
+func copy(at *safefs.Anchor, dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
+	c, err := newCopier(at, dst, src, uid, gid, skipKernel, own)
 	if err != nil {
 		return Staged{}, err
 	}
@@ -408,35 +410,46 @@ func modeName(m fs.FileMode) string {
 	return "special file"
 }
 
-// emptyDir reports whether path is a directory with nothing in it. A path that
-// is not a directory is not empty: the caller refuses it rather than deleting
-// something it did not create.
-func emptyDir(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
+// rootEmptyDir reports whether name inside root is a directory with nothing in it. A
+// name that is not a directory is not empty: the caller refuses it rather than
+// deleting something it did not create.
+func rootEmptyDir(root *os.Root, name string) (bool, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
 	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return false, err
+	}
 	return len(entries) == 0, nil
 }
 
-// emptyTree reports whether path holds only directories: a box-made rename target
-// (internal/wiring/dirs.go) may be removed, while an absent one is not empty.
-func emptyTree(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
+// rootEmptyTree reports whether name inside root holds only directories: a box-made
+// rename target (internal/wiring/dirs.go) may be removed, while an absent one is not
+// empty.
+func rootEmptyTree(root *os.Root, name string) (bool, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
+		return false, err
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
+	if err != nil {
 		return false, err
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			return false, nil
 		}
-		ok, err := emptyTree(filepath.Join(path, e.Name()))
+		ok, err := rootEmptyTree(root, path.Join(name, e.Name()))
 		if err != nil || !ok {
 			return false, err
 		}
@@ -444,22 +457,40 @@ func emptyTree(path string) (bool, error) {
 	return true, nil
 }
 
-// removeEmptyTree removes empty directories only: os.Remove fails if one stopped
-// being empty, and that is the answer rather than a reason to force it.
-func removeEmptyTree(path string) error {
-	entries, err := os.ReadDir(path)
+// rootRemoveEmptyTree removes empty directories only: Root.Remove fails if one
+// stopped being empty, and that is the answer rather than a reason to force it.
+func rootRemoveEmptyTree(root *os.Root, name string) error {
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
-			return fmt.Errorf("%s holds %s, which is not a directory", filepath.Join(path, e.Name()), e.Name())
+			return fmt.Errorf("%s holds %s, which is not a directory", path.Join(name, e.Name()), e.Name())
 		}
-		if err := removeEmptyTree(filepath.Join(path, e.Name())); err != nil {
+		if err := rootRemoveEmptyTree(root, path.Join(name, e.Name())); err != nil {
 			return err
 		}
 	}
-	return os.Remove(path)
+	return root.Remove(name)
+}
+
+// rootIsDir reports whether name inside root is a directory, without an error:
+// callers are asking whether there is a directory there at all.
+func rootIsDir(root *os.Root, name string) bool {
+	info, err := root.Stat(name)
+	return err == nil && info.IsDir()
+}
+
+// rootExists reports whether anything is at name inside root, following nothing.
+func rootExists(root *os.Root, name string) bool {
+	_, err := root.Lstat(name)
+	return err == nil
 }
 
 // isDir reports whether path is a directory, without an error: callers are
@@ -467,10 +498,4 @@ func removeEmptyTree(path string) error {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
-}
-
-// exists reports whether anything is at path.
-func exists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
 }

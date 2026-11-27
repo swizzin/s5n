@@ -12,17 +12,18 @@ import (
 )
 
 func TestSaveStateRoundTrips(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "nested", "dir")
+	config := anchorFor(t, t.TempDir())
+	dir := "nested/dir"
 	want := &State{
 		Plan:    PlanDigest([]byte("version: 2\napps: {}\n")),
 		Renamed: []string{"Downloads"},
 		Moved:   []string{"sonarr"},
 		Owned:   true,
 	}
-	if err := saveState(dir, want); err != nil {
+	if err := saveState(config, dir, want); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	got, err := loadState(dir)
+	got, err := loadState(config, dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -34,7 +35,7 @@ func TestSaveStateRoundTrips(t *testing.T) {
 }
 
 func TestLoadStateOfANewPlanIsEmpty(t *testing.T) {
-	st, err := loadState(filepath.Join(t.TempDir(), "nothing"))
+	st, err := loadState(anchorFor(t, t.TempDir()), "nothing")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestLoadStateRefusesAHalfWrittenRecord(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"plan": "abc`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadState(dir); err == nil {
+	if _, err := loadState(anchorFor(t, dir), "."); err == nil {
 		t.Fatal("a truncated record was read as a record")
 	} else if !contains(err.Error(), dir) {
 		t.Errorf("the refusal does not name the directory to remove:\n%s", err)

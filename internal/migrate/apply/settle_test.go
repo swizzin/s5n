@@ -174,8 +174,9 @@ func (r *rehearsal) snapshotConfigs() string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		r.t.Fatal(err)
 	}
+	at := anchorFor(r.t, dir)
 	for app := range r.plan().Apps {
-		if _, err := copyTree(filepath.Join(dir, app), r.path(app), os.Geteuid(), os.Getegid()); err != nil {
+		if _, err := copyTree(at, app, r.path(app), os.Geteuid(), os.Getegid()); err != nil {
 			r.t.Fatalf("copy %s into the snapshot: %v", app, err)
 		}
 	}
@@ -837,7 +838,8 @@ func TestSettleReadsARunningAppsConfig(t *testing.T) {
 	}
 
 	// And apply's own copy still refuses what it would carry into the release.
-	if _, err := copyTree(filepath.Join(t.TempDir(), "staged"), r.path("qbittorrent"), os.Geteuid(), os.Getegid()); err == nil {
+	staged := t.TempDir()
+	if _, err := copyTree(anchorFor(t, staged), "staged", r.path("qbittorrent"), os.Geteuid(), os.Getegid()); err == nil {
 		t.Error("the staging copy carried a socket")
 	}
 }

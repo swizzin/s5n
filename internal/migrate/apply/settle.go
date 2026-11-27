@@ -26,6 +26,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 	"github.com/swizzin/s5n/internal/migrate/work"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // The three decisions the called-out list groups by.
@@ -192,7 +193,12 @@ func Settle(ctx context.Context, p *plan.Plan, in SettleInput) (*plan.Plan, Sett
 		return nil, nil, fmt.Errorf("settle: %w", err)
 	}
 	defer done()
-	s := &settler{in: in, plan: copyPlan(p), dir: dir}
+	root, err := safefs.OpenAnchor(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("settle: %w", err)
+	}
+	defer root.Close()
+	s := &settler{in: in, plan: copyPlan(p), dir: dir, root: root}
 	if err := s.checkAll(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -210,9 +216,12 @@ func Settle(ctx context.Context, p *plan.Plan, in SettleInput) (*plan.Plan, Sett
 // settler is one Settle run: the plan it is building, the private copies of the
 // configs, and the reports they produced.
 type settler struct {
-	in      SettleInput
-	plan    *plan.Plan
+	in   SettleInput
+	plan *plan.Plan
+	// dir is the private work directory on the host, root the same directory
+	// held open: every copy is made inside it by name, never by path.
 	dir     string
+	root    *safefs.Anchor
 	reports []rewrite.Report
 	settled Settled
 }
@@ -272,11 +281,10 @@ func (s *settler) checkAll(ctx context.Context) error {
 			})
 			continue
 		}
-		dir := filepath.Join(s.dir, name)
-		if err := s.stageForCheck(catalog, dir, src); err != nil {
+		if err := s.stageForCheck(catalog, name, src); err != nil {
 			return fmt.Errorf("settle %s from %s: %w", name, src, err)
 		}
-		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: dir, Plan: s.plan, Targets: s.in.Targets, Runs: runs, Run: s.in.Run})
+		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: filepath.Join(s.dir, name), Plan: s.plan, Targets: s.in.Targets, Runs: runs, Run: s.in.Run})
 		if err != nil {
 			return fmt.Errorf("settle %s: %w", name, err)
 		}
@@ -293,12 +301,12 @@ func (s *settler) checkAll(ctx context.Context) error {
 // read of a source filled a host's disk. The copy is taken as a reader takes it
 // (stageTrimmed's rule: kernel files left out, links carried or skipped by
 // internal/linktree), because the source may still be running.
-func (s *settler) stageForCheck(app, dst, src string) error {
+func (s *settler) stageForCheck(app, name, src string) error {
 	if app == appPlex {
-		_, err := stageTrimmed(dst, src, plex.Snapshot(false), os.Geteuid(), os.Getegid())
+		_, err := stageTrimmed(s.root, name, src, plex.Snapshot(false), os.Geteuid(), os.Getegid())
 		return err
 	}
-	_, err := copyForCheck(dst, src, os.Geteuid(), os.Getegid())
+	_, err := copyForCheck(s.root, name, src, os.Geteuid(), os.Getegid())
 	return err
 }
 

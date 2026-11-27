@@ -18,6 +18,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/plex"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // plexSnapshot writes one final snapshot of a Plex source and returns its path and
@@ -112,8 +113,14 @@ func TestTheExtractionKeepsPlexsStateAndItsTreeIsStagedOnce(t *testing.T) {
 
 	// The tree is written once from the snapshot: the source's bytes, caches
 	// absent.
-	dst := filepath.Join(t.TempDir(), "plex")
-	staged, err := opened.Stage("plex", dst, os.Geteuid(), os.Getegid())
+	base := t.TempDir()
+	dst := filepath.Join(base, "plex")
+	at, err := safefs.OpenAnchor(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer at.Close()
+	staged, err := opened.Stage("plex", at, "plex", os.Geteuid(), os.Getegid())
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // swapTime is the time every entry of a swap test's archive carries.
@@ -182,5 +184,45 @@ func TestExtractDoesNotWriteThroughTheDirectoryHoldingIt(t *testing.T) {
 	_ = Extract(path, dir, m, nil, &Owner{UID: os.Geteuid(), GID: os.Getegid()})
 	if entries, err := os.ReadDir(landing); err != nil || len(entries) != 0 {
 		t.Errorf("%s, named by the link, holds %v (%v): the extraction wrote through it", landing, entries, err)
+	}
+}
+
+// The tree a run writes a snapshot's config into hangs off the seedbox's config
+// root, which its user owns: the tree is made through the handle the caller holds on
+// that root, so a `.box` swapped for a link out of it is a refusal and the directory
+// the link names is left alone.
+func TestExtractTreeWritesOnlyInsideItsRoot(t *testing.T) {
+	path, _ := modeArchive(t)
+	m, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	configRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(configRoot, ".box", "migrate", "abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := safefs.OpenAnchor(configRoot)
+	if err != nil {
+		t.Fatalf("open the config root: %v", err)
+	}
+	defer root.Close()
+	outside := t.TempDir()
+	if err := os.Rename(filepath.Join(configRoot, ".box"), filepath.Join(outside, "box")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "box"), filepath.Join(configRoot, ".box")); err != nil {
+		t.Fatal(err)
+	}
+
+	name := ".box/migrate/abc/app"
+	err = ExtractTree(root, name, path, "config/app", m, &Owner{UID: os.Geteuid(), GID: os.Getegid()})
+	if err == nil {
+		t.Fatal("the extraction ran through a .box that is a link out of the config root")
+	}
+	if !strings.Contains(err.Error(), ".box") {
+		t.Errorf("the refusal does not name the directory it would have written through:\n%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "box", "migrate", "abc", "app")); !os.IsNotExist(err) {
+		t.Errorf("the snapshot was extracted outside the config root: %v", err)
 	}
 }

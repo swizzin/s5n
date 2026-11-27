@@ -208,7 +208,7 @@ func (m *migration) keepKeys(ctx context.Context) error {
 		m.res.Keys = append(m.res.Keys, k.name)
 	}
 	m.st.Secret = true
-	if err := saveState(m.dir, m.st); err != nil {
+	if err := saveState(m.root, m.name, m.st); err != nil {
 		return err
 	}
 	// Written into the cluster; the run need not hold them.

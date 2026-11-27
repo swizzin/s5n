@@ -18,7 +18,7 @@ import (
 func TestCopyDoesNotOwnAFileSwappedForALink(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "settings.conf"), "mine\n", 0o600)
-	dst := filepath.Join(t.TempDir(), "copy")
+	base := t.TempDir()
 	outside := t.TempDir()
 	target := filepath.Join(outside, "elsewhere.conf")
 	writeFile(t, target, "not mine\n", 0o600)
@@ -37,7 +37,7 @@ func TestCopyDoesNotOwnAFileSwappedForALink(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeHand = func(string) error { return nil } })
 
-	if _, err := copyTree(dst, src, os.Geteuid(), os.Getegid()); err == nil {
+	if _, err := copyTree(anchorFor(t, base), "copy", src, os.Geteuid(), os.Getegid()); err == nil {
 		t.Fatal("the copy finished with its own file switched to a link out of it")
 	} else if !strings.Contains(err.Error(), "settings.conf") {
 		t.Errorf("the refusal does not name the file: %v", err)
@@ -67,7 +67,8 @@ func TestCopyDoesNotGiveADirectorySwappedForALink(t *testing.T) {
 	if err := os.Chmod(filepath.Join(src, "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(t.TempDir(), "copy")
+	base := t.TempDir()
+	dst := filepath.Join(base, "copy")
 	outside := t.TempDir()
 	at := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	if err := os.Chmod(outside, 0o701); err != nil {
@@ -87,7 +88,7 @@ func TestCopyDoesNotGiveADirectorySwappedForALink(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeDirs = func(string) error { return nil } })
 
-	if _, err := copyTree(dst, src, os.Geteuid(), os.Getegid()); err == nil {
+	if _, err := copyTree(anchorFor(t, base), "copy", src, os.Geteuid(), os.Getegid()); err == nil {
 		t.Fatal("the copy finished with a directory switched to a link out of it")
 	} else if !strings.Contains(err.Error(), "sub") {
 		t.Errorf("the refusal does not name the directory: %v", err)

@@ -21,8 +21,11 @@ func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summa
 	if err := Preflight(p, planBytes, env); err != nil {
 		return Summary{}, err
 	}
-	m.dir = stateDir(env.ConfigRoot, m.id)
-	st, err := loadState(m.dir)
+	if err := m.open(); err != nil {
+		return Summary{}, err
+	}
+	defer m.close()
+	st, err := loadState(m.root, m.name)
 	if err != nil {
 		return Summary{}, err
 	}

@@ -1,8 +1,9 @@
 package safefs
 
 // safefs_test.go proves the handle, not the path, is the tree: what box writes is
-// found again at the directory it was opened on, and a name that is a link out of
-// the directory holding it is refused rather than followed.
+// found again at the directory it was opened on, and a name that is a link out of the
+// directory holding it is refused rather than followed. anchor_test.go is the
+// directory the run is opened on.
 
 import (
 	"os"
@@ -15,8 +16,9 @@ import (
 // link's target: the directory box wrote into is the one that moves.
 func TestGiveRefusesATreeReplacedByALink(t *testing.T) {
 	base := t.TempDir()
+	anchor := anchorAt(t, base)
 	dir := filepath.Join(base, "tree")
-	tree, err := Make(dir, 0o700)
+	tree, err := Make(anchor, "tree", 0o700)
 	if err != nil {
 		t.Fatalf("Make: %v", err)
 	}
@@ -62,7 +64,7 @@ func TestOpenRefusesALinkOutOfTheDirectoryHoldingIt(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(base, "app")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(filepath.Join(base, "app")); err == nil {
+	if _, err := Open(anchorAt(t, base), "app"); err == nil {
 		t.Fatalf("%s is a link to %s and was opened as a tree", filepath.Join(base, "app"), outside)
 	}
 }
@@ -71,8 +73,9 @@ func TestOpenRefusesALinkOutOfTheDirectoryHoldingIt(t *testing.T) {
 // a name that is already there is a refusal: box fills a tree it made.
 func TestMakeSetsTheModeAndRefusesAnExistingName(t *testing.T) {
 	base := t.TempDir()
+	anchor := anchorAt(t, base)
 	dir := filepath.Join(base, "tree")
-	tree, err := Make(dir, 0o700)
+	tree, err := Make(anchor, "tree", 0o700)
 	if err != nil {
 		t.Fatalf("Make: %v", err)
 	}
@@ -84,7 +87,7 @@ func TestMakeSetsTheModeAndRefusesAnExistingName(t *testing.T) {
 	if info.Mode().Perm() != 0o700 {
 		t.Errorf("%s is %04o, want 0700", dir, info.Mode().Perm())
 	}
-	if _, err := Make(dir, 0o700); err == nil {
+	if _, err := Make(anchor, "tree", 0o700); err == nil {
 		t.Errorf("%s was made twice", dir)
 	}
 }
@@ -93,7 +96,7 @@ func TestMakeSetsTheModeAndRefusesAnExistingName(t *testing.T) {
 // would otherwise clear the bits it sets.
 func TestGiveSetsTheModeOfTheTreeItOpened(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tree")
-	tree, err := Make(dir, 0o700)
+	tree, err := Make(anchorAt(t, filepath.Dir(dir)), "tree", 0o700)
 	if err != nil {
 		t.Fatalf("Make: %v", err)
 	}
@@ -112,19 +115,20 @@ func TestGiveSetsTheModeOfTheTreeItOpened(t *testing.T) {
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
-// Remove deletes a tree box made, through the handle on the directory it was made
-// in, and refuses one it only opened: that is a seedbox user's config directory.
+// Remove deletes a tree box made, resolved from the anchor, and refuses one it only
+// opened: that is a seedbox user's config directory.
 func TestRemoveDeletesOnlyATreeBoxMade(t *testing.T) {
 	base := t.TempDir()
+	anchor := anchorAt(t, base)
 	dir := filepath.Join(base, "tree")
-	made, err := Make(dir, 0o700)
+	made, err := Make(anchor, "tree", 0o700)
 	if err != nil {
 		t.Fatalf("Make: %v", err)
 	}
 	if err := made.Root().WriteFile("settings.conf", []byte("mine\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	theirs, err := Open(dir)
+	theirs, err := Open(anchor, "tree")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -143,4 +147,16 @@ func TestRemoveDeletesOnlyATreeBoxMade(t *testing.T) {
 		t.Errorf("%s is still there after Remove: %v", dir, err)
 	}
 	made.Close()
+}
+
+// anchorAt opens dir as the anchor a test works in, which every tree in it is named
+// against.
+func anchorAt(t *testing.T, dir string) *Anchor {
+	t.Helper()
+	anchor, err := OpenAnchor(dir)
+	if err != nil {
+		t.Fatalf("OpenAnchor(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { anchor.Close() })
+	return anchor
 }

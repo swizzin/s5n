@@ -38,6 +38,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/safefs"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
@@ -399,9 +400,10 @@ func (b snapshotBulk) Measure(instance string) (apply.Staged, error) {
 	return apply.Staged{Files: c.Files, Bytes: c.Bytes}, nil
 }
 
-// Stage writes the whole of one instance's config out of the snapshot.
-func (b snapshotBulk) Stage(instance, dst string, uid, gid int) (apply.Staged, error) {
-	c, err := b.opened.Stage(instance, dst, uid, gid)
+// Stage writes the whole of one instance's config out of the snapshot, into the
+// name it has inside the run's config root.
+func (b snapshotBulk) Stage(instance string, config *safefs.Anchor, name string, uid, gid int) (apply.Staged, error) {
+	c, err := b.opened.Stage(instance, config, name, uid, gid)
 	if err != nil {
 		return apply.Staged{}, err
 	}

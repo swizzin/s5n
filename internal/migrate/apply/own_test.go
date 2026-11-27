@@ -119,9 +119,11 @@ apps:
 		t.Fatalf("parse a one-app plan: %v", err)
 	}
 	m := &migration{
-		p:   p,
-		dir: filepath.Join(root, ".box"),
-		env: Env{PUID: 4310, PGID: 4311},
+		p:    p,
+		root: anchorFor(t, root),
+		dir:  filepath.Join(root, ".box"),
+		name: ".box",
+		env:  Env{PUID: 4310, PGID: 4311},
 	}
 	staged := m.staging("sonarr")
 	writeFile(t, filepath.Join(staged, "config.xml"), "<Config/>", 0o640)
@@ -174,7 +176,7 @@ apps:
 	if err != nil {
 		t.Fatalf("parse a one-app plan: %v", err)
 	}
-	m := &migration{p: p, dir: filepath.Join(root, ".box"), env: Env{PUID: 4310, PGID: 4311}}
+	m := &migration{p: p, root: anchorFor(t, root), dir: filepath.Join(root, ".box"), name: ".box", env: Env{PUID: 4310, PGID: 4311}}
 	staged := m.staging("sonarr")
 	writeFile(t, filepath.Join(staged, "config.xml"), "<Config/>", 0o640)
 	m.env.Chown = func(path string, uid, gid int) error {
