@@ -696,6 +696,18 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// The cluster's policy enforcement is proved before this run writes anything,
+	// so a cluster that ignores policy is refused with the run unchanged. A fresh
+	// cluster has no namespace to prove in yet: it gets the proof once the
+	// namespace exists, below.
+	proved := false
+	if opts.NetworkProof != nil && nsp.Exists {
+		if err := opts.NetworkProof(ctx, namespace, chart, values); err != nil {
+			return res, err
+		}
+		proved = true
+	}
+
 	// Per-host TLS goes after the confirm and before the release; a stop leaves
 	// the release and old routes as they were.
 	if len(hostPlan.Hosts) > 0 || len(hostPlan.All) > 0 {
@@ -760,9 +772,9 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// The cluster's policy enforcement is proved here: the namespace exists, no app
-	// does, and a refusal costs the namespace alone.
-	if opts.NetworkProof != nil {
+	// A fresh cluster had no namespace to prove in: this run created it, and the
+	// proof goes before the first volume.
+	if opts.NetworkProof != nil && !proved {
 		if err := opts.NetworkProof(ctx, namespace, chart, values); err != nil {
 			return res, err
 		}

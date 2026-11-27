@@ -439,6 +439,37 @@ func TestNoNetworkProofWhenTheClusterNeedsNone(t *testing.T) {
 	}
 }
 
+// TestTheNetworkProofRunsOnAnExistingNamespaceBeforeAnyWrite: a box that is
+// already installed is proved before the run writes storage or a release.
+func TestTheNetworkProofRunsOnAnExistingNamespaceBeforeAnyWrite(t *testing.T) {
+	f := newFakes(t)
+	f.store.nsExists = true
+	f.netProof = func(context.Context, string, Chart, map[string]any) error {
+		f.events = append(f.events, "netproof")
+		return nil
+	}
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	at := func(name string) int {
+		for i, e := range f.events {
+			if strings.HasPrefix(e, name) {
+				return i
+			}
+		}
+		return -1
+	}
+	if at("netproof") < 0 {
+		t.Fatalf("the proof never ran: %v", f.events)
+	}
+	if at("storage") >= 0 && at("netproof") > at("storage") {
+		t.Errorf("storage was written before the proof: %v", f.events)
+	}
+	if at("netproof") > at("helm") {
+		t.Errorf("an app was installed before the proof: %v", f.events)
+	}
+}
+
 func TestFirstApplyInstallsWithTheGrantInCharge(t *testing.T) {
 	f := newFakes(t)
 	res, err := f.apply(t)

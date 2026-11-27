@@ -887,6 +887,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
+				// init's apply proves the cluster too: `box bootstrap` on a cluster
+				// box did not install reaches no other apply.
+				NetworkProof: networkPolicyProof(kc, o.recordPath, out),
 				// Without the hold, a re-run would move a rolled-back app onto
 				// the image it avoided.
 				Holds:  holds.values,
