@@ -3,6 +3,8 @@ package update
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -91,8 +93,16 @@ func (f *fakeCharts) publishVariants(version, minBox, upgradeFrom string, varian
 		Schema:   f.schema,
 		Catalog:  f.catalog,
 		Variants: variants,
+		Digest:   chartDigest(version),
 	}
 	f.releases = append(f.releases, release.Published{Version: version, MinBox: minBox, UpgradeFrom: upgradeFrom})
+}
+
+// chartDigest is the manifest digest a pulled release carries: one per version, so a
+// record naming one names the release it installed.
+func chartDigest(version string) string {
+	sum := sha256.Sum256([]byte(version))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // callLog orders every fake's calls; the order is part of the contract.
@@ -802,6 +812,36 @@ func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	if h.state.state.LastStep == nil || h.state.state.LastStep.To != "0.6.0" || h.state.state.LastStep.Outcome != OutcomeOK {
 		t.Fatalf("LastStep = %+v, want the last step to 0.6.0", h.state.state.LastStep)
 	}
+}
+
+func TestAStepRecordsTheChartDigestItInstalled(t *testing.T) {
+	// The digest is what the release's signature covers, and the release record is where
+	// a later run reads what the box is actually on.
+	t.Run("a passing step", func(t *testing.T) {
+		h := newHarness(t)
+		h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+		h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+		if _, err := h.run(t, false); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		rec := h.state.state.LastStep
+		if rec == nil || rec.ChartDigest != chartDigest("0.5.0") {
+			t.Fatalf("LastStep = %+v, want the digest of the chart it installed (%s)", rec, chartDigest("0.5.0"))
+		}
+	})
+	t.Run("a failed step", func(t *testing.T) {
+		h := newHarness(t)
+		h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+		h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+		h.app.errSeq = map[string][]error{"0.5.0": {nil, errors.New("wiring receipt says failed")}}
+		if _, err := h.run(t, false); err == nil {
+			t.Fatal("a failed wiring gate reported success")
+		}
+		rec := h.state.state.LastStep
+		if rec == nil || rec.ChartDigest != chartDigest("0.5.0") {
+			t.Fatalf("LastStep = %+v, want the digest of the chart it tried to install", rec)
+		}
+	})
 }
 
 func TestAWiringGateFailureStopsTheUpdate(t *testing.T) {

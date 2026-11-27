@@ -131,6 +131,8 @@ type StepPlan struct {
 	// HeldBack is the apps a rollback hold keeps on their image until a release
 	// pins another; the plan names the image it waits on.
 	HeldBack []string
+	// Digest is the target release's manifest digest, which its signature covers.
+	Digest string
 }
 
 // Copied is the moving apps whose catalog names files to copy; one without them
@@ -482,7 +484,7 @@ func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart
 				heldByRollback[app] = h
 			}
 		}
-		plans = append(plans, StepPlan{Step: s, Moving: moving, Images: images, Held: held, HeldBack: heldBack})
+		plans = append(plans, StepPlan{Step: s, Moving: moving, Images: images, Held: held, HeldBack: heldBack, Digest: to.Digest})
 		from = to
 	}
 	return plans, pins, heldByRollback, nil
@@ -1188,13 +1190,14 @@ func published(releases []release.Published, version string) bool {
 // recordOK records a passing step and drops failures at or below it.
 func (u *Updater) recordOK(res *Result, step StepPlan, revision int, rolledBack []string) error {
 	res.state.LastStep = &StepRecord{
-		From:       step.From,
-		To:         step.To,
-		At:         u.now(),
-		Outcome:    OutcomeOK,
-		Revision:   revision,
-		Moved:      step.Moving,
-		RolledBack: rolledBack,
+		From:        step.From,
+		To:          step.To,
+		At:          u.now(),
+		Outcome:     OutcomeOK,
+		Revision:    revision,
+		ChartDigest: step.Digest,
+		Moved:       step.Moving,
+		RolledBack:  rolledBack,
 	}
 	res.state.Failed = dropAtOrBelow(res.state.Failed, step.To)
 	return u.State.Save(res.state)
@@ -1204,14 +1207,15 @@ func (u *Updater) recordOK(res *Result, step StepPlan, revision int, rolledBack 
 // exists.
 func (u *Updater) recordFailed(res *Result, step StepPlan, revision int, gate, detail string) error {
 	res.state.LastStep = &StepRecord{
-		From:     step.From,
-		To:       step.To,
-		At:       u.now(),
-		Outcome:  OutcomeFailed,
-		Error:    detail,
-		Revision: revision,
-		Moved:    step.Moving,
-		Gate:     gate,
+		From:        step.From,
+		To:          step.To,
+		At:          u.now(),
+		Outcome:     OutcomeFailed,
+		Error:       detail,
+		Revision:    revision,
+		ChartDigest: step.Digest,
+		Moved:       step.Moving,
+		Gate:        gate,
 	}
 	if !containsVersion(res.state.Failed, step.To) {
 		res.state.Failed = append(res.state.Failed, step.To)

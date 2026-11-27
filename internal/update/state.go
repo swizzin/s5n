@@ -68,6 +68,9 @@ type StepRecord struct {
 	Error   string    `json:"error,omitempty"`
 	// Revision is the Helm revision the step began at.
 	Revision int `json:"revision,omitempty"`
+	// ChartDigest is the manifest digest of the chart the step installed: the digest
+	// the release's signature covers, and the one box pulled.
+	ChartDigest string `json:"chartDigest,omitempty"`
 	// Moved is the apps whose image the step moved.
 	Moved []string `json:"moved,omitempty"`
 	// RolledBack is the apps put back because the new image kept exiting; a
