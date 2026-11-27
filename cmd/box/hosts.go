@@ -142,18 +142,12 @@ func (a applyHosts) Prune(ctx context.Context, plan release.HostPlan) error {
 	if err != nil {
 		return err
 	}
-	wrote, err := platform.BoxHosts(ctx, cl)
+	drop, err := platform.PruneHosts(ctx, cl, plan.Served)
 	if err != nil {
-		return fmt.Errorf("read the hosts box serves: %w", err)
+		return err
 	}
-	drop := platform.Unserved(wrote, plan.Served)
 	if len(drop) == 0 {
 		return nil
-	}
-	for _, host := range drop {
-		if err := platform.DropHost(ctx, cl, host); err != nil {
-			return err
-		}
 	}
 	a.out.Rows([]say.Row{{Mark: say.MarkDone, Name: "hosts", State: "removed", Facts: []string{strings.Join(drop, ", ")}}})
 	// Seerr's own Application URL is a setting inside it, written by whoever set it up:

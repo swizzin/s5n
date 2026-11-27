@@ -692,15 +692,6 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 	}
-	// Then the other direction: a name a previous run served and this one does not keeps
-	// answering (and its Certificate renews) until it is removed. A run with nothing to
-	// add still has this to do, which is why it is not part of Ensure.
-	if pruner, ok := opts.Hosts.(HostPruner); ok {
-		if err := pruner.Prune(ctx, hostPlan); err != nil {
-			return res, err
-		}
-	}
-
 	// Write the anchor at the first point its namespace exists and before the
 	// release: a pod that starts without it crash-loops through Helm's wait. The
 	// same step writes OIDC client Secrets, so the login follows it.
@@ -814,6 +805,17 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	res.Revision = rev
 	r.Detail(fmt.Sprintf("applied %s revision %d in %s", ReleaseName, rev, namespace))
 	upgrade.Done(strings.Join(releaseFacts(values, res.FirstInstall, chartMoved, installed.ChartVersion), " · "))
+
+	// Then the other direction: a name a previous run served and this one does not keeps
+	// answering (and its Certificate renews) until it is removed. Only now: until Helm moved
+	// the routes, the old name is where the running app is reached, and a failed release
+	// keeps it. A name left behind is a listener with no route, so a failure here is the
+	// next apply's to retry, not this one's to fail.
+	if pruner, ok := opts.Hosts.(HostPruner); ok {
+		if err := pruner.Prune(ctx, hostPlan); err != nil {
+			r.Warn(fmt.Sprintf("an app host this box no longer serves is still on the Gateway; the next apply removes it: %v", err))
+		}
+	}
 
 	// The key is new; a still-absent one is an older chart, so print nothing.
 	if jellyfinPasswordNew {

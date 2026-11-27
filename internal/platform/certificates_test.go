@@ -1223,3 +1223,38 @@ func TestDropHostRemovesOneHostsPair(t *testing.T) {
 		t.Fatalf("deleted = %v, want %v", cl.deleted, want)
 	}
 }
+
+// An identity that cannot remove a host's objects -- a seedbox user's namespace-scoped
+// kubeconfig -- prunes nothing: their apply neither adds nor removes a
+// listener, and a refusal here must not fail it.
+func TestPruneHostsAsAUserTouchesNothing(t *testing.T) {
+	cl := &fakeCertCluster{deny: "gateways"}
+	cl.put("Gateway", GatewayNamespace, GatewayName, gatewayWith(
+		map[string]string{"https-seerr-box-example-com": "seerr.box.example.com"},
+		[]string{httpsListenerManager("seerr.box.example.com")}))
+	dropped, err := PruneHosts(context.Background(), cl, []string{"box.example.com"})
+	if err != nil || dropped != nil {
+		t.Fatalf("PruneHosts as a user = %v, %v; want nothing and no error", dropped, err)
+	}
+	if len(cl.deleted) != 0 || len(cl.writes) != 0 {
+		t.Fatalf("a user's prune deleted %v and wrote %d time(s)", cl.deleted, len(cl.writes))
+	}
+}
+
+// Root's prune drops exactly the names box wrote and this run does not serve.
+func TestPruneHostsDropsWhatIsNoLongerServed(t *testing.T) {
+	cl := &fakeCertCluster{}
+	cl.put("Gateway", GatewayNamespace, GatewayName, gatewayWith(
+		map[string]string{
+			"https-box-example-com":       "box.example.com",
+			"https-seerr-box-example-com": "seerr.box.example.com",
+		},
+		[]string{httpsListenerManager("box.example.com"), httpsListenerManager("seerr.box.example.com")}))
+	dropped, err := PruneHosts(context.Background(), cl, []string{"box.example.com", "requests.box.example.com"})
+	if err != nil {
+		t.Fatalf("PruneHosts: %v", err)
+	}
+	if strings.Join(dropped, ",") != "seerr.box.example.com" {
+		t.Fatalf("dropped = %v, want seerr.box.example.com alone", dropped)
+	}
+}

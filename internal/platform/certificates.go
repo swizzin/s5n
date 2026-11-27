@@ -862,6 +862,41 @@ func Unserved(wrote, served []string) []string {
 	return out
 }
 
+// PruneHosts removes every host box's managers wrote that served does not name, and
+// returns the names it dropped. An identity that may not remove a host's objects -- a
+// seedbox user's namespace-scoped kubeconfig -- prunes nothing: the listeners are root's.
+func PruneHosts(ctx context.Context, cl CertificateCluster, served []string) ([]string, error) {
+	denied, err := kube.Denied(ctx, cl, pruneAccess())
+	if err != nil {
+		return nil, err
+	}
+	if len(denied) > 0 {
+		return nil, nil
+	}
+	wrote, err := BoxHosts(ctx, cl)
+	if err != nil {
+		return nil, fmt.Errorf("read the hosts box serves: %w", err)
+	}
+	drop := Unserved(wrote, served)
+	for _, host := range drop {
+		if err := DropHost(ctx, cl, host); err != nil {
+			return nil, err
+		}
+	}
+	return drop, nil
+}
+
+// pruneAccess is what DropHost needs: the listener is an apply on the Gateway, the rest
+// are deletes.
+func pruneAccess() []Access {
+	return []Access{
+		{Verb: kube.VerbApply, Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
+		{Verb: kube.VerbDelete, Group: "gateway.networking.k8s.io", Resource: "httproutes", Namespace: GatewayNamespace, What: "HTTPRoutes in " + GatewayNamespace},
+		{Verb: kube.VerbDelete, Group: "gateway.envoyproxy.io", Resource: "securitypolicies", Namespace: GatewayNamespace, What: "SecurityPolicies in " + GatewayNamespace},
+		{Verb: kube.VerbDelete, Group: "cert-manager.io", Resource: "certificates", Namespace: GatewayNamespace, What: "cert-manager Certificates in " + GatewayNamespace},
+	}
+}
+
 // DropHost removes one host box wrote: both of its listeners (each is that manager's
 // alone, so dropping one leaves every other host's), then the objects named for the host.
 // Port 80 first: a name with no 443 must not keep answering a redirect to it.

@@ -683,7 +683,7 @@ func TestAPrunerIsToldWhatThisRunServes(t *testing.T) {
 	// The fixture runs radarr, the one hosted app: its name is what this run serves beside
 	// the box's own.
 	enableRadarrInGrant(t, f.grantPath)
-	f.hosts = &fakeHosts{} // nothing missing, nothing stale
+	f.hosts = &fakeHosts{events: &f.events} // nothing missing, nothing stale
 	if _, err := f.apply(t); err != nil {
 		t.Fatalf("apply: %v\n%s", err, f.out)
 	}
@@ -697,20 +697,36 @@ func TestAPrunerIsToldWhatThisRunServes(t *testing.T) {
 	if len(got) < 2 || got[1] != "radarr.box.example.com" {
 		t.Fatalf("served = %v, want every name this run serves", got)
 	}
-	// It runs after the write, so a name this run adds is never removed in the same run.
-	if f.events != nil {
-		if a, b := eventIndex(f.events, "prune"), eventIndex(f.events, "helm"); a > -1 && b > -1 && a > b {
-			t.Fatalf("events = %v, want pruning before the release", f.events)
-		}
+	// After the release: until Helm has moved the routes, the old name is the one the
+	// running app is reached at.
+	if a, b := eventIndex(f.events, "prune"), eventIndex(f.events, "helm"); a < 0 || b < 0 || a < b {
+		t.Fatalf("events = %v, want pruning after the release", f.events)
 	}
 }
 
-// A step that cannot read or drop a name stops the run: a half-pruned box serves a name
-// nobody asked for.
-func TestAFailedPruneStopsTheRun(t *testing.T) {
+// A release that fails keeps the old routes, so the names they are served at stay: a
+// rename or a switched-off app whose upgrade failed must still be reachable.
+func TestAFailedReleasePrunesNothing(t *testing.T) {
+	f := newFakes(t)
+	f.hosts = &fakeHosts{events: &f.events}
+	f.rel.upgradeErr = errors.New("helm: timed out waiting for the condition")
+	if _, err := f.apply(t); err == nil {
+		t.Fatalf("apply succeeded after a failed release\n%s", f.out)
+	}
+	if len(f.hosts.prunes) != 0 {
+		t.Fatalf("a failed release pruned %d time(s)", len(f.hosts.prunes))
+	}
+}
+
+// A name left behind is a listener with no route, answering 404: a warning the next apply
+// retries, not a failed apply after the release moved.
+func TestAFailedPruneIsAWarning(t *testing.T) {
 	f := newFakes(t)
 	f.hosts = &fakeHosts{pruneErr: errors.New("the API server refused the write")}
-	if _, err := f.apply(t); err == nil {
-		t.Fatalf("apply succeeded after a failed prune\n%s", f.out)
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply failed on a prune: %v\n%s", err, f.out)
+	}
+	if !strings.Contains(f.out.String(), "the API server refused the write") {
+		t.Fatalf("the prune failure was not shown:\n%s", f.out)
 	}
 }
