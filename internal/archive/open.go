@@ -16,10 +16,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/swizzin/s5n/internal/linktree"
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // maxManifest is the largest manifest this box reads. A real config tree is
@@ -27,6 +29,10 @@ import (
 // manifest runs to megabytes: 64 MiB is a quarter of a million files, and Close
 // refuses to write past it, so no archive exists that a box cannot read back.
 var maxManifest int64 = 64 << 20
+
+// beforeEntry is a test's seam: it runs as one entry is about to be written, which
+// is one of the moments the directory holding the extraction can change under it.
+var beforeEntry = func(name string) error { return nil }
 
 // Read is what an archive says about itself, without extracting it: the kind, the
 // mode, when and by which box it was written, and the entry per path. A caller
@@ -71,27 +77,7 @@ func Open(archive, dir string) (*Manifest, error) {
 // entry it skips has to have been checked already by Verify. What it does not write
 // is still checked as it is skipped.
 func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
-	if _, err := os.Lstat(dir); err == nil {
-		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := hand(own, dir, false); err != nil {
-		os.RemoveAll(dir)
-		return err
-	}
-	if err := extract(archive, dir, "", m, keep, own); err != nil {
-		// A half-extracted tree is worse than none: it looks like a snapshot.
-		os.RemoveAll(dir)
-		return err
-	}
-	return nil
+	return extractInto(archive, dir, "", m, keep, own)
 }
 
 // ExtractTree writes the subtree under prefix into dir, with the prefix taken off its
@@ -99,27 +85,352 @@ func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 // run stages at the config root. Its bytes are checked against the manifest again as
 // they are written.
 func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
+	return extractInto(archive, dir, path.Clean(prefix), m, nil, own)
+}
+
+// extractInto makes dir and fills it. The tree stays box's own, 0700, until every
+// entry is written and none of the work goes through a path resolved outside it, so
+// the seedbox's user -- who can write the directory holding it, and who would be
+// handed the link's target by a chown by path -- cannot reach anything under it
+// while it is being filled. dir is given to the owner last.
+func extractInto(archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
 	if _, err := os.Lstat(dir); err == nil {
 		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	tree, err := safefs.Make(dir, 0o700)
+	if err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	// The tree's own directory belongs to whoever runs the app: the pod reads it as its
-	// subPath, and a directory only box can enter is a config the app cannot open at
-	// all -- "unable to open database file" from a database right there.
-	if err := hand(own, dir, false); err != nil {
-		os.RemoveAll(dir)
+	defer tree.Close()
+	if err := extract(archive, tree, base, m, keep, own); err != nil {
+		// A half-extracted tree is worse than none: it looks like a snapshot.
+		if rerr := tree.Remove(); rerr != nil {
+			return fmt.Errorf("%w (and %s could not be removed: %v)", err, dir, rerr)
+		}
 		return err
 	}
-	if err := extract(archive, dir, path.Clean(prefix), m, nil, own); err != nil {
-		os.RemoveAll(dir)
+	return nil
+}
+
+// extract is the second pass: every tar entry keep accepts is checked against the
+// manifest and written, and every manifest entry keep accepts has to appear. base,
+// when not empty, is the one subtree written, with its name taken off the paths.
+func extract(archive string, tree *safefs.Tree, base string, m *Manifest, keep Filter, own *Owner) error {
+	f, gz, err := openArchive(archive)
+	if err != nil {
 		return err
+	}
+	defer f.Close()
+	ex := &extractor{archive: archive, tree: tree, m: m, keep: keep, own: own, seen: make(map[string]bool, len(m.Entries))}
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read %s: %w", archive, err)
+		}
+		if err := ex.entry(tr, hdr, base); err != nil {
+			return err
+		}
+	}
+	// The same drain as the first pass: the gzip trailer is what proves the
+	// file reached its end.
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return fmt.Errorf("read %s: %w", archive, err)
+	}
+	for _, name := range m.names() {
+		if keep != nil && !keep(name) {
+			// A later pass writes it, and Verify checked it.
+			continue
+		}
+		if base != "" && name != base && !strings.HasPrefix(name, base+"/") {
+			continue
+		}
+		if !ex.seen[name] {
+			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
+		}
+	}
+	return ex.give()
+}
+
+// extractor is one extraction in progress: the tree it writes through, and the
+// entries whose owner, mode and time are given once the whole tree is in.
+type extractor struct {
+	archive string
+	tree    *safefs.Tree
+	m       *Manifest
+	keep    Filter
+	own     *Owner
+	seen    map[string]bool
+	// held is every entry waiting for the end: a directory's mode, time and owner,
+	// a link's owner alone.
+	held []held
+	// top is the tree's own directory entry, when the archive has one: a subtree
+	// extracted as an instance's config directory is the source's.
+	top *held
+}
+
+// held is one extracted path's source mode and time, out of its tar header, which
+// checkEntry has held to the manifest's mode.
+type held struct {
+	// name is the path inside the archive, which is what a refusal prints.
+	name  string
+	rel   string
+	mode  fs.FileMode
+	mtime time.Time
+	// link is a symlink: it is owned (never followed) and has no mode or time of
+	// its own to set.
+	link bool
+}
+
+func heldOf(rel, name string, hdr *tar.Header) held {
+	return held{name: name, rel: rel, mode: fs.FileMode(hdr.Mode) & fs.ModePerm, mtime: hdr.ModTime}
+}
+
+// entry checks one tar entry against the manifest and writes it, unless keep
+// leaves it for a later pass. A directory and a link are owned and given their mode
+// and time at the end, once nothing is written into them any more; a file's are set
+// while it is open.
+func (ex *extractor) entry(tr *tar.Reader, hdr *tar.Header, base string) error {
+	name := path.Clean(hdr.Name)
+	// The manifest was verified in the first pass, and readManifest refuses an
+	// archive with anything after it; the entry itself is not extracted.
+	if name == ManifestName {
+		return nil
+	}
+	if !safeName(name) {
+		return fmt.Errorf("%s holds %q, which is not a path inside an archive", ex.archive, hdr.Name)
+	}
+	if ex.m.lookup(name) == nil {
+		return fmt.Errorf("%s holds %s, which its manifest does not name", ex.archive, name)
+	}
+	if ex.seen[name] {
+		return fmt.Errorf("%s holds %s twice", ex.archive, name)
+	}
+	if ex.keep != nil && !ex.keep(name) {
+		return nil
+	}
+	rel := name
+	if base != "" {
+		if name == base {
+			ex.seen[name] = true
+			return ex.base(name, tr, hdr)
+		}
+		var ok bool
+		if rel, ok = strings.CutPrefix(name, base+"/"); !ok {
+			return nil
+		}
+	}
+	if err := beforeEntry(name); err != nil {
+		return err
+	}
+	ex.seen[name] = true
+	if err := ex.parents(rel, name); err != nil {
+		return err
+	}
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		if _, err := checkEntry(ex.archive, nil, ex.m, tr, hdr); err != nil {
+			return err
+		}
+		if err := ex.mkdir(rel, name); err != nil {
+			return err
+		}
+		ex.held = append(ex.held, heldOf(rel, name, hdr))
+		return nil
+	case tar.TypeReg:
+		return ex.file(rel, name, tr, hdr)
+	case tar.TypeSymlink:
+		if _, err := checkEntry(ex.archive, nil, ex.m, tr, hdr); err != nil {
+			return err
+		}
+		if err := ex.link(rel, name, hdr.Linkname); err != nil {
+			return err
+		}
+		ex.held = append(ex.held, held{name: name, rel: rel, link: true})
+		return nil
+	}
+	// checkEntry refuses the rest by name: a hardlink, a device, a fifo.
+	_, err := checkEntry(ex.archive, nil, ex.m, tr, hdr)
+	return err
+}
+
+// base takes the subtree's own directory entry: the extraction directory itself is
+// what it becomes, and it is already there. It is the instance's config directory,
+// so its mode is the source's too.
+func (ex *extractor) base(name string, tr *tar.Reader, hdr *tar.Header) error {
+	if hdr.Typeflag != tar.TypeDir {
+		return fmt.Errorf("%s holds %s as a %s, and it is the tree being extracted: it has to be a directory", ex.archive, name, typeName(hdr.Typeflag))
+	}
+	if _, err := checkEntry(ex.archive, nil, ex.m, tr, hdr); err != nil {
+		return err
+	}
+	top := heldOf(".", name, hdr)
+	ex.top = &top
+	return nil
+}
+
+// file writes one regular file, checks its bytes against the manifest as they are
+// written, and gives it its owner, mode and time: the first two through the handle
+// it is already open on, so the file that was checked is the file that is owned.
+func (ex *extractor) file(rel, name string, tr *tar.Reader, hdr *tar.Header) error {
+	root := ex.tree.Root()
+	out, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("extract %s: %w", name, ex.tree.Err(rel, err))
+	}
+	_, cerr := checkEntry(ex.archive, out, ex.m, tr, hdr)
+	if cerr == nil && ex.own != nil {
+		if err := out.Chown(ex.own.UID, ex.own.GID); err != nil {
+			cerr = fmt.Errorf("own %s: %w", ex.tree.Path(rel), err)
+		}
+	}
+	if cerr == nil {
+		if err := out.Chmod(fs.FileMode(hdr.Mode) & fs.ModePerm); err != nil {
+			cerr = fmt.Errorf("extract %s: %w", ex.tree.Path(rel), err)
+		}
+	}
+	if err := out.Close(); cerr == nil {
+		cerr = ex.tree.Err(rel, err)
+	}
+	if cerr != nil {
+		return cerr
+	}
+	if err := root.Chtimes(rel, hdr.ModTime, hdr.ModTime); err != nil {
+		return fmt.Errorf("extract %s: %w", ex.tree.Path(rel), ex.tree.Err(rel, err))
+	}
+	return nil
+}
+
+// link writes one symlink under internal/linktree's rule, so a link that leaves the
+// tree the archive names is refused rather than materialised.
+func (ex *extractor) link(rel, name, linkname string) error {
+	res, err := linktree.Resolve(ex.tree.Dir(), filepath.FromSlash(rel), linkname)
+	if err != nil {
+		return err
+	}
+	if res.Skip {
+		return fmt.Errorf("%s is a link to %s, which names the kernel's own filesystems: box leaves such a link out, so this is not an archive box wrote", name, linkname)
+	}
+	if err := ex.tree.Root().Symlink(res.Target, rel); err != nil {
+		return fmt.Errorf("extract %s: %w", name, ex.tree.Err(rel, err))
+	}
+	return nil
+}
+
+// parents creates the directories a path needs, 0700, and refuses a parent that is
+// already something else: an archive cannot be allowed to write through a link it
+// brought with it.
+func (ex *extractor) parents(rel, name string) error {
+	parent := path.Dir(rel)
+	if parent == "." || parent == "/" {
+		return nil
+	}
+	root := ex.tree.Root()
+	parts := strings.Split(parent, "/")
+	for i := range parts {
+		at := path.Join(parts[:i+1]...)
+		info, err := root.Lstat(at)
+		switch {
+		case err == nil:
+			if !info.IsDir() {
+				return fmt.Errorf("extract %s: %s is not a directory", name, at)
+			}
+		case errors.Is(err, fs.ErrNotExist):
+			if err := root.Mkdir(at, 0o700); err != nil {
+				return fmt.Errorf("extract %s: %w", name, ex.tree.Err(at, err))
+			}
+		default:
+			return fmt.Errorf("extract %s: %w", name, ex.tree.Err(at, err))
+		}
+	}
+	return nil
+}
+
+// mkdir makes one directory entry, 0700 until give() sets the source's mode, and
+// refuses a path that is already something else.
+func (ex *extractor) mkdir(rel, name string) error {
+	root := ex.tree.Root()
+	if info, err := root.Lstat(rel); err == nil && !info.IsDir() {
+		return fmt.Errorf("extract %s: it is already there and is not a directory", name)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("extract %s: %w", name, ex.tree.Err(rel, err))
+	}
+	if err := root.Mkdir(rel, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("extract %s: %w", name, ex.tree.Err(rel, err))
+	}
+	if err := root.Chmod(rel, 0o700); err != nil {
+		return fmt.Errorf("extract %s: %w", name, ex.tree.Err(rel, err))
+	}
+	return nil
+}
+
+// give gives the extraction to the owner: every entry deepest first, and the tree's
+// own directory last. A directory's own mtime is its last child written, and until
+// the top is given away the owner cannot enter the tree at all, so what it holds is
+// box's own while box is still working in it.
+func (ex *extractor) give() error {
+	order := make([]held, len(ex.held))
+	copy(order, ex.held)
+	sort.SliceStable(order, func(i, j int) bool {
+		di, dj := strings.Count(order[i].rel, "/"), strings.Count(order[j].rel, "/")
+		if di != dj {
+			return di > dj
+		}
+		return order[i].rel < order[j].rel
+	})
+	for _, h := range order {
+		if err := ex.hand(h); err != nil {
+			return err
+		}
+	}
+	return ex.giveTop()
+}
+
+// hand gives one entry to the owner and sets its mode and time. It never follows a
+// link: a directory that is one by now is not the directory that was extracted.
+func (ex *extractor) hand(h held) error {
+	root := ex.tree.Root()
+	if ex.own != nil {
+		if err := root.Lchown(h.rel, ex.own.UID, ex.own.GID); err != nil {
+			return fmt.Errorf("own %s: %w", ex.tree.Path(h.rel), ex.tree.Err(h.rel, err))
+		}
+	}
+	if h.link {
+		return nil
+	}
+	if err := root.Chmod(h.rel, h.mode); err != nil {
+		return fmt.Errorf("extract %s: %w", ex.tree.Path(h.rel), ex.tree.Err(h.rel, err))
+	}
+	if err := root.Chtimes(h.rel, h.mtime, h.mtime); err != nil {
+		return fmt.Errorf("extract %s: %w", ex.tree.Path(h.rel), ex.tree.Err(h.rel, err))
+	}
+	return nil
+}
+
+// giveTop gives the extraction's own directory to the owner, last, through a handle
+// that is opened without following a link: a tree replaced by one since it was made
+// is refused rather than owned.
+func (ex *extractor) giveTop() error {
+	mode := fs.FileMode(0o700)
+	if ex.top != nil {
+		mode = ex.top.mode
+	}
+	if ex.own != nil {
+		if err := ex.tree.Give(ex.own.UID, ex.own.GID, mode); err != nil {
+			return fmt.Errorf("own %s: %w", ex.tree.Dir(), err)
+		}
+	} else if err := ex.tree.Root().Chmod(".", mode); err != nil {
+		return fmt.Errorf("extract to %s: %w", ex.tree.Dir(), err)
+	}
+	if ex.top != nil {
+		if err := ex.tree.Root().Chtimes(".", ex.top.mtime, ex.top.mtime); err != nil {
+			return fmt.Errorf("extract to %s: %w", ex.tree.Dir(), err)
+		}
 	}
 	return nil
 }
@@ -190,262 +501,6 @@ func readManifest(archive string) (*Manifest, error) {
 	}
 	return &m, nil
 }
-
-// extract is the second pass: every tar entry keep accepts is checked against the
-// manifest and written, and every manifest entry keep accepts has to appear. base,
-// when not empty, is the one subtree written, with its name taken off the paths.
-func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
-	f, gz, err := openArchive(archive)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	tr := tar.NewReader(gz)
-	seen := make(map[string]bool, len(m.Entries))
-	var dirs []restore
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read %s: %w", archive, err)
-		}
-		if err := extractEntry(archive, dir, base, m, tr, hdr, keep, own, seen, &dirs); err != nil {
-			return err
-		}
-	}
-	// The same drain as the first pass: the gzip trailer is what proves the
-	// file reached its end.
-	if _, err := io.Copy(io.Discard, gz); err != nil {
-		return fmt.Errorf("read %s: %w", archive, err)
-	}
-	for _, name := range m.names() {
-		if keep != nil && !keep(name) {
-			// A later pass writes it, and Verify checked it.
-			continue
-		}
-		if base != "" && name != base && !strings.HasPrefix(name, base+"/") {
-			continue
-		}
-		if !seen[name] {
-			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
-		}
-	}
-	// The directories last: each is written 0700 so its children can go in whatever the
-	// source's mode was, and its own time is the last child written, so neither is the
-	// source's until nothing more is.
-	for _, d := range dirs {
-		if err := d.apply(); err != nil {
-			return fmt.Errorf("%s: %w", archive, err)
-		}
-	}
-	return nil
-}
-
-// restore is one extracted path's source mode and time, out of its tar header,
-// which checkEntry has held to the manifest's mode.
-type restore struct {
-	path  string
-	name  string
-	mode  fs.FileMode
-	mtime time.Time
-}
-
-func restoreOf(target, name string, hdr *tar.Header) restore {
-	return restore{path: target, name: name, mode: fs.FileMode(hdr.Mode) & fs.ModePerm, mtime: hdr.ModTime}
-}
-
-// apply sets the mode, then the time: a chmod is not a write, so the order
-// only matters to a reader, and this is the order a reader expects.
-func (r restore) apply() error {
-	if err := os.Chmod(r.path, r.mode); err != nil {
-		return fmt.Errorf("extract %s: %w", r.name, err)
-	}
-	if err := os.Chtimes(r.path, r.mtime, r.mtime); err != nil {
-		return fmt.Errorf("extract %s: %w", r.name, err)
-	}
-	return nil
-}
-
-// extractEntry checks one tar entry against the manifest and writes it, unless keep
-// leaves it for a later pass. A directory's mode and time go to dirs, for extract to
-// set once every entry is written; a file's are set here as its bytes are checked.
-func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool, dirs *[]restore) error {
-	name := path.Clean(hdr.Name)
-	// The manifest was verified in the first pass, and readManifest refuses an
-	// archive with anything after it; the entry itself is not extracted.
-	if name == ManifestName {
-		return nil
-	}
-	if !safeName(name) {
-		return fmt.Errorf("%s holds %q, which is not a path inside an archive", archive, hdr.Name)
-	}
-	if m.lookup(name) == nil {
-		return fmt.Errorf("%s holds %s, which its manifest does not name", archive, name)
-	}
-	if seen[name] {
-		return fmt.Errorf("%s holds %s twice", archive, name)
-	}
-	if keep != nil && !keep(name) {
-		return nil
-	}
-	rel := name
-	if base != "" {
-		if name == base {
-			seen[name] = true
-			return extractBase(archive, dir, name, m, tr, hdr, dirs)
-		}
-		var ok bool
-		if rel, ok = strings.CutPrefix(name, base+"/"); !ok {
-			return nil
-		}
-	}
-	seen[name] = true
-	if err := makeParents(dir, rel); err != nil {
-		return err
-	}
-	target := filepath.Join(dir, filepath.FromSlash(rel))
-	switch hdr.Typeflag {
-	case tar.TypeDir:
-		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
-			return err
-		}
-		if err := extractDir(target, name); err != nil {
-			return fmt.Errorf("%s: %w", archive, err)
-		}
-		*dirs = append(*dirs, restoreOf(target, name, hdr))
-		return hand(own, target, false)
-	case tar.TypeReg:
-		if err := extractFile(archive, target, name, m, tr, hdr); err != nil {
-			return err
-		}
-		return hand(own, target, false)
-	case tar.TypeSymlink:
-		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
-			return err
-		}
-		if err := extractLink(dir, rel, target, name, hdr.Linkname); err != nil {
-			return fmt.Errorf("%s: %w", archive, err)
-		}
-		return hand(own, target, true)
-	}
-	// checkEntry refuses the rest by name: a hardlink, a device, a fifo.
-	_, err := checkEntry(archive, nil, m, tr, hdr)
-	return err
-}
-
-// extractBase takes the subtree's own directory entry: the extraction directory
-// itself is what it becomes, and it is already there. It is the instance's config
-// directory, so its mode is the source's too.
-func extractBase(archive, dir, name string, m *Manifest, tr *tar.Reader, hdr *tar.Header, dirs *[]restore) error {
-	if hdr.Typeflag != tar.TypeDir {
-		return fmt.Errorf("%s holds %s as a %s, and it is the tree being extracted: it has to be a directory", archive, name, typeName(hdr.Typeflag))
-	}
-	if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
-		return err
-	}
-	*dirs = append(*dirs, restoreOf(dir, name, hdr))
-	return nil
-}
-
-// extractFile writes one regular file, checks its bytes against the manifest as
-// they are written, and gives it the source's mode and time.
-func extractFile(archive, target, name string, m *Manifest, tr *tar.Reader, hdr *tar.Header) error {
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	_, cerr := checkEntry(archive, out, m, tr, hdr)
-	if err := out.Close(); cerr == nil {
-		cerr = err
-	}
-	if cerr != nil {
-		return cerr
-	}
-	return restoreOf(target, name, hdr).apply()
-}
-
-// hand gives one extracted path to the owner the extraction was told, and does
-// nothing when it was told none. link is a symlink, owned with Lchown so the
-// extraction never follows it.
-func hand(own *Owner, path string, link bool) error {
-	if own == nil {
-		return nil
-	}
-	var err error
-	if link {
-		err = os.Lchown(path, own.UID, own.GID)
-	} else {
-		err = os.Chown(path, own.UID, own.GID)
-	}
-	if err != nil {
-		return fmt.Errorf("own %s: %w", path, err)
-	}
-	return nil
-}
-
-// extractDir makes one directory entry, 0700 until extract gives it the source's
-// mode, and refuses a path that is already something else.
-func extractDir(target, name string) error {
-	if info, err := os.Lstat(target); err == nil && !info.IsDir() {
-		return fmt.Errorf("extract %s: it is already there and is not a directory", name)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	if err := os.Mkdir(target, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	if err := os.Chmod(target, 0o700); err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	return nil
-}
-
-// extractLink writes one symlink under internal/linktree's rule, so a link that
-// leaves the tree the archive names is refused rather than materialised.
-func extractLink(dir, rel, target, name, linkname string) error {
-	res, err := linktree.Resolve(dir, filepath.FromSlash(rel), linkname)
-	if err != nil {
-		return err
-	}
-	if res.Skip {
-		return fmt.Errorf("%s is a link to %s, which names the kernel's own filesystems: box leaves such a link out, so this is not an archive box wrote", name, linkname)
-	}
-	if err := os.Symlink(res.Target, target); err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	return nil
-}
-
-// makeParents creates the directories a path needs, 0700, and refuses a parent
-// that is already something else: an archive cannot be allowed to write through a
-// link it brought with it.
-func makeParents(dir, name string) error {
-	parts := []string{}
-	if parent := path.Dir(name); parent != "." && parent != "/" {
-		parts = splitPath(parent)
-	}
-	for i := range parts {
-		at := filepath.Join(dir, filepath.FromSlash(path.Join(parts[:i+1]...)))
-		info, err := os.Lstat(at)
-		switch {
-		case err == nil:
-			if !info.IsDir() {
-				return fmt.Errorf("extract %s: %s is not a directory", name, path.Join(parts[:i+1]...))
-			}
-		case errors.Is(err, fs.ErrNotExist):
-			if err := os.Mkdir(at, 0o700); err != nil {
-				return fmt.Errorf("extract %s: %w", name, err)
-			}
-		default:
-			return fmt.Errorf("extract %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
-func splitPath(p string) []string { return strings.Split(p, "/") }
 
 func openArchive(archive string) (*os.File, *gzip.Reader, error) {
 	f, err := os.Open(archive)
