@@ -20,7 +20,8 @@ func TestPairsAreTheEnabledEdges(t *testing.T) {
 	for _, edge := range pairs(cat, enabled) {
 		got = append(got, strings.Join(edge[:], ">"))
 	}
-	want := "seerr>plex,seerr>sonarr,seerr>radarr"
+	// The Arrs' Connect reaches Plex too.
+	want := "sonarr>plex,radarr>plex,seerr>plex,seerr>sonarr,seerr>radarr"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("pairs = %v, want %s", got, want)
 	}

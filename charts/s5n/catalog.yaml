@@ -53,10 +53,13 @@ apps:
     description: TV, from the tracker to the library
     instances: true
     default: true
-    # Its download client, and Prowlarr: Prowlarr syncs each indexer into the Arr with its base
+    # Its download clients, and Prowlarr: Prowlarr syncs each indexer into the Arr with its base
     # URL rewritten to <prowlarr>/<indexer id>/, so a search is an HTTP call from the Arr's pod
-    # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs).
-    calls: [qbittorrent, sabnzbd, prowlarr]
+    # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs). qui is a download client
+    # too, through its qBittorrent proxy (docs/features/reverse-proxy.md at v1.37.0). Plex and
+    # Jellyfin are its Connect notifications, the library refresh after an import, which the
+    # operator adds by hand.
+    calls: [qbittorrent, sabnzbd, qui, prowlarr, plex, jellyfin]
     # An Arr's database and the config.xml that points at it, with the SQLite companions a
     # migration writes beside them (PathExtensions.cs at v5.0.0.2907: the DB constant,
     # GetDatabase and GetConfigPath). The log database and MediaCover are not state a migration
@@ -70,9 +73,9 @@ apps:
     description: films, from the tracker to the library
     instances: true
     default: true
-    # The same two as Sonarr, for the same reason
+    # The same as Sonarr, for the same reasons
     # (src/NzbDrone.Core/Applications/Radarr/Radarr.cs).
-    calls: [qbittorrent, sabnzbd, prowlarr]
+    calls: [qbittorrent, sabnzbd, qui, prowlarr, plex, jellyfin]
     # The same as Sonarr (PathExtensions.cs at v7.0.0.10815: radarr.db, config.xml).
     snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]
     questions: []
@@ -81,10 +84,9 @@ apps:
     description: one indexer list, kept in sync with the Arrs
     instances: false
     default: true
-    # It pushes indexers to the Arrs and tests each application it registers, so the Arrs are
-    # what it dials. It configures no download client of its own, which is why it names neither
-    # qBittorrent nor SABnzbd: an app it does not register is one it never dials.
-    calls: [sonarr, radarr, lidarr]
+    # It pushes indexers to the Arrs and tests each application it registers. The wiring gives
+    # it no download client, but its search page grabs a release into one the operator adds.
+    calls: [sonarr, radarr, lidarr, qbittorrent, sabnzbd]
     # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db, config.xml).
     snapshot: [prowlarr.db, prowlarr.db-wal, prowlarr.db-shm, config.xml]
     questions: []
@@ -93,8 +95,8 @@ apps:
     description: the media server your players talk to
     instances: false
     default: true
-    # Plex calls nothing in the release: players are outside it, and Tautulli, Seerr and
-    # Maintainerr are the ones that dial it. Its web app writes absolute asset paths (/web/...),
+    # Plex calls nothing in the release: players are outside it, and the apps that dial it are
+    # the ones naming it (Tautulli, Seerr, Maintainerr, Bazarr and the Arrs' Connect). Its web app writes absolute asset paths (/web/...),
     # so it is served at plex.<domain> rather than under /plex.
     exposure: host
     # Plex serves its own clients and issues its own token, so a login in front of it would be a
@@ -141,8 +143,10 @@ apps:
     instances: false
     default: true
     # Plex for the library and for signing people in, and both Arrs to add what was requested:
-    # an unlisted caller never reaches the Arrs' ingress, however open the egress is.
-    calls: [plex, sonarr, radarr]
+    # an unlisted caller never reaches the Arrs' ingress, however open the egress is. Jellyfin
+    # is the other media server it can be set up with, and Tautulli feeds its watch history
+    # (server/api/jellyfin.ts and tautulli.ts at v3.5.2).
+    calls: [plex, jellyfin, tautulli, sonarr, radarr]
     # As Plex: Seerr's bundle loads its assets from the site root, so the path route broke the
     # page and it is served at seerr.<domain>.
     exposure: host
@@ -161,9 +165,9 @@ apps:
     description: a media server your players talk to, with its own accounts
     instances: false
     default: false
-    # Its players are outside the release and nothing in it calls Jellyfin, so it names no peer:
-    # its ingress is the Gateway's and the wiring Job's alone. Its web client writes absolute
-    # asset paths, so it is served at jellyfin.<domain> rather than under /jellyfin.
+    # It calls nothing in the release: its players are outside it. Seerr, Maintainerr, Bazarr
+    # and the Arrs' Connect dial it, each set up by hand. Its web client writes absolute asset
+    # paths, so it is served at jellyfin.<domain> rather than under /jellyfin.
     exposure: host
     # Every Jellyfin client authenticates against the server with its own token, so a login
     # page in front of it is a form no player can answer; its host bypasses the edge login as
@@ -197,9 +201,10 @@ apps:
     # block beside it, never a box release.
     oidc: true
     # One qBittorrent, its own instance row, and the Arrs: qui's Arr integration resolves a
-    # title to the ID it searches for, from qui's own pod. A missing edge here is a connection
-    # the callee refuses with nothing in the app to say so.
-    calls: [qbittorrent, sonarr, radarr]
+    # title to the ID it searches for, from qui's own pod. Prowlarr is where its cross-seed
+    # search imports indexers from (docs/features/search.md at v1.37.0). A missing edge here is
+    # a connection the callee refuses with nothing in the app to say so.
+    calls: [qbittorrent, sonarr, radarr, prowlarr]
     # Its database and config.toml, which is where its session secret lives: the credentials it
     # stores in the database are encrypted with that value, so the pair goes back together
     # (internal/config/config.go at v1.35.0: resolveConfigPath and the qui.db path).
@@ -217,10 +222,11 @@ apps:
     # change: the chart wires the issuer, the secret and the trust anchor from it, and box
     # registers the client.
     oidc: true
-    # Its download client, and every Arr its actions push to, made from autobrr's pod. qui too:
-    # its qBittorrent proxy is a download client autobrr can be pointed at, and a missing edge
-    # is a policy that drops the connection without a word.
-    calls: [qbittorrent, qui, sonarr, radarr, lidarr]
+    # Its download clients, and every Arr its actions push to, made from autobrr's pod. qui too:
+    # its qBittorrent proxy is a download client autobrr can be pointed at. SABnzbd is an action
+    # type, and Prowlarr's Torznab and Newznab endpoints are feeds (internal/domain/action.go and
+    # feed.go at v1.91.1). A missing edge is a policy that drops the connection without a word.
+    calls: [qbittorrent, qui, sabnzbd, sonarr, radarr, lidarr, prowlarr]
     # Its SQLite database and config.toml (internal/database/database.go at v1.90.0:
     # dataSourceName(cfg.ConfigPath, "autobrr.db"); internal/config/config.go: config.toml).
     snapshot: [config.toml, autobrr.db, autobrr.db-wal, autobrr.db-shm]
@@ -250,10 +256,11 @@ apps:
     description: music, from the tracker to the library
     instances: true
     default: false
-    # The same two as Sonarr and Radarr: its qBittorrent client, and Prowlarr, which syncs each
-    # indexer over Lidarr's /api/v1 (prowlarr@v3.1.0.5799:
-    # src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs, LidarrSettings.cs and ILidarrV1Proxy).
-    calls: [qbittorrent, sabnzbd, prowlarr]
+    # The same as Sonarr and Radarr: its download clients, Prowlarr, which syncs each indexer
+    # over Lidarr's /api/v1 (prowlarr@v3.1.0.5799:
+    # src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs, LidarrSettings.cs and ILidarrV1Proxy),
+    # and the media servers its Connect refreshes.
+    calls: [qbittorrent, sabnzbd, qui, prowlarr, plex, jellyfin]
     # Its database, the config.xml that points at it, and the SQLite companions
     # (PathExtensions.cs at v3.1.2.4902: APP_CONFIG_FILE and DB).
     snapshot: [lidarr.db, lidarr.db-wal, lidarr.db-shm, config.xml]
@@ -266,8 +273,10 @@ apps:
     description: subtitles for the TV and films the Arrs already have
     instances: true
     default: false
-    # The two it reads. Nothing inside the release calls it: the Arrs do not know it exists.
-    calls: [sonarr, radarr]
+    # The two it reads, and the media servers it refreshes after a subtitle download
+    # (bazarr/app/config.py at v1.6.2: the plex and jellyfin sections). Nothing inside the
+    # release calls it: the Arrs do not know it exists.
+    calls: [sonarr, radarr, plex, jellyfin]
     # Its settings file and its SQLite database, with the WAL companions a running instance
     # writes (bazarr/app/config.py:519 at v1.6.2: config/config.yaml relative to the config
     # directory; bazarr/app/database.py:82-97: db/bazarr.db, journal_mode=WAL).
@@ -317,13 +326,13 @@ apps:
     description: deletes what nobody watched, once your rules say so
     instances: false
     default: false
-    # Everything it acts on and every place a rule is written: Plex and Tautulli for what was
-    # watched, Seerr for what was requested, both Arrs to delete, qBittorrent to retire a
-    # torrent. Each is filled in its own UI (v3.32's servarr, seerr, tautulli and
+    # Everything it acts on and every place a rule is written: Plex or Jellyfin, and Tautulli,
+    # for what was watched, Seerr for what was requested, both Arrs to delete, qBittorrent to
+    # retire a torrent (Jellyfin: apps/server/src/modules/api/media-server at v3.33.0). Each is filled in its own UI (v3.32's servarr, seerr, tautulli and
     # download-client API modules) except Plex, which the wiring Job connects with the release
     # Secret's plex-token (internal/apps/maintainerr). One it cannot reach is a rule that
     # silently never runs.
-    calls: [plex, sonarr, radarr, seerr, tautulli, qbittorrent]
+    calls: [plex, jellyfin, sonarr, radarr, seerr, tautulli, qbittorrent]
     # Everything it knows is in one SQLite database at the root of the directory DATA_DIR moves
     # to /config (apps/server/src/app/config/dataDir.ts and typeOrmConfig.ts at v3.32.0). The UI
     # bundle it stages there on every boot and its overlays are rebuilt, not state.

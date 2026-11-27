@@ -840,24 +840,25 @@ func TestRealChartSnapshots(t *testing.T) {
 
 // The catalog's lists are what the chart's NetworkPolicy is derived from, so this
 // pins the edges a shipped release got wrong (Seerr into the Arrs, everything
-// Maintainerr calls, autobrr into qui, qui into the Arrs). A name here is also an
-// app that must exist.
+// Maintainerr calls, autobrr into qui, qui into the Arrs) and the ones an operator
+// sets up by hand (an Arr's Connect, a second media server, autobrr's usenet
+// action). A name here is also an app that must exist.
 func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 	cat, err := Load("../../charts/s5n")
 	if err != nil {
 		t.Fatalf("load the chart's catalog: %v", err)
 	}
 	want := map[string]string{
-		"sonarr":      "prowlarr,qbittorrent,sabnzbd",
-		"radarr":      "prowlarr,qbittorrent,sabnzbd",
-		"lidarr":      "prowlarr,qbittorrent,sabnzbd",
-		"bazarr":      "radarr,sonarr",
-		"prowlarr":    "lidarr,radarr,sonarr",
+		"sonarr":      "jellyfin,plex,prowlarr,qbittorrent,qui,sabnzbd",
+		"radarr":      "jellyfin,plex,prowlarr,qbittorrent,qui,sabnzbd",
+		"lidarr":      "jellyfin,plex,prowlarr,qbittorrent,qui,sabnzbd",
+		"bazarr":      "jellyfin,plex,radarr,sonarr",
+		"prowlarr":    "lidarr,qbittorrent,radarr,sabnzbd,sonarr",
 		"tautulli":    "plex",
-		"seerr":       "plex,radarr,sonarr",
-		"qui":         "qbittorrent,radarr,sonarr",
-		"autobrr":     "lidarr,qbittorrent,qui,radarr,sonarr",
-		"maintainerr": "plex,qbittorrent,radarr,seerr,sonarr,tautulli",
+		"seerr":       "jellyfin,plex,radarr,sonarr,tautulli",
+		"qui":         "prowlarr,qbittorrent,radarr,sonarr",
+		"autobrr":     "lidarr,prowlarr,qbittorrent,qui,radarr,sabnzbd,sonarr",
+		"maintainerr": "jellyfin,plex,qbittorrent,radarr,seerr,sonarr,tautulli",
 	}
 	for name, edges := range want {
 		app, ok := cat.App(name)
@@ -870,8 +871,8 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 			t.Fatalf("apps.%s.calls = %v, want %s", name, got, edges)
 		}
 	}
-	// The two apps that are only ever called.
-	for _, name := range []string{"qbittorrent", "plex"} {
+	// The apps that are only ever called.
+	for _, name := range []string{"qbittorrent", "plex", "jellyfin", "sabnzbd"} {
 		if app, _ := cat.App(name); len(app.Calls) != 0 {
 			t.Fatalf("apps.%s.calls = %v, want none: it is a callee, not a caller", name, app.Calls)
 		}
