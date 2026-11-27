@@ -636,6 +636,24 @@ has_receipt() { # has_receipt <transcript>
   grep -Eq '^✓ wiring +[0-9]+ checks · [0-9]+(h[0-9]+m[0-9]+s|m[0-9]+s|s)$' "$1"
 }
 
+# assert_netpol_proof: the apply proved the cluster's CNI enforces NetworkPolicy and
+# the record carries the answer, so the scenario's later applies do not repeat it.
+assert_netpol_proof() { # assert_netpol_proof <transcript> <record>
+  grep -qF "network policy: proving a deny-all policy is enforced in " "$1" ||
+    { echo "the apply did not prove the cluster enforces NetworkPolicy"; fail=1; }
+  grep -qF "network policy: enforced" "$1" ||
+    { echo "the network policy proof did not report an outcome"; fail=1; }
+  grep -qxF "netpolProof: passed" "$2" ||
+    { echo "the cluster record does not carry netpolProof: passed"; fail=1; }
+}
+# assert_no_netpol_proof: a proved cluster is not proved again, and a proof that ran
+# twice would cost pods on every apply.
+assert_no_netpol_proof() { # assert_no_netpol_proof <transcript>
+  if grep -qF "network policy: proving" "$1"; then
+    echo "the apply proved a cluster the record already says enforces NetworkPolicy"; fail=1
+  fi
+}
+
 status_field() { # status_field <python expression over `d`>
   $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.status\.json}' |
     python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"
@@ -1751,6 +1769,9 @@ fresh() {
   if grep -qF "= cert-manager" "$WORK/bootstrap1.txt"; then
     echo "bootstrap thought cert-manager was already installed on a fresh cluster"; fail=1
   fi
+  # kind's cluster is not box's: the first apply proved its CNI enforces
+  # NetworkPolicy before it installed an app, and the record keeps the answer.
+  assert_netpol_proof "$WORK/bootstrap1.txt" "$WORK/cluster.yaml"
   # The folded sub-steps are in the log, in the order they are applied.
   bootstrap_log=$(box_log bootstrap)
   [ -n "$bootstrap_log" ] ||
@@ -3526,6 +3547,8 @@ EOF
   fi
   grep -qF '+ apps.sonarr.resources.limits.memory: "1Gi"' "$WORK/apply3.txt" ||
     { echo "the diff did not name the edited key"; fail=1; }
+  # The record carried the proof the first apply made.
+  assert_no_netpol_proof "$WORK/apply3.txt"
   changes=$(grep -cE '^[+~] ' "$WORK/apply3.txt" || true)
   echo "changed keys printed: ${changes}"
   [ "$changes" = 1 ] || { echo "expected exactly one changed key, got ${changes}"; fail=1; }
@@ -4520,6 +4543,9 @@ EOF
     echo "MetalLB has a row on a run that installed none"; fail=1
   fi
   has_receipt "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # kind's cluster is not box's: bootstrap's apply proved its CNI enforces
+  # NetworkPolicy before it installed an app, and the record keeps the answer.
+  assert_netpol_proof "$WORK/bootstrap1.txt" "$WORK/cluster.yaml"
   # One wait for the run's Certificates, not one per host: a box whose names cannot
   # issue pays one CertificateTimeout for the run, and the Done line says how many
   # came Ready.
@@ -4808,6 +4834,8 @@ EOF
   fi
   grep -qF "nothing to change" "$WORK/apply-dns-window.txt" ||
     { echo "the apply over a self-signed host had work to do"; fail=1; }
+  # The record carried the proof bootstrap's apply made.
+  assert_no_netpol_proof "$WORK/apply-dns-window.txt"
   [ "$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||
     { echo "the host's Certificate moved to another issuer without init"; fail=1; }
   same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' || true)" "$anchor" ||
