@@ -167,3 +167,21 @@ func TestParseRefusesBadCategories(t *testing.T) {
 		t.Errorf("a subcategory is a category, and Parse refused it: %v", err)
 	}
 }
+
+// A Seerr's server is plex or jellyfin, the two a box sets one up against; anything
+// else is refused here, not by the chart after the configs have moved.
+func TestParseReadsASeerrsServer(t *testing.T) {
+	base := "version: 2\napps:\n  seerr:\n    kind: kubernetes\n    source: jellyseerr\n    config: /srv/s\n"
+	for _, server := range []string{"plex", "jellyfin"} {
+		p, err := Parse([]byte(base + "    mediaServer: " + server + "\n"))
+		if err != nil {
+			t.Fatalf("mediaServer %s: %v", server, err)
+		}
+		if got := p.Apps["seerr"].MediaServer; got != server {
+			t.Errorf("mediaServer = %q, want %q", got, server)
+		}
+	}
+	if _, err := Parse([]byte(base + "    mediaServer: emby\n")); err == nil || !strings.Contains(err.Error(), `mediaServer "emby"`) {
+		t.Errorf("Parse error = %v, want a refusal of emby", err)
+	}
+}

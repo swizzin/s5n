@@ -234,7 +234,7 @@ type fakeValues struct {
 	failed bool
 }
 
-func (f *fakeValues) Enable(instance, downloadCategory string) error {
+func (f *fakeValues) Enable(instance string, _ plan.App) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail != nil {

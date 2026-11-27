@@ -75,6 +75,11 @@ type App struct {
 	// (`4K/TV`), kept because the torrents are already there and box never
 	// moves them. Empty means box's own category.
 	DownloadCategory string `yaml:"downloadCategory,omitempty"`
+	// MediaServer is the one server a Seerr was set up against in the source,
+	// plex or jellyfin, read from its settings: the config it carries signs in
+	// to that server, so the instance is that server's. Empty for every other
+	// app, and for a Seerr nobody set up.
+	MediaServer string `yaml:"mediaServer,omitempty"`
 	// Carry is how much of the config directory the snapshot took: CarryFull,
 	// or CarryMinimal for the state the app cannot rebuild (Plex only).
 	Carry string `yaml:"carry,omitempty"`

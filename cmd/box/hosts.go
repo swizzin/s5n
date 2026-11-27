@@ -165,7 +165,7 @@ func (a applyHosts) Prune(ctx context.Context, plan release.HostPlan) error {
 // or `seerr-<suffix>` before the domain.
 func seerrName(host string) bool {
 	first, _, _ := strings.Cut(host, ".")
-	return first == "seerr" || strings.HasPrefix(first, "seerr-")
+	return first == appSeerr || strings.HasPrefix(first, appSeerr+"-")
 }
 
 // rules writes every served name's access_control rule: without it a host

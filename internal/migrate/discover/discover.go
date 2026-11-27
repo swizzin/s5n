@@ -419,6 +419,9 @@ type instance struct {
 	ports []int
 	// downloadCategory is the qBittorrent category this app's own download
 	downloadCategory string
+	// mediaServer is the server a Seerr signs in to, plex or jellyfin, read
+	// from its settings; empty for every other app.
+	mediaServer string
 }
 
 // classify decides which workloads are catalog apps, and what box will call

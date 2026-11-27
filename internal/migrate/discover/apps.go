@@ -1,7 +1,9 @@
 package discover
 
 import (
+	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -219,6 +221,11 @@ func (d *discovery) readApp(in *instance) error {
 			workloadID(in.wl), dir, vol)
 	}
 	in.configMount, in.configDir = dir, vol.HostPath
+	if in.app == "seerr" {
+		if err := d.readSeerrServer(in); err != nil {
+			return fmt.Errorf("workload %s: %w", workloadID(in.wl), err)
+		}
+	}
 
 	port, ok, err := listenPort(in.app, d.opt.ConfigFS, in.configDir, in.container.Env)
 	if err != nil {
@@ -418,6 +425,45 @@ func jellyfinPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, b
 		return conf.InternalHttpPort, true, nil
 	}
 	return 8096, true, nil
+}
+
+// The servers a Seerr's settings.main.mediaServerType names (server/constants/server.ts):
+// 4, or no key at all in a Seerr older than it, is one nobody set up.
+const (
+	seerrPlex     = 1
+	seerrJellyfin = 2
+	seerrEmby     = 3
+)
+
+// readSeerrServer reads which media server a Seerr signs in to. The config the
+// snapshot carries is that sign-in, so the instance box runs it as must be that
+// server's; a missing file is a Seerr nobody set up, and box's default serves it.
+func (d *discovery) readSeerrServer(in *instance) error {
+	rel := strings.TrimPrefix(path.Join(in.configDir, "settings.json"), "/")
+	raw, err := fs.ReadFile(d.opt.ConfigFS, rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s's settings.json: %w", in.name, err)
+	}
+	var settings struct {
+		Main struct {
+			MediaServerType int `json:"mediaServerType"`
+		} `json:"main"`
+	}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return fmt.Errorf("%s's settings.json under %s is not JSON Seerr wrote (%v): it is the config box carries, so stop the app and run discovery again", in.name, in.configDir, err)
+	}
+	switch settings.Main.MediaServerType {
+	case seerrPlex:
+		in.mediaServer = "plex"
+	case seerrJellyfin:
+		in.mediaServer = "jellyfin"
+	case seerrEmby:
+		d.note("%s was set up against Emby, and box sets a Seerr up against Plex or Jellyfin: it runs against the release's default server, and its setup is left for you to finish on its own page or to reset", in.name)
+	}
+	return nil
 }
 
 // seerrPort is PORT, or its default.

@@ -250,3 +250,49 @@ type clientRow struct {
 	enabled        bool
 	category       string
 }
+
+// A Seerr's settings say which server it signs in to; the plan carries it, so the
+// instance box runs it as is that server's and not the default one. A server box
+// does not run is a note, and an unset one says nothing.
+func TestDiscoverRecordsTheServerASeerrRequestsFrom(t *testing.T) {
+	for _, c := range []struct {
+		name, settings, want, note string
+	}{
+		{name: "jellyfin", settings: `{"main":{"mediaServerType":2}}`, want: "jellyfin"},
+		{name: "plex", settings: `{"main":{"mediaServerType":1}}`, want: "plex"},
+		{name: "never set up", settings: `{"main":{"mediaServerType":4}}`},
+		{name: "older than the key", settings: `{"main":{"apiKey":"x"}}`},
+		{name: "emby", settings: `{"main":{"mediaServerType":3}}`, note: "Emby"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := sourceInstall(t)
+			f.app(t, appSpec{
+				name: "jellyseerr", image: "fallenbagel/jellyseerr:2.7.3", port: 5055,
+				mounts: []mount{{volume: "config", path: "/app/config", host: "/srv/apps/jellyseerr"}},
+			})
+			f.file(t, "/srv/apps/jellyseerr/settings.json", c.settings)
+			p, rep := f.discover(t)
+			if got := p.Apps["seerr"].MediaServer; got != c.want {
+				t.Errorf("mediaServer %q, want %q", got, c.want)
+			}
+			notes := strings.Join(rep.Notes, "\n")
+			if c.note != "" && !strings.Contains(notes, c.note) {
+				t.Errorf("no note names %s:\n%s", c.note, notes)
+			}
+			if got := roundTrip(t, p).Apps["seerr"].MediaServer; got != c.want {
+				t.Errorf("the plan file reads back mediaServer %q, want %q", got, c.want)
+			}
+		})
+	}
+	// Settings Seerr cannot have written stop discovery: the config it carries is
+	// that file, and a guess at its server is a Seerr nobody can sign in to.
+	f := sourceInstall(t)
+	f.app(t, appSpec{
+		name: "jellyseerr", image: "fallenbagel/jellyseerr:2.7.3", port: 5055,
+		mounts: []mount{{volume: "config", path: "/app/config", host: "/srv/apps/jellyseerr"}},
+	})
+	f.file(t, "/srv/apps/jellyseerr/settings.json", `{"main":`)
+	if err := f.discoverErr(t); err == nil || !strings.Contains(err.Error(), "settings.json") {
+		t.Fatalf("broken settings: %v, want a refusal naming settings.json", err)
+	}
+}

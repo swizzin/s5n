@@ -183,6 +183,11 @@ func checkApp(name string, app App) []string {
 	default:
 		problems = append(problems, fmt.Sprintf("apps.%s: carry %q is not %q or %q: it is how much of the app's config directory the snapshot took", name, app.Carry, CarryFull, CarryMinimal))
 	}
+	switch app.MediaServer {
+	case "", "plex", "jellyfin":
+	default:
+		problems = append(problems, fmt.Sprintf("apps.%s: mediaServer %q is not plex or jellyfin: it is the one server a Seerr is set up against", name, app.MediaServer))
+	}
 	for _, c := range []struct{ key, val string }{{"category", app.Category}, {"downloadCategory", app.DownloadCategory}} {
 		if c.val == "" {
 			continue

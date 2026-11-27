@@ -1552,7 +1552,19 @@ data. Everything it will change is written down before it changes anything.
       paths:
         - from: /downloads
           to: /data/downloads
+    seerr:
+      kind: kubernetes
+      source: jellyseerr
+      config: /srv/apps/jellyseerr
+      mediaServer: jellyfin           # the server its settings sign in to
+      paths:
+        - from: /app/config
+          to: /config
   ```
+
+  A Seerr's `mediaServer` is read from its settings (plex or jellyfin) and written on
+  the instance it is switched on as, because the config it carries signs in to that
+  server; a Seerr nobody set up has none and gets the release's default.
 
   A folder rule is a rename apply makes and a rule every app that stored the old
   directory follows, so the Arrs, Plex and Seerr all end up naming the one box lays

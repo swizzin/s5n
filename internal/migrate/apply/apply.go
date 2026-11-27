@@ -81,10 +81,11 @@ type Env struct {
 // ValuesEditor turns one instance on in the seedbox's files, only when the values
 // do not already enable it. It edits apps.<app>.enabled or adds an
 // apps.<app>.instances entry -- both grant keys (internal/seedbox/grant.go) -- the
-// way `box init` does. downloadCategory is the torrents' existing category, empty
-// when the source said nothing and the instance gets its own.
+// way `box init` does. From the plan's entry it carries DownloadCategory, the
+// torrents' existing category (empty when the source said nothing and the
+// instance gets its own), and MediaServer, the server a Seerr signs in to.
 type ValuesEditor interface {
-	Enable(instance, downloadCategory string) error
+	Enable(instance string, app plan.App) error
 }
 
 // Summary is everything the operator sees before anything moves.
@@ -1079,7 +1080,7 @@ func (m *migration) enable() error {
 		if m.alreadyEnabled(name) {
 			continue
 		}
-		if err := m.env.Values.Enable(name, m.p.Apps[name].DownloadCategory); err != nil {
+		if err := m.env.Values.Enable(name, m.p.Apps[name]); err != nil {
 			return fmt.Errorf("enable %s: %w", name, err)
 		}
 		m.res.Enabled = append(m.res.Enabled, name)

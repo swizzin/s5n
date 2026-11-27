@@ -46,6 +46,7 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 			Ports:            in.ports,
 			Category:         d.categoryOf(in.name),
 			DownloadCategory: in.downloadCategory,
+			MediaServer:      in.mediaServer,
 			Paths:            d.pathRules(in, data),
 		}
 	}

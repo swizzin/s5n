@@ -56,12 +56,12 @@ apps:
 	ed := &grantEditor{sb: sb, catalog: []string{"sonarr", "qbittorrent"}, values: values}
 
 	// An entry the chart's list carries is switched on where it sits.
-	if err := ed.Enable("sonarr-4k", ""); err != nil {
+	if err := ed.Enable("sonarr-4k", plan.App{}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	// One it does not carry is appended, with the instance's own name as its
 	// category.
-	if err := ed.Enable("sonarr-1080", ""); err != nil {
+	if err := ed.Enable("sonarr-1080", plan.App{}); err != nil {
 		t.Fatalf("enable a new instance: %v", err)
 	}
 	raw, err := os.ReadFile(grantPath)
@@ -130,7 +130,7 @@ func TestGrantEditorWritesTheListWhenTheGrantHasNone(t *testing.T) {
 		},
 	}}}
 	ed := &grantEditor{sb: sb, catalog: []string{"sonarr"}, values: values}
-	if err := ed.Enable("sonarr-4k", ""); err != nil {
+	if err := ed.Enable("sonarr-4k", plan.App{}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	back, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
@@ -373,7 +373,7 @@ func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
 		},
 	}}}
 	ed := &grantEditor{sb: sb, catalog: []string{"sonarr"}, values: values}
-	if err := ed.Enable("sonarr", "TV"); err != nil {
+	if err := ed.Enable("sonarr", plan.App{DownloadCategory: "TV"}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	back, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
@@ -398,7 +398,7 @@ func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
 
 	// A grant that already carries its own list takes the same key, on the
 	// entry the plan names.
-	if err := ed.Enable("sonarr-4k", "4K/TV"); err != nil {
+	if err := ed.Enable("sonarr-4k", plan.App{DownloadCategory: "4K/TV"}); err != nil {
 		t.Fatalf("enable the second: %v", err)
 	}
 	back, err = seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
@@ -416,7 +416,7 @@ func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
 // its schema refuses one, and a values file the chart will not render is not a migration.
 func TestSwitchingOnASeerrWritesNoCategory(t *testing.T) {
 	list := []any{map[string]any{"suffix": "", "enabled": true}}
-	out := switchOn(list, "jellyfin", "seerr", "")
+	out := switchOn(list, "jellyfin", "seerr", nil)
 	if len(out) != 2 {
 		t.Fatalf("instances = %v, want the default and the new one", out)
 	}
@@ -428,9 +428,81 @@ func TestSwitchingOnASeerrWritesNoCategory(t *testing.T) {
 		t.Fatalf("the new Seerr instance carries a category: %v", entry)
 	}
 	// The same call for an Arr still names the directory the instance writes.
-	arr := switchOn([]any{map[string]any{"suffix": "", "category": "tv", "enabled": true}}, "4k", "sonarr", "")
+	arr := switchOn([]any{map[string]any{"suffix": "", "category": "tv", "enabled": true}}, "4k", "sonarr", nil)
 	got, _ := arr[1].(map[string]any)
 	if got["category"] != "4k" {
 		t.Fatalf("sonarr-4k's category = %v, want the suffix", got["category"])
+	}
+}
+
+// A migrated Seerr carries the config that signs in to one media server, so the
+// instance it lands as is that server's: the plan's mediaServer is written on
+// whichever entry the editor switches on, and a Seerr entry never gets a category.
+func TestGrantEditorGivesASeerrItsServer(t *testing.T) {
+	dir := t.TempDir()
+	grantPath := filepath.Join(dir, "root.yaml")
+	grant := "apps:\n  seerr:\n    enabled: true\n    instances:\n      - suffix: \"\"\n        enabled: false\n"
+	if err := os.WriteFile(grantPath, []byte(grant), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chart := map[string]any{"apps": map[string]any{"seerr": map[string]any{
+		"instances": []any{map[string]any{"suffix": "", "enabled": true}},
+	}}}
+	ed := &grantEditor{sb: sb, catalog: []string{"seerr"}, values: chart}
+	if err := ed.Enable("seerr", plan.App{MediaServer: "plex"}); err != nil {
+		t.Fatalf("enable the entry the grant carries: %v", err)
+	}
+	if err := ed.Enable("seerr-jellyfin", plan.App{MediaServer: "jellyfin"}); err != nil {
+		t.Fatalf("append one: %v", err)
+	}
+	back, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatalf("the edited grant does not load: %v", err)
+	}
+	apps, _ := back.Grant.Map()["apps"].(map[string]any)
+	list, _ := apps["seerr"].(map[string]any)["instances"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("instances = %v, want seerr and seerr-jellyfin", list)
+	}
+	for i, want := range []string{"plex", "jellyfin"} {
+		entry, _ := list[i].(map[string]any)
+		if entry["mediaServer"] != want || entry["enabled"] != true {
+			t.Errorf("instance %d = %v, want it on and set up against %s", i, entry, want)
+		}
+		if _, ok := entry["category"]; ok {
+			t.Errorf("instance %d carries a category, which Seerr's schema refuses: %v", i, entry)
+		}
+	}
+
+	// A grant with no list of its own takes the chart's, with the server on the
+	// entry the plan names.
+	if err := os.WriteFile(grantPath, []byte("apps:\n  seerr:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if sb, err = seedbox.Load(grantPath, filepath.Join(dir, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]any{"apps": map[string]any{"seerr": map[string]any{
+		"instances": []any{map[string]any{"suffix": "", "enabled": true}},
+	}}}
+	ed = &grantEditor{sb: sb, catalog: []string{"seerr"}, values: values}
+	if err := ed.Enable("seerr", plan.App{MediaServer: "jellyfin"}); err != nil {
+		t.Fatalf("enable from the chart's list: %v", err)
+	}
+	if back, err = seedbox.Load(grantPath, filepath.Join(dir, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	apps, _ = back.Grant.Map()["apps"].(map[string]any)
+	list, _ = apps["seerr"].(map[string]any)["instances"].([]any)
+	if entry, _ := list[0].(map[string]any); entry["mediaServer"] != "jellyfin" {
+		t.Errorf("seerr = %v, want it set up against jellyfin", entry)
+	}
+	// The chart's own list is not edited in place.
+	if _, ok := values["apps"].(map[string]any)["seerr"].(map[string]any)["instances"].([]any)[0].(map[string]any)["mediaServer"]; ok {
+		t.Error("the editor wrote the server onto the chart's default list")
 	}
 }

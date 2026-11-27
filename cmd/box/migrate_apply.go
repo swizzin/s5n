@@ -841,11 +841,15 @@ type grantEditor struct {
 	values  map[string]any
 }
 
-func (g *grantEditor) Enable(instance, downloadCategory string) error {
+func (g *grantEditor) Enable(instance string, planned plan.App) error {
 	app := apply.CatalogApp(instance, g.catalog)
 	if app == "" {
 		return fmt.Errorf("%s: no app in the chart's catalog is named that", instance)
 	}
+	if planned.MediaServer != "" && app != appSeerr {
+		return fmt.Errorf("%s: the plan names a mediaServer, and only a Seerr is set up against one", instance)
+	}
+	keys := plannedKeys(planned)
 	suffix := apply.Suffix(instance, app)
 	defaults, takesInstances := instancesOf(g.values, app)
 	if suffix != "" && !takesInstances {
@@ -859,7 +863,7 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 			// No list: write the chart's whole default list with this one on.
 			edits = append(edits, seedbox.Edit{
 				Path:  "apps." + app + ".instances",
-				Value: switchOn(defaults, suffix, app, downloadCategory),
+				Value: switchOn(defaults, suffix, app, keys),
 			})
 		default:
 			if index, _ := findInstance(own, suffix); index >= 0 {
@@ -867,22 +871,17 @@ func (g *grantEditor) Enable(instance, downloadCategory string) error {
 					Path:  fmt.Sprintf("apps.%s.instances[%d].enabled", app, index),
 					Value: true,
 				})
-				// The torrents' category, when it differs from the library dir.
-				if downloadCategory != "" {
+				for _, k := range keyOrder(keys) {
 					edits = append(edits, seedbox.Edit{
-						Path:  fmt.Sprintf("apps.%s.instances[%d].downloadCategory", app, index),
-						Value: downloadCategory,
+						Path:  fmt.Sprintf("apps.%s.instances[%d].%s", app, index, k),
+						Value: keys[k],
 					})
 				}
 			} else {
 				// A new instance: append an entry with the schema's keys.
-				entry := map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true}
-				if downloadCategory != "" {
-					entry["downloadCategory"] = downloadCategory
-				}
 				edits = append(edits, seedbox.Edit{
 					Path:  fmt.Sprintf("apps.%s.instances[%d]", app, len(own)),
-					Value: entry,
+					Value: newInstance(app, suffix, keys),
 				})
 			}
 		}
@@ -926,8 +925,45 @@ func findInstance(list []any, suffix string) (int, string) {
 	return -1, ""
 }
 
+// plannedKeys is what the plan says about one instance that its entry keeps: the
+// torrents' category when it differs from the library directory, and the server
+// a Seerr signs in to.
+func plannedKeys(planned plan.App) map[string]any {
+	keys := map[string]any{}
+	if planned.DownloadCategory != "" {
+		keys["downloadCategory"] = planned.DownloadCategory
+	}
+	if planned.MediaServer != "" {
+		keys["mediaServer"] = planned.MediaServer
+	}
+	return keys
+}
+
+// keyOrder is an entry's planned keys in order, so the edits are the same every run.
+func keyOrder(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// newInstance is an entry for an instance the list does not carry yet: the
+// schema's keys, a category only for an app with a library directory.
+func newInstance(app, suffix string, keys map[string]any) map[string]any {
+	entry := map[string]any{"suffix": suffix, "enabled": true}
+	if hasCategory(app) {
+		entry["category"] = categoryFor(app, suffix)
+	}
+	for k, v := range keys {
+		entry[k] = v
+	}
+	return entry
+}
+
 // switchOn enables one suffix, adding the entry when absent.
-func switchOn(list []any, suffix, app, downloadCategory string) []any {
+func switchOn(list []any, suffix, app string, keys map[string]any) []any {
 	out := make([]any, 0, len(list)+1)
 	found := false
 	for _, raw := range list {
@@ -937,22 +973,14 @@ func switchOn(list []any, suffix, app, downloadCategory string) []any {
 			found = true
 			entry = cloneEntry(entry)
 			entry["enabled"] = true
-			if downloadCategory != "" {
-				// The torrents' existing category, not the library directory.
-				entry["downloadCategory"] = downloadCategory
+			for k, v := range keys {
+				entry[k] = v
 			}
 		}
 		out = append(out, entry)
 	}
 	if !found {
-		entry := map[string]any{"suffix": suffix, "enabled": true}
-		if hasCategory(app) {
-			entry["category"] = categoryFor(app, suffix)
-		}
-		if downloadCategory != "" {
-			entry["downloadCategory"] = downloadCategory
-		}
-		out = append(out, entry)
+		out = append(out, newInstance(app, suffix, keys))
 	}
 	return out
 }
@@ -969,7 +997,10 @@ func cloneEntry(entry map[string]any) map[string]any {
 // hasCategory says whether an app's instances name a library directory. Seerr has none:
 // it requests from a media server and keeps no root folders, and its schema refuses a
 // category key outright.
-func hasCategory(app string) bool { return app != "seerr" }
+func hasCategory(app string) bool { return app != appSeerr }
+
+// appSeerr is Seerr's catalog name: the one app with instances and no library.
+const appSeerr = "seerr"
 
 // categoryFor is the suffix, or the app name for a primary: it is one
 // qBittorrent category and one directory per /data tree, and cannot be empty.
