@@ -898,25 +898,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	}
 
 	if c.Seerr != nil {
-		seerr := apps.NewSeerr(c.Seerr.URL)
-		r.logf("waiting for Seerr at %s", c.Seerr.URL)
-		if err := seerr.WaitReady(ctx, timeout); err != nil {
-			return r.ensure(res, "seerr/ready", apps.Unchanged, err)
-		}
-		r.okStep(res, "seerr/ready", c.Seerr.URL)
-		public, err := seerr.Settings(ctx)
-		if err != nil {
-			return r.ensure(res, "seerr/settings", apps.Unchanged, err)
-		}
-		// Every settings endpoint needs an authenticated admin, and the only way to
-		// create Seerr's first admin is an interactive Plex sign-in through a browser:
-		// a claim token authenticates the server to plex.tv, not an account into
-		// Seerr. So the only answer this run can give is whether an admin exists; a
-		// migrated Seerr brings its admin in its snapshot, and that box gets no row.
-		if !public.Initialized {
-			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: stepPending,
-				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
-			r.stepLog("seerr/plex", "pending (needs one interactive Plex sign-in)")
+		if err := r.wireSeerr(ctx, res, owned, &c); err != nil {
+			return err
 		}
 	}
 

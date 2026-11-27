@@ -216,6 +216,64 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
 
+# A Seerr talks to one media server. On a box with no Plex and a Jellyfin it is a Jellyfin
+# one: the Job signs its owner in with the person's own server account and completes the
+# setup, so the render carries the server and the address people reach it at. With Plex in
+# the release the entry keeps the Plex shape it has always had -- no address, no Job setup.
+seerr_wiring() { # seerr_wiring <values file>: this render's Job entry for Seerr, one JSON object
+  helm template t charts/s5n -n seedbox -f "$1" --set gateway.host=box.example.com \
+    --set apps.qbittorrent.torrent.port=30080 -s templates/wiring.yaml |
+    python3 -c 'import json, sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+cm = [d for d in docs if d.get("kind") == "ConfigMap"][0]
+print(json.dumps(json.loads(cm["data"]["wiring.json"])["seerr"]))'
+}
+seerr_cfg=$(mktemp)
+{ seerr_wiring charts/s5n/ci/default-values.yaml
+  seerr_wiring charts/s5n/ci/jellyfin-values.yaml
+  seerr_wiring charts/s5n/ci/catalog-values.yaml; } >"$seerr_cfg"
+seerr_problems=$(python3 - "$seerr_cfg" <<'PY'
+import json, sys
+lines = [line for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+if len(lines) != 3:
+    print(f"the render gave {len(lines)} wiring configs, want three")
+    sys.exit(0)
+plex, jellyfin, both = (json.loads(line) for line in lines)
+problems = []
+if plex.get("mediaServer") != "plex" or "mediaServerUrl" in plex:
+    problems.append(f"a Plex box's Seerr = {plex}")
+if jellyfin.get("mediaServer") != "jellyfin":
+    problems.append(f"a Jellyfin-only box's Seerr = {jellyfin}, want mediaServer jellyfin")
+if jellyfin.get("mediaServerUrl") != "https://jellyfin.box.example.com":
+    problems.append(f"a Jellyfin-only box's Seerr names {jellyfin.get('mediaServerUrl')!r} as the server's address")
+if jellyfin.get("publicUrl") != "seerr.box.example.com" or jellyfin.get("url") != "http://seerr:5055":
+    problems.append(f"a Jellyfin-only box's Seerr row = {jellyfin}, want Seerr's own host and Service")
+if both.get("mediaServer") != "plex" or "mediaServerUrl" in both:
+    problems.append(f"a box with both media servers runs a {both.get('mediaServer')} Seerr, want Plex")
+if problems:
+    print("; ".join(problems))
+PY
+)
+rm -f "$seerr_cfg"
+if [ -n "$seerr_problems" ]; then
+  echo "the Job's Seerr entry is wrong for the server the release runs: $seerr_problems"
+  exit 1
+fi
+echo "== seerr render: Jellyfin mode on a box with no Plex, Plex mode with one, and the address people reach the server at"
+
+# Seerr with no media server at all is a request page nobody can sign in to: refused,
+# naming the two apps that would make it work.
+err=$(mktemp)
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+     --set apps.plex.enabled=false --set apps.tautulli.enabled=false >/dev/null 2>"$err"; then
+  echo "a release with Seerr and no media server rendered: nobody could sign in to it"
+  rm -f "$err"; exit 1
+fi
+grep -qF 'apps.seerr: Seerr requests from one media server and this release runs neither' "$err" ||
+  { echo "Seerr with no media server failed without the refusal message:"; cat "$err"; rm -f "$err"; exit 1; }
+rm -f "$err"
+echo "== seerr with no media server: refused, naming what to switch on"
+
 # FileBrowser Quantum's configuration is one config.yaml the chart owns: the route's prefix,
 # the login's provider, the data contract as its one source read-write, the database on the
 # config claim, the cache on the emptyDir. The app cannot read a secret from a file, so the

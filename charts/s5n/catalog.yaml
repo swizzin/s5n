@@ -144,13 +144,15 @@ apps:
     default: true
     # Plex for the library and for signing people in, and both Arrs to add what was requested:
     # an unlisted caller never reaches the Arrs' ingress, however open the egress is. Jellyfin
-    # is the other media server it can be set up with, and Tautulli feeds its watch history
+    # is the other media server it can be set up with -- Seerr talks to one, so a box without
+    # Plex runs it against Jellyfin -- and Tautulli feeds its watch history
     # (server/api/jellyfin.ts and tautulli.ts at v3.5.2).
     calls: [plex, jellyfin, tautulli, sonarr, radarr]
     # As Plex: Seerr's bundle loads its assets from the site root, so the path route broke the
     # page and it is served at seerr.<domain>.
     exposure: host
-    # It signs people in with Plex, so a login here would be a second password.
+    # It signs people in with the box's media server -- Plex's own account, or the Jellyfin
+    # account the wiring Job makes its owner -- so a login here would be a second password.
     login: own
     # Its settings and its database, in a subdirectory of the config directory
     # (server/lib/settings/index.ts and server/datasource.ts at v3.5.1: settings.json,

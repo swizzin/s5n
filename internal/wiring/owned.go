@@ -18,6 +18,15 @@ type OwnedRecord struct {
 	Qui         *QuiOwned           `json:"qui,omitempty"`
 	Autobrr     *AutobrrOwned       `json:"autobrr,omitempty"`
 	Pbh         *PbhOwned           `json:"pbh,omitempty"`
+	Seerr       *SeerrOwned         `json:"seerr,omitempty"`
+}
+
+// SeerrOwned is the one thing the Job leaves in Seerr that the app cannot show it set:
+// that this Job initialized the instance. Seerr's own initialized flag says a Seerr is
+// set up, not who did it, and a person who deletes the admin it made must not have a
+// whole setup written under them on the next run.
+type SeerrOwned struct {
+	Initialized bool `json:"initialized,omitempty"`
 }
 
 // PbhOwned is what the Job owns in PeerBanHelper: one downloader, recorded by the
@@ -335,6 +344,23 @@ func (o *OwnedRecord) SetAutobrrClientFingerprint(name, fingerprint string) {
 		o.Autobrr.Fingerprints = map[string]string{}
 	}
 	o.Autobrr.Fingerprints[name] = fingerprint
+}
+
+// SeerrInitialized reports whether an earlier run of this Job set this Seerr up.
+func (o *OwnedRecord) SeerrInitialized() bool {
+	if o.Seerr == nil {
+		return false
+	}
+	return o.Seerr.Initialized
+}
+
+// SetSeerrInitialized records that this run initialized Seerr. Call it only after the
+// app answered the initialize call.
+func (o *OwnedRecord) SetSeerrInitialized() {
+	if o.Seerr == nil {
+		o.Seerr = &SeerrOwned{}
+	}
+	o.Seerr.Initialized = true
 }
 
 // PbhDownloaderID returns the recorded downloader id, or "" when nothing is

@@ -1,0 +1,39 @@
+# A Jellyfin-only box: the second media server instead of Plex, with the request page in
+# front of it. Seerr talks to one server, so a release with no Plex and a Jellyfin is a
+# Jellyfin-mode Seerr -- the Job makes its owner out of the person's own server account,
+# which is what this render has to carry (mediaServer and the address people reach the
+# server at) and the acceptance test installs.
+#
+# Tautulli reads Plex and nothing else, so it is off; Maintainerr is off by default.
+auth:
+  edge: true
+
+# The account root's login admits, written by box from the grant: Jellyfin's first user is
+# named after it, and that account is the one Seerr's owner is.
+login: example
+
+storage:
+  data:
+    existingClaim: box-jellyfin-data
+  config:
+    existingClaim: box-jellyfin-config
+
+apps:
+  qbittorrent:
+    torrent:
+      # No chart default: a helm install chooses its peer port, in the band Kubernetes
+      # does not assign by itself.
+      port: 30080
+  plex:
+    enabled: false
+  tautulli:
+    enabled: false
+  jellyfin:
+    enabled: true
+    knownProxies:
+      - 10.244.0.0/16
+
+# Jellyfin and Seerr are served at jellyfin.<domain> and seerr.<domain>, so a render needs
+# the domain.
+gateway:
+  host: box.example.com

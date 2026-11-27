@@ -109,12 +109,29 @@
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}
 {{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
+{{- /* Which server this Seerr is set up against: it talks to exactly one, and on Jellyfin
+       the Job can make its owner itself (the person's own server account). Plex wins when the
+       release runs it; a box with neither has no account anyone could sign in to Seerr with. */}}
+{{- $mediaServer := "" }}
+{{- if and .Values.apps.plex .Values.apps.plex.enabled }}
+{{- $mediaServer = "plex" }}
+{{- else if and .Values.apps.jellyfin .Values.apps.jellyfin.enabled }}
+{{- $mediaServer = "jellyfin" }}
+{{- else }}
+{{- fail "apps.seerr: Seerr requests from one media server and this release runs neither; switch plex or jellyfin on, or switch seerr off" }}
+{{- end }}
 {{- /* The publicUrl is where a person opens Seerr, not where this Job dials it: Seerr's bundle
        loads its assets from the site root, so the chart serves it at <app>.<domain>, and the
        one row that asks a human to sign in names that address. */}}
 {{- $_ := set $cfg "seerr" (dict
       "url" (printf "http://seerr:%v" .Values.apps.seerr.port)
-      "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr") | trim)) }}
+      "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr") | trim)
+      "mediaServer" $mediaServer) }}
+{{- if eq $mediaServer "jellyfin" }}
+{{- /* Seerr stores where people reach the server and builds its links from it, so the
+       address is the name root's certificate answers on. */}}
+{{- $_ := set $cfg.seerr "mediaServerUrl" (printf "https://%s" (include "s5n.appHost" (dict "root" . "app" "jellyfin") | trim)) }}
+{{- end }}
 {{- end }}
 {{- if and .Values.apps.qui .Values.apps.qui.enabled }}
 {{- /* qui keeps its own user table: the account the chart owns is what this sign-in uses

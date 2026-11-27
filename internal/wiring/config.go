@@ -134,15 +134,30 @@ type MaintainerrConfig struct {
 	PlexTokenFile string `json:"plexTokenFile"`
 }
 
+// The media servers a Seerr is set up against. Seerr talks to exactly one, and which
+// one decides who its first admin is (catalog.yaml's seerr entry).
+const (
+	mediaServerPlex     = "plex"
+	mediaServerJellyfin = "jellyfin"
+)
+
 // SeerrConfig points at Seerr. There is no API key: every settings endpoint needs an
-// authenticated admin session the Job cannot create, so this only waits for
-// readiness and reads whether an admin exists.
+// authenticated admin session.
 //
 // PublicURL is where a person opens Seerr: its bundle loads assets from the site
 // root, so the chart serves it at <app>.<domain> (catalog.yaml's `exposure: host`).
+//
+// MediaServer decides whether the Job can make that admin itself: on Jellyfin it is
+// the person's own server account, whose password is in the release Secret; on Plex
+// only an interactive sign-in creates one, which is a person's.
 type SeerrConfig struct {
 	URL       string `json:"url"`
 	PublicURL string `json:"publicUrl"`
+	// MediaServer is the server this instance is set up against: plex or jellyfin.
+	MediaServer string `json:"mediaServer"`
+	// MediaServerURL is where people reach that server (https://jellyfin.<domain>):
+	// Seerr stores it as the Jellyfin external URL its links are built from.
+	MediaServerURL string `json:"mediaServerUrl,omitempty"`
 }
 
 // QbitConfig points at the qBittorrent WebUI. It carries no credential: the WebUI
@@ -238,6 +253,11 @@ func Load(path string) (*Config, error) {
 			c.Instances[i].DownloadCategory = c.Instances[i].Category
 		}
 	}
+	// A Seerr entry from before the media server was named is a Plex one: that is the
+	// only setup it could have had.
+	if c.Seerr != nil && c.Seerr.MediaServer == "" {
+		c.Seerr.MediaServer = mediaServerPlex
+	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -289,6 +309,20 @@ func (c *Config) validate() error {
 			fieldURL: c.Seerr.URL, "publicUrl": c.Seerr.PublicURL,
 		}); err != nil {
 			return err
+		}
+		switch c.Seerr.MediaServer {
+		case mediaServerPlex:
+		case mediaServerJellyfin:
+			if err := requireFields("seerr", map[string]string{
+				"mediaServerUrl": c.Seerr.MediaServerURL,
+			}); err != nil {
+				return err
+			}
+			if c.Jellyfin == nil {
+				return fmt.Errorf("seerr: mediaServer is jellyfin and jellyfin is not deployed, so Seerr has no server to sign its owner in to")
+			}
+		default:
+			return fmt.Errorf("seerr: mediaServer is %q, and Seerr is set up against one server: plex or jellyfin", c.Seerr.MediaServer)
 		}
 	}
 	if c.Qui != nil {
