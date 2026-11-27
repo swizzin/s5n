@@ -2293,6 +2293,41 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
     *) echo "the 200 from qBittorrent's API is not its version string: the WebUI answered a login form instead"; fail=1 ;;
   esac
 
+  # The WebUI's login is skipped for the Gateway's private address, so the edge's cookie
+  # is the only gate in front of its API -- and that cookie is on the whole domain. What
+  # tells a page on another host of this box from the UI's own writes is qBittorrent's
+  # CSRF check, and a write it refuses must leave the setting alone.
+  qb_prefs() {
+    curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/qbittorrent/api/v2/app/preferences" 2>/dev/null |
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("save_path"))' 2>/dev/null || true
+  }
+  qb_set_path() { # qb_set_path <origin|-> <save path>: the status of a preference write
+    local args=()
+    [ "$1" != - ] && args=(-H "Origin: $1")
+    curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" "${args[@]}" \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      --data-urlencode "json={\"save_path\":\"$2\"}" \
+      "https://${DOMAIN}/qbittorrent/api/v2/app/setPreferences" 2>/dev/null || true
+  }
+  csrf_code=$(qb_set_path "https://${SEERR_HOST}" /data/downloads/csrf-should-not-apply)
+  echo "  POST /qbittorrent/api/v2/app/setPreferences, Origin ${SEERR_HOST}: ${csrf_code}"
+  case "$csrf_code" in
+    401 | 403) : ;;
+    *) echo "a POST from another host's page answered ${csrf_code}: qBittorrent's CSRF check is off, and the edge's cookie is all its API has"; fail=1 ;;
+  esac
+  csrf_saved=$(qb_prefs)
+  [ "$csrf_saved" = /data/downloads ] ||
+    { echo "the refused cross-origin write applied anyway: qBittorrent's save path is ${csrf_saved:-unreadable}"; fail=1; }
+  own_code=$(qb_set_path "https://${DOMAIN}" /data/downloads)
+  echo "  POST the same, Origin ${DOMAIN} (the UI's own): ${own_code}"
+  [ "$own_code" = 200 ] ||
+    { echo "the UI's own Origin answered ${own_code}: a browser's own writes are refused, so the Origin and the Host qBittorrent compares it with disagree"; fail=1; }
+  job_code=$(qb_set_path - /data/downloads)
+  echo "  POST the same, no Origin at all (the Job's shape): ${job_code}"
+  [ "$job_code" = 200 ] ||
+    { echo "a request carrying no Origin answered ${job_code}: the wiring Job, the Arrs and qui POST like this"; fail=1; }
+
   # Bazarr serves itself under the prefix its init container sealed into
   # general.base_url, so its page must be its own behind the session and its API accept
   # the key that container minted.
