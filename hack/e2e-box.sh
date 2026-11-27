@@ -4227,8 +4227,11 @@ jellyfin_box() {
     { echo "the release published no wiring config"; fail=1; return 0; }
   python3 - "$WORK/wiring.json" "${JELLYFIN_HOST}" <<'PY' || fail=1
 import json, sys
-seerr = json.load(open(sys.argv[1], encoding="utf-8"))["seerr"]
+entries = json.load(open(sys.argv[1], encoding="utf-8"))["seerrs"]
+seerr = next((e for e in entries if e.get("name") == "seerr"), {})
 problems = []
+if [e.get("name") for e in entries] != ["seerr"]:
+    problems.append(f"the Job was given {[e.get('name') for e in entries]} for Seerr, want the one instance")
 if seerr.get("mediaServer") != "jellyfin":
     problems.append(f"the Job's Seerr entry is a {seerr.get('mediaServer')!r} one")
 if seerr.get("mediaServerUrl") != f"https://{sys.argv[2]}":
