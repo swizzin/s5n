@@ -1,6 +1,6 @@
-package lock
+package netproof
 
-// lock_test.go scripts the pods' answers, so every branch is tested without a
+// netproof_test.go scripts the pods' answers, so every branch is tested without a
 // cluster; the pods themselves are asserted on the objects the proof creates.
 
 import (
@@ -14,14 +14,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// fakePods hands back one scripted exit code per created pod, already
-// terminated, and records what was created and deleted.
+// scripted is one created pod's answer.
+type scripted struct {
+	// exit is the container's exit code, when it ends.
+	exit int32
+	// listens makes the pod a target: running, never ending. addrAfter is how
+	// many status reads it takes to report an address (0: the create answer has one).
+	listens   bool
+	addrAfter int
+	// waiting is a container that cannot start.
+	waiting string
+}
+
+// fakePods answers one created pod per scripted answer, and records what was
+// created and deleted.
 type fakePods struct {
-	exits   []int32
+	script  []scripted
 	created []*corev1.Pod
 	deleted []string
+	// gets counts each pod's status reads, for the listeners' addresses.
+	gets    map[string]int
 	cniPods []string
-	dnsPods []corev1.Pod
 	// dnsServices are kube-system's Services, for DNSTarget.
 	dnsServices []corev1.Service
 	next        int
@@ -32,27 +45,56 @@ func (f *fakePods) Services(_ context.Context, _ string) (*corev1.ServiceList, e
 }
 
 func (f *fakePods) Create(_ context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
-	if f.next >= len(f.exits) {
-		return nil, fmt.Errorf("unexpected pod %q: the test scripted %d", pod.GenerateName, len(f.exits))
+	if f.next >= len(f.script) {
+		return nil, fmt.Errorf("unexpected pod %q: the test scripted %d", pod.GenerateName, len(f.script))
 	}
-	code := f.exits[f.next]
+	s := f.script[f.next]
 	f.next++
 	p := pod.DeepCopy()
-	p.Name = fmt.Sprintf("%s%d", pod.GenerateName, f.next)
-	p.Status.Phase = corev1.PodSucceeded
-	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:  "probe",
-		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code}},
-	}}
+	p.Name = fmt.Sprintf("%s%d", pod.GenerateName, len(f.created)+1)
+	switch {
+	case s.listens:
+		p.Status.Phase = corev1.PodRunning
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "probe",
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		if s.addrAfter == 0 {
+			p.Status.PodIP = podIP(len(f.created) + 1)
+		}
+	case s.waiting != "":
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "probe",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: s.waiting}},
+		}}
+	default:
+		p.Status.Phase = corev1.PodSucceeded
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "probe",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: s.exit}},
+		}}
+	}
 	f.created = append(f.created, p)
-	return p, nil
+	return p.DeepCopy(), nil
 }
 
+// podIP is one target's address, so a client dials the pod it was meant to.
+func podIP(n int) string { return fmt.Sprintf("10.244.0.%d", n) }
+
 func (f *fakePods) Get(_ context.Context, _, name string) (*corev1.Pod, error) {
-	for _, p := range f.created {
-		if p.Name == name {
-			return p, nil
+	for i, p := range f.created {
+		if p.Name != name {
+			continue
 		}
+		if f.gets == nil {
+			f.gets = map[string]int{}
+		}
+		f.gets[name]++
+		if p.Status.PodIP == "" && f.gets[name] >= f.script[i].addrAfter {
+			p.Status.PodIP = podIP(i + 1)
+		}
+		return p, nil
 	}
 	return nil, fmt.Errorf("pod %q not found", name)
 }
@@ -70,8 +112,16 @@ func (f *fakePods) List(_ context.Context, namespace string) (*corev1.PodList, e
 	for _, name := range f.cniPods {
 		list.Items = append(list.Items, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}})
 	}
-	list.Items = append(list.Items, f.dnsPods...)
 	return list, nil
+}
+
+// exits scripts pods that end with the given codes.
+func exits(codes ...int32) []scripted {
+	out := make([]scripted, 0, len(codes))
+	for _, code := range codes {
+		out = append(out, scripted{exit: code})
+	}
+	return out
 }
 
 func options() Options {
@@ -84,13 +134,13 @@ func options() Options {
 	}
 }
 
-// TestProveHoldsWhenTheLabelledPodIsDenied: the control reaches the address and
+// TestEgressHoldsWhenTheLabelledPodIsDenied: the control reaches the address and
 // the labelled pod does not.
-func TestProveHoldsWhenTheLabelledPodIsDenied(t *testing.T) {
-	f := &fakePods{exits: []int32{exitAsAsked, exitAsAsked}, cniPods: []string{"kindnet-abc"}}
-	rep, err := Prove(context.Background(), f, options())
+func TestEgressHoldsWhenTheLabelledPodIsDenied(t *testing.T) {
+	f := &fakePods{script: exits(exitAsAsked, exitAsAsked), cniPods: []string{"kindnet-abc"}}
+	rep, err := ProveEgress(context.Background(), f, options())
 	if err != nil {
-		t.Fatalf("Prove: %v", err)
+		t.Fatalf("ProveEgress: %v", err)
 	}
 	if !rep.ControlReached || rep.ProbeReached {
 		t.Errorf("report = %+v, want the control reachable and the probe denied", rep)
@@ -103,13 +153,13 @@ func TestProveHoldsWhenTheLabelledPodIsDenied(t *testing.T) {
 	}
 }
 
-// TestProveRefusesAClusterThatDoesNotEnforce: the labelled pod reached what the
+// TestEgressRefusesAClusterThatDoesNotEnforce: the labelled pod reached what the
 // policy denies, so a rehearsal would run live.
-func TestProveRefusesAClusterThatDoesNotEnforce(t *testing.T) {
-	f := &fakePods{exits: []int32{exitAsAsked, exitOpposite}, cniPods: []string{"kindnet-abc"}}
-	rep, err := Prove(context.Background(), f, options())
+func TestEgressRefusesAClusterThatDoesNotEnforce(t *testing.T) {
+	f := &fakePods{script: exits(exitAsAsked, exitOpposite), cniPods: []string{"kindnet-abc"}}
+	rep, err := ProveEgress(context.Background(), f, options())
 	if err == nil {
-		t.Fatal("Prove accepted a cluster whose labelled pod reached the target")
+		t.Fatal("ProveEgress accepted a cluster whose labelled pod reached the target")
 	}
 	for _, want := range []string{
 		"does not enforce NetworkPolicy",
@@ -129,13 +179,13 @@ func TestProveRefusesAClusterThatDoesNotEnforce(t *testing.T) {
 	}
 }
 
-// TestProveSaysTheProofCouldNotRun: a control that cannot reach the address
+// TestEgressSaysTheProofCouldNotRun: a control that cannot reach the address
 // means the probe's failure proves nothing, and the refusal must say that.
-func TestProveSaysTheProofCouldNotRun(t *testing.T) {
-	f := &fakePods{exits: []int32{exitOpposite}}
-	_, err := Prove(context.Background(), f, options())
+func TestEgressSaysTheProofCouldNotRun(t *testing.T) {
+	f := &fakePods{script: exits(exitOpposite)}
+	_, err := ProveEgress(context.Background(), f, options())
 	if err == nil {
-		t.Fatal("Prove accepted a control pod that could not reach the target")
+		t.Fatal("ProveEgress accepted a control pod that could not reach the target")
 	}
 	for _, want := range []string{"could not be proven", "without app.kubernetes.io/instance=s5n", "could not reach"} {
 		if !strings.Contains(err.Error(), want) {
@@ -147,12 +197,12 @@ func TestProveSaysTheProofCouldNotRun(t *testing.T) {
 	}
 }
 
-// TestProveRefusesWhenTheProbeCannotRun: a pod that never ran is not a lock.
-func TestProveRefusesWhenTheProbeCannotRun(t *testing.T) {
-	f := &fakePods{exits: []int32{exitAsAsked, exitBroken}}
-	_, err := Prove(context.Background(), f, options())
+// TestEgressRefusesWhenTheProbeCannotRun: a pod that never ran is not a lock.
+func TestEgressRefusesWhenTheProbeCannotRun(t *testing.T) {
+	f := &fakePods{script: exits(exitAsAsked, exitBroken)}
+	_, err := ProveEgress(context.Background(), f, options())
 	if err == nil {
-		t.Fatal("Prove accepted a probe pod that never ran")
+		t.Fatal("ProveEgress accepted a probe pod that never ran")
 	}
 	for _, want := range []string{"could not be proven", "the probe pod exited"} {
 		if !strings.Contains(err.Error(), want) {
@@ -161,12 +211,12 @@ func TestProveRefusesWhenTheProbeCannotRun(t *testing.T) {
 	}
 }
 
-// TestProbePodsAreTheOnesTheClusterWillAdmit: the control carries no release
+// TestEgressPodsAreTheOnesTheClusterWillAdmit: the control carries no release
 // label, the probe carries it, and both pass restricted and the image policy.
-func TestProbePodsAreTheOnesTheClusterWillAdmit(t *testing.T) {
-	f := &fakePods{exits: []int32{exitAsAsked, exitAsAsked}}
-	if _, err := Prove(context.Background(), f, options()); err != nil {
-		t.Fatalf("Prove: %v", err)
+func TestEgressPodsAreTheOnesTheClusterWillAdmit(t *testing.T) {
+	f := &fakePods{script: exits(exitAsAsked, exitAsAsked)}
+	if _, err := ProveEgress(context.Background(), f, options()); err != nil {
+		t.Fatalf("ProveEgress: %v", err)
 	}
 	if len(f.created) != 2 {
 		t.Fatalf("created %d pods, want 2", len(f.created))
@@ -222,22 +272,22 @@ func assertRestricted(t *testing.T, pod *corev1.Pod) {
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("%s seccomp = %+v", pod.Name, sc.SeccompProfile)
 	}
-	if !contains(c.Command, "--want") {
+	if !strings.HasPrefix(c.Command[0], "/") {
 		t.Errorf("%s command = %v, want the probe's own", pod.Name, c.Command)
 	}
 }
 
-// TestProveChecksAPublicAddress: the labelled pod reaching a public address means
+// TestEgressChecksAPublicAddress: the labelled pod reaching a public address means
 // the policy is absent; failing to is what both a locked box and no internet look
 // like, so it is only a note.
-func TestProveChecksAPublicAddress(t *testing.T) {
+func TestEgressChecksAPublicAddress(t *testing.T) {
 	o := options()
 	o.Internet = Target{Host: "192.0.2.53", Port: 443}
 
-	f := &fakePods{exits: []int32{exitAsAsked, exitAsAsked, exitOpposite}}
-	rep, err := Prove(context.Background(), f, o)
+	f := &fakePods{script: exits(exitAsAsked, exitAsAsked, exitOpposite)}
+	rep, err := ProveEgress(context.Background(), f, o)
 	if err == nil {
-		t.Fatal("Prove accepted a labelled pod that reached the public address")
+		t.Fatal("ProveEgress accepted a labelled pod that reached the public address")
 	}
 	if !rep.InternetReached || !strings.Contains(err.Error(), "192.0.2.53:443") {
 		t.Errorf("refusal = %v, report = %+v", err, rep)
@@ -246,10 +296,10 @@ func TestProveChecksAPublicAddress(t *testing.T) {
 		t.Errorf("deleted %v, want all three pods", f.deleted)
 	}
 
-	f = &fakePods{exits: []int32{exitAsAsked, exitAsAsked, exitAsAsked}}
-	rep, err = Prove(context.Background(), f, o)
+	f = &fakePods{script: exits(exitAsAsked, exitAsAsked, exitAsAsked)}
+	rep, err = ProveEgress(context.Background(), f, o)
 	if err != nil {
-		t.Fatalf("Prove with the public check closed: %v", err)
+		t.Fatalf("ProveEgress with the public check closed: %v", err)
 	}
 	if !rep.InternetChecked || rep.InternetReached {
 		t.Errorf("report = %+v, want the public check run and closed", rep)
@@ -305,11 +355,11 @@ func TestDNSTargetIsTheDNSServiceMetricsPort(t *testing.T) {
 	}
 }
 
-// TestProbePodsSettle: every probe pod dials with --settle, so a policy the CNI
+// TestEgressPodsSettle: every probe pod dials with --settle, so a policy the CNI
 // has not programmed yet is not read as a cluster that ignores it.
-func TestProbePodsSettle(t *testing.T) {
+func TestEgressPodsSettle(t *testing.T) {
 	o := Options{Namespace: "s5n", Release: "s5n", Image: "s5n:test", Target: Target{Host: "10.96.0.10", Port: 9153}, Settle: 20 * time.Second}
-	cmd := strings.Join(probePod(o, "probe", nil, o.Target, "closed").Spec.Containers[0].Command, " ")
+	cmd := strings.Join(egressPod(o, "probe", nil, o.Target, "closed").Spec.Containers[0].Command, " ")
 	for _, want := range []string{"--settle 20s", "--want closed", "--address 10.96.0.10:9153", "--timeout 2s"} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("probe command %q has no %q", cmd, want)

@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// The exit codes above. They are part of the contract with internal/migrate/lock.
+// The exit codes above. They are part of the contract with internal/netproof.
 const (
 	exitAsAsked  = 0
 	exitOpposite = 3

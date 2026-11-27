@@ -31,11 +31,11 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
-	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/report"
 	"github.com/swizzin/s5n/internal/migrate/work"
+	"github.com/swizzin/s5n/internal/netproof"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/safefs"
@@ -1082,7 +1082,7 @@ func containsString(list []string, name string) bool {
 
 // rehearsalInternet is the public address a rehearsal must not reach. Failing to
 // reach it is not proof: the in-cluster check is the one that counts.
-var rehearsalInternet = lock.Target{Host: "1.1.1.1", Port: 443}
+var rehearsalInternet = netproof.Target{Host: "1.1.1.1", Port: 443}
 
 // rehearsalSourceHost refuses to rehearse beside the live source: a locked Arr
 // still writes the library. Either the plan names this host, or its data root
@@ -1146,20 +1146,20 @@ func enabledApps(sb *seedbox.Seedbox) []string {
 }
 
 // rehearsalGateAddress is the DNS metrics port the lock denies.
-func rehearsalGateAddress(ctx context.Context, o *migrateApplyFlags) (lock.Target, error) {
+func rehearsalGateAddress(ctx context.Context, o *migrateApplyFlags) (netproof.Target, error) {
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.install.record})
 	if err != nil {
-		return lock.Target{}, err
+		return netproof.Target{}, err
 	}
 	cfg, err := kube.Config(kc)
 	if err != nil {
-		return lock.Target{}, fmt.Errorf("kubeconfig %s: %w", kc, err)
+		return netproof.Target{}, fmt.Errorf("kubeconfig %s: %w", kc, err)
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return lock.Target{}, fmt.Errorf("cluster client: %w", err)
+		return netproof.Target{}, fmt.Errorf("cluster client: %w", err)
 	}
-	return lock.DNSTarget(ctx, lock.Cluster{Client: cs})
+	return netproof.DNSTarget(ctx, netproof.Cluster{Client: cs})
 }
 
 // migrateProveLock proves the egress lock inside the namespace, using the
@@ -1169,9 +1169,9 @@ func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart releas
 	if err != nil {
 		return err
 	}
-	client := lock.Cluster{Client: cs}
+	client := netproof.Cluster{Client: cs}
 	// The proof dials the address every app's gate will: the one in the grant.
-	target, err := lock.ParseTarget(fmt.Sprint(values["rehearsalGate"]))
+	target, err := netproof.ParseTarget(fmt.Sprint(values["rehearsalGate"]))
 	if err != nil {
 		return fmt.Errorf("the rehearsal gate in the grant: %w", err)
 	}
@@ -1179,7 +1179,7 @@ func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart releas
 		Label: "proving the network lock",
 		Plain: "network lock: proving it from inside " + namespace,
 	})
-	rep, err := lock.Prove(ctx, client, lock.Options{
+	rep, err := netproof.ProveEgress(ctx, client, netproof.Options{
 		Namespace: namespace,
 		Release:   release.ReleaseName,
 		Image:     image,

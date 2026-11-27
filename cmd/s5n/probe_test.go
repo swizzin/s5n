@@ -1,7 +1,7 @@
 package main
 
 // probe_test.go drives the exit codes `s5n probe` reports: they are the whole
-// contract internal/migrate/lock reads, so "as asked" and "the other way" must
+// contract internal/netproof reads, so "as asked" and "the other way" must
 // be distinguishable from "the probe could not run".
 
 import (
