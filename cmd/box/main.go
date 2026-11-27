@@ -599,6 +599,9 @@ func runApply(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
+	// bootstrap's record, so an apply reads the cluster decision it wrote and keeps
+	// what it learns about the cluster there. The non-root e2e is why it is a flag.
+	recordPath := fs.String("record", bootstrap.RecordPath, "bootstrap's cluster record")
 	if err := parseNoArgs(fs, "apply", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -611,13 +614,13 @@ func runApply(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(false), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
-	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+	if err := hostFiles(out, *recordPath, *o.grantPath); err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 
 	// The cluster decision is bootstrap's; apply reuses it.
-	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *recordPath})
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
@@ -665,7 +668,7 @@ func runApply(ctx context.Context, args []string) {
 	opts.BoxValues = boxValues(kc)
 	// A cluster box did not install is proved to enforce NetworkPolicy once, here:
 	// no app is installed behind a policy the CNI ignores.
-	opts.NetworkProof = networkPolicyProof(kc, bootstrap.RecordPath, out)
+	opts.NetworkProof = networkPolicyProof(kc, *recordPath, out)
 	// Per-host TLS writes a listener before the release moves, so no apply
 	// leaves an app host unreachable (docs/box.md).
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}

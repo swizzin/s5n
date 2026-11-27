@@ -628,6 +628,29 @@ firewalld's trusted zone already admits. Only a real host proves any of this —
 no firewalld — so the unit tests pin the command sequence, and a VM rehearsal is the
 proof.
 
+**Only a cluster that enforces NetworkPolicy gets apps (proposed).** The Arrs run
+External auth and qBittorrent skips its login for private addresses, so the chart's
+NetworkPolicies are the only thing between another pod on the cluster and an app. A
+NetworkPolicy is enforced by the CNI, not the API server: k0s's kube-router and kind's
+kindnet enforce one, and a cluster on plain flannel accepts every policy object and
+ignores it. So box proves it, in the seedbox's namespace, before the first app exists:
+two pods listen on a port, a client pod dials the one no policy selects and must reach
+it, and a second client dials the one a deny-all ingress policy selects and must not.
+The control comes first, because a network that cannot carry the traffic at all must not
+be reported as a cluster that ignores policy — that is its own refusal, and it says the
+pods could not reach each other. A client that gets through the deny-all policy stops
+the run before any app is installed, naming the plugin box recognised and the ones that
+do enforce policies (Calico, Cilium, kube-router). The probe pods run the release's own
+image, pass Pod Security `restricted` like any app pod, and the pods and the policy are
+removed on every path, a cancelled run included. The proof costs a few pods, so it is
+made once per cluster: a cluster box installed itself (k0s, which brings kube-router)
+never needs it, and a passed proof is recorded in `/etc/s5n/cluster.yaml`, so no apply
+repeats it. A cluster with no record is proved by every apply, because apply doesn't
+choose a cluster and so writes no record that would let the next run skip the proof.
+This is the ingress half of the same check `migrate` makes for a rehearsal's egress
+lock; kind enforces policies, so the e2e exercises the passing path and the refusals are
+unit tests.
+
 **A record is checked, not trusted (decided).** A re-run reads
 `/etc/s5n/cluster.yaml` for what box decided — which cluster, who owns its
 lifecycle, the platform modes, the GatewayClass — then probes that cluster again:

@@ -614,7 +614,7 @@ apply() { # apply <output file>
   # --paths-in-node: only a script that wrote those directories itself passes it.
   "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --paths-in-node \
+    --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
 
@@ -4800,7 +4800,7 @@ EOF
   anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --dns-file "$WORK/dns-window" --paths-in-node \
+    --dns-file "$WORK/dns-window" --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-dns-window.txt" 2>&1; then
     cat "$WORK/apply-dns-window.txt"
   else
@@ -5676,7 +5676,7 @@ PY
   log "box apply: sonarr stays where the rollback left it"
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_b" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-held.txt" 2>&1; then
+    --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-held.txt" 2>&1; then
     cat "$WORK/apply-held.txt"
   else
     cat "$WORK/apply-held.txt"; fail=1; return 0
@@ -5753,7 +5753,7 @@ PY
   revision_before=$(helm_revision "$NS") || true
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_d" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-release-d.txt" 2>&1; then
+    --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-release-d.txt" 2>&1; then
     cat "$WORK/apply-release-d.txt"
     echo "box apply --chart-version ${release_d} succeeded: only box update may move the release"; fail=1; return 0
   fi
@@ -5801,7 +5801,7 @@ PY
     { echo "sonarr's config lost the marker before the apply: the copy below would prove nothing"; fail=1; return 0; }
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-pin.txt" 2>&1; then
+    --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-pin.txt" 2>&1; then
     cat "$WORK/apply-pin.txt"
   else
     cat "$WORK/apply-pin.txt"; fail=1; return 0
@@ -5881,7 +5881,7 @@ PY
     { echo "could not hand Plex's settings file back to the app's user"; fail=1; return 0; }
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token.txt" 2>&1; then
+    --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token.txt" 2>&1; then
     cat "$WORK/apply-plex-token.txt"
   else
     cat "$WORK/apply-plex-token.txt"; fail=1; return 0
@@ -5919,7 +5919,7 @@ PY
     { echo "could not set a plex-token by hand"; fail=1; return 0; }
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token-kept.txt" 2>&1; then
+    --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token-kept.txt" 2>&1; then
     cat "$WORK/apply-plex-token-kept.txt"
   else
     cat "$WORK/apply-plex-token-kept.txt"; fail=1; return 0
