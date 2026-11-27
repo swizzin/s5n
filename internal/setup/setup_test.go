@@ -102,7 +102,7 @@ func (h *fakeHost) MkdirAll(path string, _ fs.FileMode) error {
 	return nil
 }
 
-func (h *fakeHost) Chown(path string, uid, gid int) error {
+func (h *fakeHost) Lchown(path string, uid, gid int) error {
 	h.chowns = append(h.chowns, path)
 	h.owners[path] = owner{uid, gid}
 	return nil

@@ -88,8 +88,8 @@ func (LinuxPathHost) MkdirAll(path string, perm fs.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
 
-func (LinuxPathHost) Chown(path string, uid, gid int) error {
-	return os.Chown(path, uid, gid)
+func (LinuxPathHost) Lchown(path string, uid, gid int) error {
+	return os.Lchown(path, uid, gid)
 }
 
 var _ PathHost = LinuxPathHost{}
