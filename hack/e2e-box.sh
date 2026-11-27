@@ -11,11 +11,14 @@
 # to a registry container on 127.0.0.1, and box pulls it with --chart-repo. box never
 # reads `charts/` from its own tree and the kind cluster never pulls the chart.
 #
-# Seven scenarios, seven clusters (`all` runs each once, with its own work directory,
+# Eight scenarios, eight clusters (`all` runs each once, with its own work directory,
 # cluster name and exit code):
 #   fresh         nothing installed: box installs MetalLB, the address answers from
 #                 the host, a second bootstrap changes nothing and the claims outlive
 #                 `helm uninstall`.
+#   jellyfin      a box with no Plex: the request page is set up against Jellyfin by
+#                 the wiring Job, and the person's own Jellyfin account signs in to it
+#                 and sees the libraries the release made.
 #   preinstalled  MetalLB and its pool installed as a user would: box installs
 #                 neither, and the Gateway is Programmed on the existing pool.
 #   foreign-gateway  NGINX Gateway Fabric, the one implementation box refuses:
@@ -46,7 +49,7 @@
 # every host-side name carries this checkout's id (see THE RUN'S IDENTITY), so two
 # worktrees never meet. A scenario that waited for a slot counts from when it got one.
 #
-# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
+# Usage: hack/e2e-box.sh [--keep] [fresh|jellyfin|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
 #
 # Every `==> ` line ends with the seconds since the script started (`==> PASS
 # (fresh)  [+412s]`), so a grep for `^==> PASS` still matches; both come from bash's
@@ -102,13 +105,13 @@ SCENARIO=all
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=--keep ;;
-    fresh | preinstalled | foreign-gateway | update | upgrade | migrate | migrate-keep | all) SCENARIO=$arg ;;
+    fresh | jellyfin | preinstalled | foreign-gateway | update | upgrade | migrate | migrate-keep | all) SCENARIO=$arg ;;
     -h | --help)
       sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update, upgrade, migrate, migrate-keep or all)" >&2
+      echo "unknown argument: $arg (want fresh, jellyfin, preinstalled, foreign-gateway, update, upgrade, migrate, migrate-keep or all)" >&2
       exit 2
       ;;
   esac
@@ -159,7 +162,7 @@ take_slot() {
 ALL_SCENARIOS=(fresh jellyfin preinstalled foreign-gateway update upgrade migrate migrate-keep)
 
 # ---- all: build once, then the scenarios at once ------------------------------
-# The seven scenarios are separate processes, each with its own work directory, cluster,
+# The eight scenarios are separate processes, each with its own work directory, cluster,
 # kubeconfig and exit code, run as many at a time as the slots allow. What all of them
 # need -- image, box binary, chart package -- is built here once and named in
 # S5N_E2E_PREBUILT; a scenario given that directory builds nothing and publishes,
