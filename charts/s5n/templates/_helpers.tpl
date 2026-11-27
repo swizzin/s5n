@@ -178,6 +178,55 @@ s5n
 {{- toJson $out -}}
 {{- end -}}
 
+{{- /* s5n.seerrs: every Seerr instance and the media server it is set up against, as JSON.
+       A Seerr talks to exactly one server (settings.main.mediaServerType) and its first admin
+       is a sign-in to that server, so a box with both servers runs one Seerr per server:
+       `seerr` and `seerr-jellyfin`, each at its own name. An instance that does not name a
+       server gets Plex when the release runs it, and Jellyfin otherwise.
+
+       A server this release does not run is refused with the app to switch on: Seerr on a box
+       with neither has no account anyone could sign in to it with. */}}
+{{- define "s5n.seerrs" -}}
+{{- $cfg := .Values.apps.seerr -}}
+{{- $plex := and .Values.apps.plex .Values.apps.plex.enabled -}}
+{{- $jellyfin := and .Values.apps.jellyfin .Values.apps.jellyfin.enabled -}}
+{{- if not (or $plex $jellyfin) -}}
+{{- fail "apps.seerr: Seerr requests from one media server and this release runs neither; switch plex or jellyfin on, or switch seerr off" -}}
+{{- end -}}
+{{- $out := list -}}
+{{- range $i := $cfg.instances -}}
+{{- if $i.enabled -}}
+{{- $name := ternary "seerr" (printf "seerr-%s" $i.suffix) (empty $i.suffix) -}}
+{{- $media := default (ternary "plex" "jellyfin" $plex) $i.mediaServer -}}
+{{- if eq $media "jellyfin" -}}
+{{- if not $jellyfin -}}
+{{- fail (printf "apps.seerr.instances: %s is set up against jellyfin and apps.jellyfin is off; switch jellyfin on, or make %s a plex one" $name $name) -}}
+{{- end -}}
+{{- else if eq $media "plex" -}}
+{{- if not $plex -}}
+{{- fail (printf "apps.seerr.instances: %s is set up against plex and apps.plex is off; switch plex on, or make %s a jellyfin one" $name $name) -}}
+{{- end -}}
+{{- else -}}
+{{- fail (printf "apps.seerr.instances: %s names mediaServer %q, and Seerr is set up against one server: plex or jellyfin" $name $media) -}}
+{{- end -}}
+{{- /* publicUrl is where a person opens Seerr, not where the Job dials it. Seerr stores
+       mediaServerUrl as the Jellyfin external URL it builds its links from, so it is the
+       address people reach the server at. */ -}}
+{{- $publicURL := include "s5n.appHost" (dict "root" $ "app" "seerr" "name" $name) -}}
+{{- $entry := dict "name" $name "url" (printf "http://%s:%v" $name $cfg.port) "publicUrl" (trim $publicURL) "mediaServer" $media -}}
+{{- if eq $media "jellyfin" -}}
+{{- $serverURL := include "s5n.appHost" (dict "root" $ "app" "jellyfin" "name" "jellyfin") -}}
+{{- $_ := set $entry "mediaServerUrl" (printf "https://%s" (trim $serverURL)) -}}
+{{- end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- end -}}
+{{- if not $out -}}
+{{- fail "apps.seerr.instances: Seerr is on and no instance is enabled; switch one on, or switch seerr off" -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
 {{- /* s5n.exposure: how the chart serves one app, from the catalog manifest values cannot
        override. "path" is the default; "host" serves it at <app>.<domain> with a listener and
        certificate of its own, because its UI writes absolute asset paths. The chart owns the

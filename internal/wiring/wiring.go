@@ -771,7 +771,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			// Skipping the claim is allowed, but on an unclaimed server the first
 			// visitor to Seerr owns it. Say that only when Seerr is in the release.
 			detail := "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"
-			if c.Seerr != nil {
+			if len(c.Seerrs) > 0 {
 				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
 			}
 			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: stepPending, Detail: detail})
@@ -897,8 +897,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	if c.Seerr != nil {
-		if err := r.wireSeerr(ctx, res, owned, &c); err != nil {
+	if len(c.Seerrs) > 0 {
+		if err := r.wireSeerrs(ctx, res, owned, &c); err != nil {
 			return err
 		}
 	}

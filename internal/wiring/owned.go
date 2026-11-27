@@ -10,19 +10,19 @@ import (
 // Arr client or Prowlarr application the Job created or adopted. Ownership is by id,
 // because a rename in the app's UI is the user's business (AGENTS.md invariant 11).
 type OwnedRecord struct {
-	Version     int                 `json:"version"`
-	Arr         map[string]ArrOwned `json:"arr,omitempty"`
-	Prowlarr    ProwlarrOwned       `json:"prowlarr,omitempty"`
-	Tautulli    *TautulliOwned      `json:"tautulli,omitempty"`
-	Maintainerr *MaintainerrOwned   `json:"maintainerr,omitempty"`
-	Qui         *QuiOwned           `json:"qui,omitempty"`
-	Autobrr     *AutobrrOwned       `json:"autobrr,omitempty"`
-	Pbh         *PbhOwned           `json:"pbh,omitempty"`
-	Seerr       *SeerrOwned         `json:"seerr,omitempty"`
+	Version     int                   `json:"version"`
+	Arr         map[string]ArrOwned   `json:"arr,omitempty"`
+	Prowlarr    ProwlarrOwned         `json:"prowlarr,omitempty"`
+	Tautulli    *TautulliOwned        `json:"tautulli,omitempty"`
+	Maintainerr *MaintainerrOwned     `json:"maintainerr,omitempty"`
+	Qui         *QuiOwned             `json:"qui,omitempty"`
+	Autobrr     *AutobrrOwned         `json:"autobrr,omitempty"`
+	Pbh         *PbhOwned             `json:"pbh,omitempty"`
+	Seerr       map[string]SeerrOwned `json:"seerr,omitempty"`
 }
 
-// SeerrOwned is the one thing the Job leaves in Seerr that the app cannot show it set:
-// that this Job initialized the instance. Seerr's own initialized flag says a Seerr is
+// SeerrOwned is the one thing the Job leaves in a Seerr that the app cannot show it set:
+// that this Job initialized that instance. Seerr's own initialized flag says a Seerr is
 // set up, not who did it, and a person who deletes the admin it made must not have a
 // whole setup written under them on the next run.
 type SeerrOwned struct {
@@ -346,21 +346,21 @@ func (o *OwnedRecord) SetAutobrrClientFingerprint(name, fingerprint string) {
 	o.Autobrr.Fingerprints[name] = fingerprint
 }
 
-// SeerrInitialized reports whether an earlier run of this Job set this Seerr up.
-func (o *OwnedRecord) SeerrInitialized() bool {
-	if o.Seerr == nil {
-		return false
-	}
-	return o.Seerr.Initialized
+// SeerrInitialized reports whether an earlier run of this Job set one Seerr instance up,
+// by the instance's name.
+func (o *OwnedRecord) SeerrInitialized(instance string) bool {
+	return o.Seerr[instance].Initialized
 }
 
-// SetSeerrInitialized records that this run initialized Seerr. Call it only after the
-// app answered the initialize call.
-func (o *OwnedRecord) SetSeerrInitialized() {
+// SetSeerrInitialized records that this run initialized one instance. Call it only after
+// the app answered the initialize call.
+func (o *OwnedRecord) SetSeerrInitialized(instance string) {
 	if o.Seerr == nil {
-		o.Seerr = &SeerrOwned{}
+		o.Seerr = map[string]SeerrOwned{}
 	}
-	o.Seerr.Initialized = true
+	rec := o.Seerr[instance]
+	rec.Initialized = true
+	o.Seerr[instance] = rec
 }
 
 // PbhDownloaderID returns the recorded downloader id, or "" when nothing is

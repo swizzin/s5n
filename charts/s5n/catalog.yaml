@@ -140,7 +140,9 @@ apps:
 
   seerr:
     description: a request page for the people you share with
-    instances: false
+    # One Seerr per media server: it talks to exactly one, so a box with Plex and Jellyfin
+    # runs `seerr` and `seerr-jellyfin`, each at a name of its own.
+    instances: true
     default: true
     # Plex for the library and for signing people in, and both Arrs to add what was requested:
     # an unlisted caller never reaches the Arrs' ingress, however open the egress is. Jellyfin

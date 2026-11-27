@@ -39,7 +39,7 @@ type Config struct {
 	Prowlarr       *ProwlarrConfig    `json:"prowlarr,omitempty"`
 	Plex           *PlexConfig        `json:"plex,omitempty"`
 	Tautulli       *TautulliConfig    `json:"tautulli,omitempty"`
-	Seerr          *SeerrConfig       `json:"seerr,omitempty"`
+	Seerrs         []SeerrConfig      `json:"seerrs,omitempty"`
 	Maintainerr    *MaintainerrConfig `json:"maintainerr,omitempty"`
 	Qui            *QuiConfig         `json:"qui,omitempty"`
 	Sabnzbd        *SabnzbdConfig     `json:"sabnzbd,omitempty"`
@@ -141,16 +141,17 @@ const (
 	mediaServerJellyfin = "jellyfin"
 )
 
-// SeerrConfig points at Seerr. There is no API key: every settings endpoint needs an
-// authenticated admin session.
+// SeerrConfig is one Seerr instance and the media server it is set up against. There is
+// no API key: every settings endpoint needs an authenticated admin session.
 //
 // PublicURL is where a person opens Seerr: its bundle loads assets from the site
-// root, so the chart serves it at <app>.<domain> (catalog.yaml's `exposure: host`).
+// root, so the chart serves it at <instance>.<domain> (catalog.yaml's `exposure: host`).
 //
 // MediaServer decides whether the Job can make that admin itself: on Jellyfin it is
 // the person's own server account, whose password is in the release Secret; on Plex
 // only an interactive sign-in creates one, which is a person's.
 type SeerrConfig struct {
+	Name      string `json:"name"`
 	URL       string `json:"url"`
 	PublicURL string `json:"publicUrl"`
 	// MediaServer is the server this instance is set up against: plex or jellyfin.
@@ -255,8 +256,10 @@ func Load(path string) (*Config, error) {
 	}
 	// A Seerr entry from before the media server was named is a Plex one: that is the
 	// only setup it could have had.
-	if c.Seerr != nil && c.Seerr.MediaServer == "" {
-		c.Seerr.MediaServer = mediaServerPlex
+	for i := range c.Seerrs {
+		if c.Seerrs[i].MediaServer == "" {
+			c.Seerrs[i].MediaServer = mediaServerPlex
+		}
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -304,25 +307,9 @@ func (c *Config) validate() error {
 			return err
 		}
 	}
-	if c.Seerr != nil {
-		if err := requireFields("seerr", map[string]string{
-			fieldURL: c.Seerr.URL, "publicUrl": c.Seerr.PublicURL,
-		}); err != nil {
+	for i, s := range c.Seerrs {
+		if err := validateSeerr(i, s, c.Jellyfin); err != nil {
 			return err
-		}
-		switch c.Seerr.MediaServer {
-		case mediaServerPlex:
-		case mediaServerJellyfin:
-			if err := requireFields("seerr", map[string]string{
-				"mediaServerUrl": c.Seerr.MediaServerURL,
-			}); err != nil {
-				return err
-			}
-			if c.Jellyfin == nil {
-				return fmt.Errorf("seerr: mediaServer is jellyfin and jellyfin is not deployed, so Seerr has no server to sign its owner in to")
-			}
-		default:
-			return fmt.Errorf("seerr: mediaServer is %q, and Seerr is set up against one server: plex or jellyfin", c.Seerr.MediaServer)
 		}
 	}
 	if c.Qui != nil {
@@ -396,6 +383,30 @@ func downloadCategory(inst Instance) string {
 		return inst.DownloadCategory
 	}
 	return inst.Category
+}
+
+// validateSeerr checks one Seerr instance and the server it is set up against: the fields
+// the Job reads, and that a Jellyfin-mode instance has the server it signs in to.
+func validateSeerr(index int, s SeerrConfig, jellyfin *JellyfinConfig) error {
+	where := fmt.Sprintf("seerrs[%d] (%s)", index, s.Name)
+	if err := requireFields(where, map[string]string{
+		fieldName: s.Name, fieldURL: s.URL, "publicUrl": s.PublicURL,
+	}); err != nil {
+		return err
+	}
+	switch s.MediaServer {
+	case mediaServerPlex:
+	case mediaServerJellyfin:
+		if err := requireFields(where, map[string]string{"mediaServerUrl": s.MediaServerURL}); err != nil {
+			return err
+		}
+		if jellyfin == nil {
+			return fmt.Errorf("%s: mediaServer is jellyfin and jellyfin is not deployed, so this Seerr has no server to sign its owner in to", where)
+		}
+	default:
+		return fmt.Errorf("%s: mediaServer is %q, and a Seerr is set up against one server: plex or jellyfin", where, s.MediaServer)
+	}
+	return nil
 }
 
 // validateInstance checks one Arr instance: a kind the Job can register, and every

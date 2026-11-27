@@ -216,50 +216,79 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
 
-# A Seerr talks to one media server. On a box with no Plex and a Jellyfin it is a Jellyfin
-# one: the Job signs its owner in with the person's own server account and completes the
-# setup, so the render carries the server and the address people reach it at. With Plex in
-# the release the entry keeps the Plex shape it has always had -- no address, no Job setup.
-seerr_wiring() { # seerr_wiring <values file>: this render's Job entry for Seerr, one JSON object
-  helm template t charts/s5n -n seedbox -f "$1" --set gateway.host=box.example.com \
-    --set apps.qbittorrent.torrent.port=30080 -s templates/wiring.yaml |
+# A Seerr talks to one media server, so the Job's config names one per instance and a box
+# with both servers runs two Seerrs at names of their own. On a box with no Plex the server
+# is Jellyfin: the Job signs its owner in with the person's own server account, so the entry
+# carries the address people reach that server at.
+seerr_wiring() { # seerr_wiring <values file> [helm args...]: this render's Job entries for Seerr
+  local values=$1; shift
+  helm template t charts/s5n -n seedbox -f "$values" --set gateway.host=box.example.com \
+    --set apps.qbittorrent.torrent.port=30080 "$@" -s templates/wiring.yaml |
     python3 -c 'import json, sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 cm = [d for d in docs if d.get("kind") == "ConfigMap"][0]
-print(json.dumps(json.loads(cm["data"]["wiring.json"])["seerr"]))'
+print(json.dumps(json.loads(cm["data"]["wiring.json"])["seerrs"]))'
 }
 seerr_cfg=$(mktemp)
 { seerr_wiring charts/s5n/ci/default-values.yaml
   seerr_wiring charts/s5n/ci/jellyfin-values.yaml
-  seerr_wiring charts/s5n/ci/catalog-values.yaml; } >"$seerr_cfg"
+  seerr_wiring charts/s5n/ci/seerr-both-servers-values.yaml; } >"$seerr_cfg"
 seerr_problems=$(python3 - "$seerr_cfg" <<'PY'
 import json, sys
 lines = [line for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 if len(lines) != 3:
-    print(f"the render gave {len(lines)} wiring configs, want three")
+    print(f"the render gave {len(lines)} Job configs, want three")
     sys.exit(0)
 plex, jellyfin, both = (json.loads(line) for line in lines)
 problems = []
-if plex.get("mediaServer") != "plex" or "mediaServerUrl" in plex:
-    problems.append(f"a Plex box's Seerr = {plex}")
-if jellyfin.get("mediaServer") != "jellyfin":
-    problems.append(f"a Jellyfin-only box's Seerr = {jellyfin}, want mediaServer jellyfin")
-if jellyfin.get("mediaServerUrl") != "https://jellyfin.box.example.com":
-    problems.append(f"a Jellyfin-only box's Seerr names {jellyfin.get('mediaServerUrl')!r} as the server's address")
-if jellyfin.get("publicUrl") != "seerr.box.example.com" or jellyfin.get("url") != "http://seerr:5055":
-    problems.append(f"a Jellyfin-only box's Seerr row = {jellyfin}, want Seerr's own host and Service")
-if both.get("mediaServer") != "plex" or "mediaServerUrl" in both:
-    problems.append(f"a box with both media servers runs a {both.get('mediaServer')} Seerr, want Plex")
+if [e.get("mediaServer") for e in plex] != ["plex"] or "mediaServerUrl" in plex[0]:
+    problems.append(f"a Plex box's Seerrs = {plex}")
+if [e.get("name") for e in jellyfin] != ["seerr"] or jellyfin[0].get("mediaServer") != "jellyfin":
+    problems.append(f"a Jellyfin-only box's Seerrs = {jellyfin}")
+elif jellyfin[0].get("mediaServerUrl") != "https://jellyfin.box.example.com":
+    problems.append(f"a Jellyfin-only box's Seerr names {jellyfin[0].get('mediaServerUrl')!r} as the server's address")
+want = [("seerr", "plex", None), ("seerr-jellyfin", "jellyfin", "https://jellyfin.box.example.com")]
+if [(e.get("name"), e.get("mediaServer"), e.get("mediaServerUrl")) for e in both] != want:
+    problems.append(f"a box with both servers runs {[(e.get('name'), e.get('mediaServer')) for e in both]}")
 if problems:
     print("; ".join(problems))
 PY
 )
 rm -f "$seerr_cfg"
 if [ -n "$seerr_problems" ]; then
-  echo "the Job's Seerr entry is wrong for the server the release runs: $seerr_problems"
+  echo "the Job's Seerr entries are wrong for the server each one names: $seerr_problems"
   exit 1
 fi
-echo "== seerr render: Jellyfin mode on a box with no Plex, Plex mode with one, and the address people reach the server at"
+echo "== seerr render: Jellyfin mode on a box with no Plex, Plex mode with one, and one per server when it has both"
+
+# The second Seerr is a workload of its own: its own StatefulSet, Service, route and name,
+# because it is set up against the other server and its bundle would otherwise share a
+# config directory with the first.
+both_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/seerr-both-servers-values.yaml \
+  --set gateway.host=box.example.com)
+for want in 'name: seerr-jellyfin' 'hostnames: ["seerr-jellyfin.box.example.com"]' \
+            'name: seerr-jellyfin' 'mountPath: /app/config' 'subPath: seerr-jellyfin'; do
+  grep -qF -- "$want" <<<"$both_render" ||
+    { echo "the both-servers render has no ${want}"; exit 1; }
+done
+echo "== a second Seerr: its own workload, name, route and config directory"
+
+# A server this release does not run is refused, naming the app to switch on: Seerr has
+# nothing to sign anyone in to otherwise.
+for spec in "jellyfin:apps.jellyfin.enabled=false:switch jellyfin on" \
+            "plex:apps.plex.enabled=false:switch plex on"; do
+  media=${spec%%:*}; rest=${spec#*:}; flag=${rest%%:*}; want=${rest#*:}
+  err=$(mktemp)
+  if helm template t charts/s5n -n seedbox -f charts/s5n/ci/seerr-both-servers-values.yaml \
+       --set "$flag" --set apps.tautulli.enabled=false >/dev/null 2>"$err"; then
+    echo "a ${media}-mode Seerr rendered with ${media} off: it has no server to sign anyone in to"
+    rm -f "$err"; exit 1
+  fi
+  grep -qF "$want" "$err" ||
+    { echo "a ${media}-mode Seerr with ${media} off failed without naming the app to switch on:"; cat "$err"; rm -f "$err"; exit 1; }
+  rm -f "$err"
+done
+echo "== a Seerr set up against a server this release does not run: refused, naming the app"
 
 # Seerr with no media server at all is a request page nobody can sign in to: refused,
 # naming the two apps that would make it work.

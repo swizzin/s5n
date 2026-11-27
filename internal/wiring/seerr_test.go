@@ -85,7 +85,7 @@ func TestWiringSeerrSettingsFailureStopsTheRun(t *testing.T) {
 // The address is part of the rendered config, not a guess: a Seerr entry with no
 // publicUrl is refused before the Job starts, the same way an empty url is.
 func TestSeerrConfigValidationRequiresThePublicAddress(t *testing.T) {
-	cfg := Config{Seerr: &SeerrConfig{URL: "http://seerr:5055"}}
+	cfg := Config{Seerrs: []SeerrConfig{{Name: "seerr", URL: "http://seerr:5055"}}}
 	err := cfg.validate()
 	if err == nil {
 		t.Fatal("a seerr block without publicUrl was accepted")

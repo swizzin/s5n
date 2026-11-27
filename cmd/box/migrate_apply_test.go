@@ -411,3 +411,26 @@ func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
 		t.Errorf("the second instance's downloadCategory is %v, want 4K/TV", got)
 	}
 }
+
+// A Seerr has no library directory, so an instance switched on for it carries no category:
+// its schema refuses one, and a values file the chart will not render is not a migration.
+func TestSwitchingOnASeerrWritesNoCategory(t *testing.T) {
+	list := []any{map[string]any{"suffix": "", "enabled": true}}
+	out := switchOn(list, "jellyfin", "seerr", "")
+	if len(out) != 2 {
+		t.Fatalf("instances = %v, want the default and the new one", out)
+	}
+	entry, _ := out[1].(map[string]any)
+	if entry["suffix"] != "jellyfin" || entry["enabled"] != true {
+		t.Fatalf("the new instance = %v", entry)
+	}
+	if _, ok := entry["category"]; ok {
+		t.Fatalf("the new Seerr instance carries a category: %v", entry)
+	}
+	// The same call for an Arr still names the directory the instance writes.
+	arr := switchOn([]any{map[string]any{"suffix": "", "category": "tv", "enabled": true}}, "4k", "sonarr", "")
+	got, _ := arr[1].(map[string]any)
+	if got["category"] != "4k" {
+		t.Fatalf("sonarr-4k's category = %v, want the suffix", got["category"])
+	}
+}

@@ -1,0 +1,38 @@
+# A box that runs both media servers: Plex for the people who use it, Jellyfin for the
+# ones who do not. Seerr talks to exactly one server, so this box runs one per server --
+# `seerr` on Plex and `seerr-jellyfin` on Jellyfin, each at a name of its own. The second
+# instance is what a grant writes; this render is the shape it has to get.
+auth:
+  edge: true
+
+# The account root's login admits.
+login: example
+
+storage:
+  data:
+    existingClaim: box-both-data
+  config:
+    existingClaim: box-both-config
+
+apps:
+  qbittorrent:
+    torrent:
+      # No chart default: a helm install chooses its peer port.
+      port: 30080
+  jellyfin:
+    enabled: true
+    knownProxies:
+      - 10.244.0.0/16
+  seerr:
+    instances:
+      - suffix: ""
+        enabled: true
+        mediaServer: plex
+      - suffix: jellyfin
+        enabled: true
+        mediaServer: jellyfin
+
+# Two Seerrs, they are served at seerr.<domain> and seerr-jellyfin.<domain>, and so is
+# the media server.
+gateway:
+  host: box.example.com

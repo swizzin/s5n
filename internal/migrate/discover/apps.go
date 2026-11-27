@@ -66,8 +66,9 @@ var catalogApps = map[string]appInfo{
 	"jellyfin": {config: []string{configPath}, port: jellyfinPort, scratch: []string{"/cache"},
 		aliases: []string{"emby"}},
 	// Seerr's images default CONFIG_DIRECTORY to /app/config; the chart mounts its
-	// claim there, though its own deployments use /config.
-	"seerr": {config: []string{"/app/config", configPath}, port: seerrPort, aliases: []string{"overseerr", "jellyseerr"}},
+	// claim there, though its own deployments use /config. It takes instances because a
+	// box runs one per media server: a source with seerr and seerr-jellyfin is two.
+	"seerr": {instances: true, config: []string{"/app/config", configPath}, port: seerrPort, aliases: []string{"overseerr", "jellyseerr"}},
 	"qui":   {config: []string{configPath}, port: tomlConfigPort},
 	// autobrr runs `--config /config` with HOME there.
 	"autobrr": {config: []string{configPath}, port: tomlConfigPort},

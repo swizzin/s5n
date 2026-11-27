@@ -945,7 +945,10 @@ func switchOn(list []any, suffix, app, downloadCategory string) []any {
 		out = append(out, entry)
 	}
 	if !found {
-		entry := map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true}
+		entry := map[string]any{"suffix": suffix, "enabled": true}
+		if hasCategory(app) {
+			entry["category"] = categoryFor(app, suffix)
+		}
 		if downloadCategory != "" {
 			entry["downloadCategory"] = downloadCategory
 		}
@@ -965,6 +968,11 @@ func cloneEntry(entry map[string]any) map[string]any {
 
 // categoryFor is the suffix, or the app name for a primary: it is one
 // qBittorrent category and one directory per /data tree, and cannot be empty.
+// hasCategory says whether an app's instances name a library directory. Seerr has none:
+// it requests from a media server and keeps no root folders, and its schema refuses a
+// category key outright.
+func hasCategory(app string) bool { return app != "seerr" }
+
 func categoryFor(app, suffix string) string {
 	if suffix == "" {
 		return app

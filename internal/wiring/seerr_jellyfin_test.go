@@ -180,9 +180,10 @@ const seerrJellyfinURL = "https://jellyfin.example.test"
 // newSeerrHarness wires a Jellyfin-mode Seerr and a Jellyfin box cannot sign in to: the
 // Job's Seerr setup does not depend on that sign-in, so it is the plainest server that
 // lets the Seerr steps be asserted alone.
-func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr) {
-	t.Helper()
-	f := &fakeSeerr{
+// freshSeerr is an instance nobody has signed in to, with the two libraries a box's Arrs
+// make.
+func freshSeerr() *fakeSeerr {
+	return &fakeSeerr{
 		person:   "alice",
 		password: seerrPersonPassword,
 		libs: []apps.SeerrLibrary{
@@ -190,6 +191,11 @@ func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr) {
 			{ID: "b2", Name: "tv"},
 		},
 	}
+}
+
+func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr) {
+	t.Helper()
+	f := freshSeerr()
 	seerr := httptest.NewServer(f.handler())
 	jf := &jellyfinNoAccount{}
 	jellyfin := httptest.NewServer(jf.handler())
@@ -208,12 +214,13 @@ func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr) {
 	}
 	cfg := Config{
 		TimeoutSeconds: 10,
-		Seerr: &SeerrConfig{
+		Seerrs: []SeerrConfig{{
+			Name:           "seerr",
 			URL:            seerr.URL,
 			PublicURL:      mediaSeerrPublicURL,
 			MediaServer:    mediaServerJellyfin,
 			MediaServerURL: seerrJellyfinURL,
-		},
+		}},
 		Jellyfin: &JellyfinConfig{
 			URL:              jellyfin.URL,
 			Username:         "alice",
@@ -300,7 +307,7 @@ func TestWiringSeerrJellyfinSetsUpAFreshInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("owned.json: %v", err)
 	}
-	if !rec.SeerrInitialized() {
+	if !rec.SeerrInitialized("seerr") {
 		t.Fatal("the run did not record that it initialized Seerr")
 	}
 	if strings.Contains(f.cm["owned.json"], seerrPersonPassword) {
@@ -386,7 +393,7 @@ func TestWiringSeerrJellyfinWithAChangedPasswordIsPending(t *testing.T) {
 	if f.writes != 0 {
 		t.Fatalf("Seerr was written %d time(s) with an account it refused", f.writes)
 	}
-	if rec, err := ParseOwnedRecord([]byte(f.cm["owned.json"])); err == nil && rec.SeerrInitialized() {
+	if rec, err := ParseOwnedRecord([]byte(f.cm["owned.json"])); err == nil && rec.SeerrInitialized("seerr") {
 		t.Fatal("a refused setup was recorded as initialized")
 	}
 }
@@ -458,7 +465,7 @@ func TestWiringSeerrJellyfinFailsWhenNoLibraryMatches(t *testing.T) {
 // own sign-in, and no settings call, because the Job has no session to make one with.
 func TestWiringSeerrPlexModeIsUnchanged(t *testing.T) {
 	r, f := newSeerrHarness(t)
-	r.Config.Seerr.MediaServer = mediaServerPlex
+	r.Config.Seerrs[0].MediaServer = mediaServerPlex
 	res, err := r.Run(context.Background())
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, Summary(res))
@@ -481,10 +488,10 @@ func TestWiringSeerrPlexModeIsUnchanged(t *testing.T) {
 
 // The Job refuses a Jellyfin-mode Seerr it cannot set up, before it touches anything.
 func TestSeerrJellyfinConfigNeedsTheServerAndItsAddress(t *testing.T) {
-	base := Config{Seerr: &SeerrConfig{
-		URL: "http://seerr:5055", PublicURL: "seerr.example.test",
+	base := Config{Seerrs: []SeerrConfig{{
+		Name: "seerr", URL: "http://seerr:5055", PublicURL: "seerr.example.test",
 		MediaServer: mediaServerJellyfin, MediaServerURL: seerrJellyfinURL,
-	}}
+	}}}
 	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "jellyfin is not deployed") {
 		t.Fatalf("a Jellyfin-mode Seerr with no Jellyfin was accepted: %v", err)
 	}
@@ -492,12 +499,12 @@ func TestSeerrJellyfinConfigNeedsTheServerAndItsAddress(t *testing.T) {
 		URL: "http://jellyfin:8096", Username: "alice",
 		UserPasswordFile: "/u", BoxPasswordFile: "/b",
 	}
-	base.Seerr.MediaServerURL = ""
+	base.Seerrs[0].MediaServerURL = ""
 	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "mediaServerUrl") {
 		t.Fatalf("a Jellyfin-mode Seerr with no server address was accepted: %v", err)
 	}
-	base.Seerr.MediaServer = "emby"
-	base.Seerr.MediaServerURL = seerrJellyfinURL
+	base.Seerrs[0].MediaServer = "emby"
+	base.Seerrs[0].MediaServerURL = seerrJellyfinURL
 	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "plex or jellyfin") {
 		t.Fatalf("a Seerr against a server this chart does not run was accepted: %v", err)
 	}
@@ -509,7 +516,7 @@ func TestAnOlderSeerrConfigLoadsAsPlex(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/wiring.json"
 	body := `{"namespace":"s5n","configMap":"s5n-wiring","instances":[],` +
-		`"seerr":{"url":"http://seerr:5055","publicUrl":"seerr.example.test"}}`
+		`"seerrs":[{"name":"seerr","url":"http://seerr:5055","publicUrl":"seerr.example.test"}]}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -517,8 +524,8 @@ func TestAnOlderSeerrConfigLoadsAsPlex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Seerr == nil || c.Seerr.MediaServer != mediaServerPlex {
-		t.Fatalf("seerr = %+v, want a Plex one", c.Seerr)
+	if len(c.Seerrs) != 1 || c.Seerrs[0].MediaServer != mediaServerPlex {
+		t.Fatalf("seerrs = %+v, want one Plex entry", c.Seerrs)
 	}
 }
 
@@ -586,5 +593,98 @@ func TestWiringSeerrJellyfinOnASeerrSetUpForPlexIsPending(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no pending setup row naming Plex in %+v", res.Steps)
+	}
+}
+
+// A box with both media servers runs one Seerr per server, and each is set up against the
+// one it names: the Plex instance gets the pending row only a person can clear, and the
+// Jellyfin instance is set up by the Job at its own name -- `seerr-jellyfin/...`, because
+// the rows belong to the instance and a box with two would otherwise have one set.
+func TestWiringSeerrsRunOnePerServer(t *testing.T) {
+	plexFake, jellyFake := &fakeSeerr{}, freshSeerr()
+	plexSrv := httptest.NewServer(plexFake.handler())
+	jellySrv := httptest.NewServer(jellyFake.handler())
+	jf := &jellyfinNoAccount{}
+	jellyfinSrv := httptest.NewServer(jf.handler())
+	t.Cleanup(func() { plexSrv.Close(); jellySrv.Close(); jellyfinSrv.Close() })
+
+	dir := t.TempDir()
+	userPassword := dir + "/jellyfin-user-password"
+	boxPassword := dir + "/jellyfin-box-password"
+	for _, p := range []struct{ path, value string }{
+		{userPassword, seerrPersonPassword + "\n"},
+		{boxPassword, "box-secret\n"},
+	} {
+		if err := os.WriteFile(p.path, []byte(p.value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cm := map[string]string{}
+	runner := &Runner{
+		Config: Config{
+			TimeoutSeconds: 10,
+			Seerrs: []SeerrConfig{
+				{Name: "seerr", URL: plexSrv.URL, PublicURL: "seerr.example.test", MediaServer: mediaServerPlex},
+				{Name: "seerr-jellyfin", URL: jellySrv.URL, PublicURL: "seerr-jellyfin.example.test",
+					MediaServer: mediaServerJellyfin, MediaServerURL: seerrJellyfinURL},
+			},
+			Jellyfin: &JellyfinConfig{
+				URL:              jellyfinSrv.URL,
+				Username:         "alice",
+				UserPasswordFile: userPassword,
+				BoxPasswordFile:  boxPassword,
+				Libraries: []JellyfinLibrary{
+					{Name: "movies", CollectionType: "movies", Path: "/data/media/movies"},
+					{Name: "tv", CollectionType: "tvshows", Path: "/data/media/tv"},
+				},
+			},
+		},
+		Publish: func(_ context.Context, data map[string]string) error {
+			for k, v := range data {
+				cm[k] = v
+			}
+			return nil
+		},
+		LoadOwned: func(context.Context) ([]byte, error) {
+			v, ok := cm["owned.json"]
+			if !ok {
+				return nil, nil
+			}
+			return []byte(v), nil
+		},
+	}
+	res, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	// The Plex instance: the one row a person clears, at its own address.
+	row := step(res, "seerr/plex")
+	if row == nil || row.Result != stepPending || !strings.Contains(row.Detail, "seerr.example.test") {
+		t.Fatalf("seerr/plex = %+v, want the pending row naming seerr.example.test", row)
+	}
+	if plexFake.signIns != 0 || plexFake.writes != 0 {
+		t.Fatalf("the Plex instance was set up (%d sign-ins, %d writes)", plexFake.signIns, plexFake.writes)
+	}
+	// The Jellyfin instance: set up, under its own name.
+	for _, name := range []string{"seerr-jellyfin/login", "seerr-jellyfin/libraries",
+		"seerr-jellyfin/media-server", "seerr-jellyfin/initialize"} {
+		if s := step(res, name); s == nil || s.Result != "ok" {
+			t.Fatalf("%s = %+v, want ok\n%s", name, s, Summary(res))
+		}
+	}
+	if !jellyFake.initialized {
+		t.Fatal("the Jellyfin instance was not initialized")
+	}
+	// The record is per instance: the Plex one has nothing to record, and the Jellyfin
+	// one is on record by its own name.
+	rec, err := ParseOwnedRecord([]byte(cm["owned.json"]))
+	if err != nil {
+		t.Fatalf("owned.json: %v", err)
+	}
+	if rec.SeerrInitialized("seerr") {
+		t.Fatal("the Plex instance is on record as set up, and it was not")
+	}
+	if !rec.SeerrInitialized("seerr-jellyfin") {
+		t.Fatal("the Jellyfin instance was set up and not recorded")
 	}
 }

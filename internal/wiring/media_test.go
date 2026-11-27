@@ -303,7 +303,7 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 		TimeoutSeconds: 10,
 		Plex:           &PlexConfig{URL: plex.URL},
 		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile, PlexTokenFile: plexTokenFile},
-		Seerr:          &SeerrConfig{URL: seerr.URL, PublicURL: mediaSeerrPublicURL},
+		Seerrs:         []SeerrConfig{{Name: "seerr", URL: seerr.URL, PublicURL: mediaSeerrPublicURL}},
 		Maintainerr: &MaintainerrConfig{
 			URL: maintainerr.URL, URLBase: "/maintainerr",
 			PlexTokenFile: plexTokenFile,
@@ -410,7 +410,7 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 // Without Seerr the pending row keeps the narrow sentence and never mentions it.
 func TestWiringUnclaimedPlexWithoutSeerrDoesNotMentionAnOwner(t *testing.T) {
 	r, _ := newMediaHarness(t, false)
-	r.Config.Seerr = nil
+	r.Config.Seerrs = nil
 	res, err := r.Run(context.Background())
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, Summary(res))

@@ -439,7 +439,37 @@
           "$ref": "#/definitions/simpleApp"
         },
         "seerr": {
-          "$ref": "#/definitions/simpleApp"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port",
+            "instances"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "rewritePath": {
+              "type": "boolean"
+            },
+            "instances": {
+              "$ref": "#/definitions/seerrInstances"
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
         },
         "jellyfin": {
           "type": "object",
@@ -681,6 +711,36 @@
           },
           "enabled": {
             "type": "boolean"
+          }
+        }
+      }
+    },
+    "seerrInstances": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "suffix",
+          "enabled"
+        ],
+        "properties": {
+          "suffix": {
+            "type": "string",
+            "pattern": "^[a-z0-9]*$",
+            "description": "Appended to the app name: seerr + \"jellyfin\" = seerr-jellyfin, served at seerr-jellyfin.<domain>. Empty for the primary instance."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "mediaServer": {
+            "type": "string",
+            "enum": [
+              "plex",
+              "jellyfin"
+            ],
+            "description": "The one media server this Seerr is set up against. Absent means plex when the release runs Plex, and jellyfin otherwise; a server this release does not run is refused."
           }
         }
       }

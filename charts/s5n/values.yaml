@@ -237,6 +237,13 @@ apps:
       variant: default
     port: 5055
     rewritePath: true
+    # One Seerr talks to one media server, so a box with both runs one per server. The
+    # first instance is `seerr` (named after the app) and reads Plex when the release has
+    # it; a `seerr-jellyfin` is the second, at seerr-jellyfin.<domain>. `mediaServer` is
+    # optional: absent means Plex when the release runs it and Jellyfin otherwise.
+    instances:
+      - suffix: ""
+        enabled: true
     resources: {}
     env: {}
 
