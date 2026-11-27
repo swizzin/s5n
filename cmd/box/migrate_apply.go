@@ -751,6 +751,10 @@ func migrateRelease(ctx context.Context, o *migrateApplyFlags, chart release.Cha
 	opts := o.options()
 	opts.Chart = &chart
 	opts.BoxValues = boxValues(kc)
+	// A migration installs apps into a seedbox like any apply, so the cluster's
+	// policy enforcement is proved for it too: a rehearsal's egress lock says
+	// nothing about a final apply on a cluster box never proved.
+	opts.NetworkProof = networkPolicyProof(kc, *o.install.record, out)
 	// The same steps a bare apply runs, per-host TLS included.
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: setup.NetResolver{}}
 	holds := newBoxHolds(out)
