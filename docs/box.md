@@ -841,6 +841,19 @@ validated, self-signed otherwise. This is how box would do it.
   record named and the release untouched. When that's the only work, no new release
   revision is made. A user's run that would need it stops and names root's command,
   because a user can't write a listener or the login. `update` will call the same step.
+- **A hosted instance's name is a value (decided).** It is `<instance>.<domain>` unless the
+  instance sets `host:` (a label, or a full name under the domain): `seerr` can be
+  `requests.<domain>`. The chart and box refuse a name two instances share, the box's own
+  name and a name outside the domain, which the login's session cookie does not cover.
+- **A name no longer served is removed (decided).** After a release that succeeded, root's
+  run drops the listener, redirect, policy and Certificate of every name box's own managers
+  wrote and this run does not serve: a renamed or switched-off hosted app leaves nothing
+  behind, and the old name answers 404 with no redirect. Before the release the old name
+  is the one the running app is reached at, so a failed release removes nothing; a failed
+  removal is a warning the next apply retries. A user's run removes nothing.
+- **Removal with more than one seedbox (open).** The names are read off the one Gateway,
+  and every box's managers share one prefix, so a second seedbox's names would look
+  unserved to the first one's run. `adduser` has to scope them per seedbox before it ships.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion: the
@@ -853,9 +866,10 @@ validated, self-signed otherwise. This is how box would do it.
 
 ### install, remove and instances (decided)
 
-Only the Arrs take multiple instances (an HD and a 4K Sonarr, for example). The chart
-already models this as `instances:` on the Arr entry. Proposed syntax:
-`box install sonarr --instance 4k`. No other app needs a second instance.
+The Arrs take multiple instances (an HD and a 4K Sonarr), Bazarr one per Arr pair and
+Seerr one per media server (`mediaServer: plex|jellyfin`, at a name of its own). The chart
+models each as `instances:` on the app's entry, and today the grant's list is edited by
+hand. Proposed syntax: `box install sonarr --instance 4k`.
 
 ### apply and update (decided)
 

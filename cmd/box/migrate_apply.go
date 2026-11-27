@@ -966,13 +966,13 @@ func cloneEntry(entry map[string]any) map[string]any {
 	return out
 }
 
-// categoryFor is the suffix, or the app name for a primary: it is one
-// qBittorrent category and one directory per /data tree, and cannot be empty.
 // hasCategory says whether an app's instances name a library directory. Seerr has none:
 // it requests from a media server and keeps no root folders, and its schema refuses a
 // category key outright.
 func hasCategory(app string) bool { return app != "seerr" }
 
+// categoryFor is the suffix, or the app name for a primary: it is one
+// qBittorrent category and one directory per /data tree, and cannot be empty.
 func categoryFor(app, suffix string) string {
 	if suffix == "" {
 		return app

@@ -66,7 +66,7 @@ apps:
     # moves.
     snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
     # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not a values
-    # question: `box install sonarr --instance 4k` writes it.
+    # question: the grant's instances list names it.
     questions: []
 
   radarr:
