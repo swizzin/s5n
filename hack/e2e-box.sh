@@ -4285,6 +4285,37 @@ PY
     $K -n "$NS" get pvc "$pv" >/dev/null 2>&1 || { echo "helm uninstall deleted claim ${pv}"; fail=1; }
     echo "  ${pv}: PV and claim still there"
   done
+
+  # ---- a chart nothing signed ------------------------------------------------
+  # Every release above was signed, which is why box installed it. This one is pushed
+  # with nothing on the page, and box must refuse it by name before it touches the
+  # release: the registry, the page and the refusal are all the real ones.
+  log "a chart no signature covers is refused, and nothing of it is installed"
+  unsigned=$(next_patch "$CHART_VERSION") || true
+  [ -n "$unsigned" ] || { echo "could not name a version above ${CHART_VERSION}"; fail=1; return 0; }
+  rm -rf "$WORK/chart-unsigned"
+  cp -R charts/s5n "$WORK/chart-unsigned"
+  sed -i "s/^version: .*/version: ${unsigned}/" "$WORK/chart-unsigned/Chart.yaml"
+  helm package "$WORK/chart-unsigned" --destination "$WORK/charts" >/dev/null
+  helm push "$WORK/charts/s5n-${unsigned}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+  unsigned_sig="${RELEASES}/releases/download/s5n-v${unsigned}/chart.sig"
+  if [ -e "$unsigned_sig" ]; then
+    echo "${unsigned_sig} exists: the unsigned case proves nothing"; fail=1
+  fi
+  echo "  published s5n ${unsigned} with nothing at ${unsigned_sig}"
+  unsigned_code=0
+  "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
+    --chart-version "$unsigned" --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --paths-in-node --kubeconfig "$WORK/kubeconfig" >"$WORK/unsigned.txt" 2>&1 || unsigned_code=$?
+  echo "  box apply --chart-version ${unsigned}: exit ${unsigned_code}"
+  [ "$unsigned_code" != 0 ] ||
+    { echo "box installed a chart that nothing signed"; cat "$WORK/unsigned.txt"; fail=1; }
+  grep -qF "no signature at ${CHART_RELEASES}/releases/download/s5n-v${unsigned}/chart.sig" "$WORK/unsigned.txt" ||
+    { echo "the refusal does not name the missing signature:"; tail -3 "$WORK/unsigned.txt"; fail=1; }
+  # The refusal is the chart's, not a cluster's: it comes before a client and a revision.
+  unsigned_rev=$(helm_revision "$NS") || true
+  [ "$unsigned_rev" = 0 ] ||
+    { echo "the unsigned chart got as far as release revision ${unsigned_rev}"; fail=1; }
 }
 
 # install_metallb puts MetalLB on the cluster the way a user would: the upstream
