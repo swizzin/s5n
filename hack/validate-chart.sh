@@ -543,6 +543,53 @@ if [ -n "$calls_problems" ]; then
 fi
 echo "== all-apps render: every instance admits exactly the apps whose calls name it"
 
+# The link-local range is a VPS provider's metadata service (169.254.169.254), so the public
+# rule excepts it -- and NodeLocal DNS answers on a link-local address of its own
+# (169.254.20.10, 169.254.25.10), which a DNS rule naming only the kube-dns pods would
+# leave with no way in. Every egress rule that opens the internet excepts both link-local
+# ranges, and every rule admitting kube-dns also admits the range on 53.
+ll_render=$(mktemp)
+helm template t charts/s5n -n seedbox -f charts/s5n/ci/all-apps-values.yaml \
+  --set gateway.host=box.example.com --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32' >"$ll_render"
+ll_problems=$(python3 - "$ll_render" <<'PY'
+import sys, yaml
+
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+link4, link6 = "169.254.0.0/16", "fe80::/10"
+dns_ports = {(53, "UDP"), (53, "TCP")}
+problems, policies = [], 0
+for d in docs:
+    if d.get("kind") != "NetworkPolicy" or "Egress" not in (d["spec"].get("policyTypes") or []):
+        continue
+    policies += 1
+    name = d["metadata"]["name"]
+    for rule in d["spec"].get("egress") or []:
+        peers = rule.get("to") or []
+        ports = {(p.get("port"), p.get("protocol", "TCP")) for p in (rule.get("ports") or [])}
+        if any(((p.get("podSelector") or {}).get("matchLabels") or {}).get("k8s-app") == "kube-dns"
+               for p in peers):
+            if not any((p.get("ipBlock") or {}).get("cidr") == link4 for p in peers):
+                problems.append(f"{name}: the DNS rule does not admit {link4}, so a NodeLocal DNS answers nobody")
+            if not dns_ports <= ports:
+                problems.append(f"{name}: the DNS rule does not admit 53 udp and tcp")
+        for peer in peers:
+            block = peer.get("ipBlock") or {}
+            if block.get("cidr") == "0.0.0.0/0" and link4 not in (block.get("except") or []):
+                problems.append(f"{name}: the public rule does not except {link4}: a pod reaches the provider's metadata service")
+            if block.get("cidr") == "::/0" and link6 not in (block.get("except") or []):
+                problems.append(f"{name}: the IPv6 public rule does not except {link6}")
+if policies < 2:
+    problems.append(f"the render carries {policies} egress policies, want at least the release's and the wiring Job's")
+print("; ".join(problems))
+PY
+)
+rm -f "$ll_render"
+if [ -n "$ll_problems" ]; then
+  echo "egress rules: $ll_problems"
+  exit 1
+fi
+echo "== all-apps render: no egress rule reaches link-local, and DNS still answers on it"
+
 # Jellyfin's first-run window is closed inside its pod: an init container runs the app's own
 # image, binds it to loopback and completes the wizard before the app starts, so the route
 # carries no /Startup rule to be bypassed in another spelling. The password is mounted by

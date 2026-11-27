@@ -51,17 +51,22 @@ spec:
           podSelector:
             matchLabels:
               k8s-app: kube-dns
+        {{- /* NodeLocal DNS answers on a link-local address (169.254.20.10 or
+               169.254.25.10), not from the kube-dns pods' own IPs. */}}
+        - ipBlock:
+            cidr: 169.254.0.0/16
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
     {{- if not .Values.rehearsal }}
     - to:
+        {{- /* Link-local is the provider's metadata service on a VPS. */}}
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10]
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
         - ipBlock:
             cidr: ::/0
-            except: ["fc00::/7"]
+            except: ["fc00::/7", "fe80::/10"]
     {{- end }}
     - to:
         - podSelector:
@@ -111,6 +116,9 @@ spec:
           podSelector:
             matchLabels:
               k8s-app: kube-dns
+        {{- /* NodeLocal DNS answers on a link-local address: see the release's own rule. */}}
+        - ipBlock:
+            cidr: 169.254.0.0/16
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
