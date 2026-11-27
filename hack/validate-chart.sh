@@ -301,6 +301,49 @@ fi
 grep -qF 'apps.seerr: Seerr requests from one media server and this release runs neither' "$err" ||
   { echo "Seerr with no media server failed without the refusal message:"; cat "$err"; rm -f "$err"; exit 1; }
 rm -f "$err"
+# A hosted instance's name is its `host` override, else <instance>.<domain>: the route, the
+# Job's publicUrl and (for a Jellyfin-mode Seerr) the server's address all read the same
+# answer.
+override=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/jellyfin-values.yaml \
+  --set gateway.host=box.example.com --set apps.jellyfin.host=media \
+  --set-json 'apps.seerr.instances=[{"suffix":"","enabled":true,"mediaServer":"jellyfin","host":"requests"}]' \
+  2>/dev/null)
+for want in 'hostnames: ["requests.box.example.com"]' 'hostnames: ["media.box.example.com"]' \
+            '"publicUrl":"requests.box.example.com"' '"mediaServerUrl":"https://media.box.example.com"'; do
+  grep -qF -- "$want" <<<"$override" ||
+    { echo "a host override did not reach everywhere: no ${want}"; exit 1; }
+done
+echo "== a host override: the route, the Job's publicUrl and the server's address agree"
+
+# A name two instances share is two certificates for one name; the box's own name is its
+# domain certificate; another domain is a name the login's cookie cannot cover; two labels
+# before the domain is not one name under it. Each is refused naming the instance.
+host_refused() { # host_refused <values file> <instance json> <expected error>
+  local err
+  err=$(mktemp)
+  if helm template t charts/s5n -n seedbox -f "$1" --set gateway.host=box.example.com \
+       --set-json "apps.seerr.instances=$2" >/dev/null 2>"$err"; then
+    echo "a host the chart must refuse rendered: $2"
+    rm -f "$err"; return 1
+  fi
+  grep -qE "$3" "$err" ||
+    { echo "refusing $2 did not say why ($3):"; cat "$err"; rm -f "$err"; return 1; }
+  rm -f "$err"
+}
+host_refused charts/s5n/ci/seerr-both-servers-values.yaml \
+  '[{"suffix":"","enabled":true,"host":"requests"},{"suffix":"jellyfin","enabled":true,"mediaServer":"jellyfin","host":"requests"}]' \
+  'which seerr already serves' || exit 1
+host_refused charts/s5n/ci/default-values.yaml \
+  '[{"suffix":"","enabled":true,"host":"box.example.com"}]' \
+  'is the box.s own name' || exit 1
+host_refused charts/s5n/ci/default-values.yaml \
+  '[{"suffix":"","enabled":true,"host":"requests.example.com"}]' \
+  'is not under box.example.com' || exit 1
+host_refused charts/s5n/ci/default-values.yaml \
+  '[{"suffix":"","enabled":true,"host":"a.b.box.example.com"}]' \
+  'more than one label' || exit 1
+echo "== a host name twice, the box's own name, another domain, two labels: each refused by name"
+
 echo "== seerr with no media server: refused, naming what to switch on"
 
 # FileBrowser Quantum's configuration is one config.yaml the chart owns: the route's prefix,

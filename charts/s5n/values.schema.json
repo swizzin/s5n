@@ -432,6 +432,9 @@
             },
             "env": {
               "$ref": "#/definitions/env"
+            },
+            "host": {
+              "$ref": "#/definitions/hostName"
             }
           }
         },
@@ -506,6 +509,9 @@
             },
             "env": {
               "$ref": "#/definitions/env"
+            },
+            "host": {
+              "$ref": "#/definitions/hostName"
             }
           }
         },
@@ -597,6 +603,9 @@
         },
         "env": {
           "$ref": "#/definitions/env"
+        },
+        "host": {
+          "$ref": "#/definitions/hostName"
         }
       }
     },
@@ -741,9 +750,17 @@
               "jellyfin"
             ],
             "description": "The one media server this Seerr is set up against. Absent means plex when the release runs Plex, and jellyfin otherwise; a server this release does not run is refused."
+          },
+          "host": {
+            "$ref": "#/definitions/hostName"
           }
         }
       }
+    },
+    "hostName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+      "description": "The name this workload is served at, when its app is served at a host of its own: a label (`requests`), giving requests.<domain>, or a name under the box's domain (`requests.example.com`). Absent means <instance>.<domain>. Box refuses a name two instances share, the box's own name, and a name outside the domain -- the login's session cookie is the domain's."
     }
   }
 }

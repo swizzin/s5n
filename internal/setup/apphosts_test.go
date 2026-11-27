@@ -37,10 +37,10 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 				t.Fatalf("hosts = %+v, want the domain and gamma's", res.Hosts)
 			}
 			domain, app := res.Hosts[0], res.Hosts[1]
-			if domain.Host != "box.example.com" || domain.App != "" {
+			if domain.Host != "box.example.com" {
 				t.Fatalf("hosts[0] = %+v, want the box's domain", domain)
 			}
-			if app.Host != "gamma.box.example.com" || app.App != "gamma" {
+			if app.Host != "gamma.box.example.com" {
 				t.Fatalf("hosts[1] = %+v, want gamma's own host", app)
 			}
 			if app.Issuer != IssuerLetsEncrypt || app.NoDNS || app.Record != "" {
@@ -215,12 +215,11 @@ func TestASecondInstanceIsServedAtItsOwnName(t *testing.T) {
 	if len(hosts) != 2 {
 		t.Fatalf("hosts = %+v, want one per instance", hosts)
 	}
+	// A name is the instance's, override or not, and the list is what the login's rules
+	// are keyed by.
 	for i, want := range []string{"gamma.box.example.com", "gamma-extra.box.example.com"} {
 		if hosts[i].Host != want {
 			t.Fatalf("hosts[%d] = %q, want %q", i, hosts[i].Host, want)
-		}
-		if hosts[i].App != "gamma" {
-			t.Fatalf("hosts[%d].App = %q, want the app both instances come from", i, hosts[i].App)
 		}
 	}
 	// The login's rules are keyed by the names, portal included.

@@ -74,8 +74,8 @@ func TestTLSHostsWritesTheIssuerTheRunDecided(t *testing.T) {
 	if rec.hosts[0].Issuer != IssuerLetsEncrypt || rec.hosts[1].Issuer != IssuerSelfSigned {
 		t.Fatalf("issuers = %q, %q; want this run's decisions", rec.hosts[0].Issuer, rec.hosts[1].Issuer)
 	}
-	if rec.hosts[1].App != "gamma" {
-		t.Fatalf("app = %q, want gamma", rec.hosts[1].App)
+	if rec.hosts[1].Host != "gamma.box.example.com" {
+		t.Fatalf("host = %q, want gamma's name", rec.hosts[1].Host)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestTLSHostsWritesEveryNameThatMatchesTheDomain(t *testing.T) {
 		t.Fatalf("wrote %+v, want gamma's host once", rec.hosts)
 	}
 	got := rec.hosts[0]
-	if got.Host != "gamma.box.example.com" || got.App != "gamma" || got.Issuer != IssuerLetsEncrypt {
-		t.Fatalf("host = %+v, want gamma's name, its app and Let's Encrypt", got)
+	if got.Host != "gamma.box.example.com" || got.Issuer != IssuerLetsEncrypt {
+		t.Fatalf("host = %+v, want gamma's name and Let's Encrypt", got)
 	}
 	if !strings.Contains(out.String(), "tls: gamma.box.example.com resolves to 203.0.113.7: using Let's Encrypt") {
 		t.Fatalf("apply did not explain the issuer:\n%s", out)

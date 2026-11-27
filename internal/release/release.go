@@ -1035,13 +1035,26 @@ func hostedHosts(chart Chart, values map[string]any, domain string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	var hosts []string
+	var hosted []seedbox.Instance
 	for _, inst := range seedbox.Instances(values) {
 		app, ok := cat.App(inst.App)
 		if !ok || app.Exposure != catalog.ExposureHost {
 			continue
 		}
-		hosts = append(hosts, inst.Name+"."+domain)
+		hosted = append(hosted, inst)
+	}
+	// The chart refuses the same three; a plain apply must not write a certificate for a
+	// name the login's cookie cannot cover, or two for one name.
+	if err := seedbox.CheckHosts(hosted, domain); err != nil {
+		return nil, err
+	}
+	var hosts []string
+	for _, inst := range hosted {
+		name, err := inst.HostName(domain)
+		if err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, name)
 	}
 	return hosts, nil
 }

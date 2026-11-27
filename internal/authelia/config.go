@@ -68,7 +68,13 @@ func Rules(host, login string, instances []seedbox.Instance, hosted, ownLogin []
 	// a rule would fall into default_policy deny.
 	loginHosts := []string{host}
 	for _, inst := range instances {
-		appHost := inst.Name + "." + host
+		// The instance's own name: its `host` override when it has one. An override box
+		// refuses resolves to no name here, which leaves the path rule in place instead of
+		// a rule for a host nobody serves.
+		appHost, err := inst.HostName(host)
+		if err != nil {
+			appHost = ""
+		}
 		if ownHost[appHost] {
 			if selfAuth[inst.App] {
 				// An app that signs its users in itself does so on whatever name it

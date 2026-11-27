@@ -2,6 +2,7 @@ package seedbox
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -89,5 +90,67 @@ func TestInstancesSkipsDisabled(t *testing.T) {
 		if inst.Name == "seerr" {
 			t.Fatal("a disabled app is in the list")
 		}
+	}
+}
+
+// An instance's name is its `host` override when it has one: a label gives
+// <label>.<domain>, and a name under the domain is taken as it stands. Everything a box
+// serves -- the DNS check, listener, Certificate, login rule and the address it prints --
+// reads this one answer.
+func TestHostNameResolvesTheOverride(t *testing.T) {
+	for _, tc := range []struct{ label, host, want string }{
+		{"the instance's name", "", "seerr.box.example.com"},
+		{"a label", "requests", "requests.box.example.com"},
+		{"a name under the domain", "requests.box.example.com", "requests.box.example.com"},
+		{"a name with a dash", "media-requests", "media-requests.box.example.com"},
+	} {
+		inst := Instance{Name: "seerr", App: "seerr", Host: tc.host}
+		got, err := inst.HostName("box.example.com")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.label, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: name = %q, want %q", tc.label, got, tc.want)
+		}
+	}
+}
+
+// A name the login cannot cover is refused before a certificate is written for it: the
+// session cookie is the domain's, so a hosted name is one label under it.
+func TestHostNameRefusesANameTheLoginCannotCover(t *testing.T) {
+	for _, tc := range []struct{ label, host, want string }{
+		{"another domain", "requests.example.com", "is not under box.example.com"},
+		{"the box's own name", "box.example.com", "is the box's own name"},
+		{"too many labels", "a.requests.box.example.com", "more than one label"},
+	} {
+		inst := Instance{Name: "seerr", App: "seerr", Host: tc.host}
+		_, err := inst.HostName("box.example.com")
+		if err == nil {
+			t.Fatalf("%s: %q was accepted", tc.label, tc.host)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error = %v, want it to say %q", tc.label, err, tc.want)
+		}
+	}
+}
+
+// Two workloads on one name is one certificate and one login rule for both, so the second
+// one is refused by name.
+func TestCheckHostsRefusesOneNameTwice(t *testing.T) {
+	instances := []Instance{
+		{Name: "seerr", App: "seerr", Host: "requests"},
+		{Name: "seerr-jellyfin", App: "seerr", Host: "requests"},
+	}
+	err := CheckHosts(instances, "box.example.com")
+	if err == nil {
+		t.Fatal("two instances on one name were accepted")
+	}
+	if !strings.Contains(err.Error(), `"requests.box.example.com"`) || !strings.Contains(err.Error(), "seerr") {
+		t.Fatalf("error = %v, want it to name the name and the instance that has it", err)
+	}
+	// Distinct names, overrides and defaults alike, are fine.
+	ok := []Instance{{Name: "seerr", App: "seerr"}, {Name: "seerr-jellyfin", App: "seerr", Host: "requests"}}
+	if err := CheckHosts(ok, "box.example.com"); err != nil {
+		t.Fatalf("two different names were refused: %v", err)
 	}
 }

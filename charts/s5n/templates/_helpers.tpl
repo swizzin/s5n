@@ -130,11 +130,13 @@ s5n
           {{- $out = append $out (dict "name" $name "app" $app "cfg" $cfg "suffix" $i.suffix
                 "category" (default "" $i.category)
                 "downloadCategory" (default "" (default $i.category $i.downloadCategory))
+                "host" (default "" $i.host)
                 "arr" (hasKey $cfg "envPrefix")) -}}
         {{- end -}}
       {{- end -}}
     {{- else -}}
       {{- $out = append $out (dict "name" $app "app" $app "cfg" $cfg "suffix" "" "category" ""
+            "host" (default "" $cfg.host)
             "arr" (hasKey $cfg "envPrefix")) -}}
     {{- end -}}
   {{- end -}}
@@ -212,10 +214,10 @@ s5n
 {{- /* publicUrl is where a person opens Seerr, not where the Job dials it. Seerr stores
        mediaServerUrl as the Jellyfin external URL it builds its links from, so it is the
        address people reach the server at. */ -}}
-{{- $publicURL := include "s5n.appHost" (dict "root" $ "app" "seerr" "name" $name) -}}
+{{- $publicURL := include "s5n.appHost" (dict "root" $ "app" "seerr" "name" $name "host" (default "" $i.host)) -}}
 {{- $entry := dict "name" $name "url" (printf "http://%s:%v" $name $cfg.port) "publicUrl" (trim $publicURL) "mediaServer" $media -}}
 {{- if eq $media "jellyfin" -}}
-{{- $serverURL := include "s5n.appHost" (dict "root" $ "app" "jellyfin" "name" "jellyfin") -}}
+{{- $serverURL := include "s5n.appHost" (dict "root" $ "app" "jellyfin" "name" "jellyfin" "host" (default "" $.Values.apps.jellyfin.host)) -}}
 {{- $_ := set $entry "mediaServerUrl" (printf "https://%s" (trim $serverURL)) -}}
 {{- end -}}
 {{- $out = append $out $entry -}}
@@ -247,14 +249,52 @@ s5n
 {{- end -}}
 
 {{- /* s5n.appHost: the name one workload is served on when its app has a host of its own
-       (`exposure: host`), <instance>.<domain>. The name is the instance's, not the app's, so
-       a second Seerr is reachable under a name of its own; the first instance is named
-       after the app, which is every name a one-instance box has. A domain is required: a
-       route on a name that is not there serves nothing, so a plain install with
-       gateway.host empty is refused with the app named. */}}
+       (`exposure: host`). The name is the instance's, not the app's, so a second Seerr is
+       reachable under a name of its own; the first instance is named after the app, which is
+       every name a one-instance box has. `host` is the instance's override: a label
+       (`requests` -> requests.<domain>), or a name under this box's domain. A name outside it
+       is refused -- the login's session cookie is the domain's -- and so is the box's own
+       name, which the domain's certificate already answers. A domain is required: a route on
+       a name that is not there serves nothing. */}}
 {{- define "s5n.appHost" -}}
 {{- $domain := required (printf "gateway.host: apps.%s is served at its own host name (<instance>.<domain>), so set gateway.host to the box's domain" .app) .root.Values.gateway.host -}}
+{{- $override := trim (default "" .host) -}}
+{{- if not $override -}}
 {{- printf "%s.%s" .name $domain -}}
+{{- else if not (contains "." $override) -}}
+{{- printf "%s.%s" $override $domain -}}
+{{- else -}}
+{{- if eq $override $domain -}}
+{{- fail (printf "apps.%s: host %q is the box's own name, which its own certificate already answers; give this instance a name of its own" .app $override) -}}
+{{- end -}}
+{{- $suffix := printf ".%s" $domain -}}
+{{- if not (hasSuffix $suffix $override) -}}
+{{- fail (printf "apps.%s: host %q is not under %s; a hosted instance is reached at a name under the box's domain, because the login's session cookie is the domain's" .app $override $domain) -}}
+{{- end -}}
+{{- if contains "." (trimSuffix $suffix $override) -}}
+{{- fail (printf "apps.%s: host %q has more than one label before %s; a hosted instance is one name under the box's domain" .app $override $domain) -}}
+{{- end -}}
+{{- $override -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* s5n.checkHosts: every hosted instance's name, refused when two of them are one name.
+       A name two instances share is two Certificates, two listeners and one login rule: the
+       first host served would answer for both. */}}
+{{- define "s5n.checkHosts" -}}
+{{- $seen := dict -}}
+{{- range $inst := include "s5n.instances" . | fromJsonArray -}}
+{{- if and $inst.host (ne (include "s5n.exposure" (dict "root" $ "app" $inst.app) | trim) "host") -}}
+{{- fail (printf "apps.%s.host: %s is served under a path, so it has no name of its own; drop the key, or stop serving it at a path (catalog.yaml decides)" $inst.app $inst.name) -}}
+{{- end -}}
+{{- if eq (include "s5n.exposure" (dict "root" $ "app" $inst.app) | trim) "host" -}}
+{{- $name := include "s5n.appHost" (dict "root" $ "app" $inst.app "name" $inst.name "host" $inst.host) | trim -}}
+{{- if hasKey $seen $name -}}
+{{- fail (printf "apps.%s.host: %s names %q, which %s already serves; two workloads on one name is one certificate and one login rule for both" $inst.app $inst.name $name (get $seen $name)) -}}
+{{- end -}}
+{{- $_ := set $seen $name $inst.name -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{- /* Restricted-profile container security context, shared by every container. */}}

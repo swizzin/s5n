@@ -31,22 +31,33 @@ type Host struct {
 // where the domain does: a certificate for a name not pointing at the box can never
 // issue, so the run ends naming the record rather than leaving a box half served.
 //
-// A name is the instance's, not its app's (`s5n.appHost`): a second instance of an app
-// that lives at a host of its own is reached at <instance>.<domain>, and App stays the app
-// so the login's own rules can tell which instances sign their users in.
+// A name is the instance's, not its app's (`s5n.appHost`), and the instance's `host`
+// override wins: a second instance of an app that lives at a host of its own is reached at
+// <instance>.<domain>, or at the name its values chose.
 //
 // A plain function because apply makes the same decision (TLSHosts.Ensure). Two empty
 // answers are a match on purpose: a made-up name resolves nothing under it, so a test box
 // goes self-signed until its records exist. A real mismatch is one answering and the
 // other not.
 func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, domain string, dom hostAnswer, forced, command string, instances []seedbox.Instance) ([]Host, error) {
-	var out []Host
+	hosted := make([]seedbox.Instance, 0, len(instances))
 	for _, inst := range instances {
 		entry, ok := cat.App(inst.App)
-		if !ok || entry.Exposure != catalog.ExposureHost {
-			continue
+		if ok && entry.Exposure == catalog.ExposureHost {
+			hosted = append(hosted, inst)
 		}
-		host := inst.Name + "." + domain
+	}
+	// Two instances on one name is one certificate and one login rule for both, and a
+	// name outside the domain cannot work at all: both stop before the first resolution.
+	if err := seedbox.CheckHosts(hosted, domain); err != nil {
+		return nil, err
+	}
+	var out []Host
+	for _, inst := range hosted {
+		host, err := inst.HostName(domain)
+		if err != nil {
+			return nil, err
+		}
 		ans := resolveHost(ctx, resolver, host)
 		if err := appHostProblem(domain, dom, host, ans, command); err != nil {
 			return nil, err
@@ -59,7 +70,6 @@ func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, d
 		}
 		out = append(out, Host{
 			Host:   host,
-			App:    inst.App,
 			Issuer: issuer,
 			Why:    why,
 			NoDNS:  noDNS,

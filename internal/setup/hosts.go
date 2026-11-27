@@ -104,11 +104,7 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 	decided := make([]Host, 0, len(hosts))
 	for _, host := range hosts {
 		if issuer, ok := t.Decided[host]; ok && strings.TrimSpace(issuer) != "" {
-			decided = append(decided, Host{
-				Host:   host,
-				App:    appName(host, domain),
-				Issuer: issuer,
-			})
+			decided = append(decided, Host{Host: host, Issuer: issuer})
 			continue
 		}
 		ans := resolveHost(ctx, t.Resolver, host)
@@ -118,7 +114,6 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 		issuer, why := issuerFor(host, ans, t.Forced)
 		h := Host{
 			Host:   host,
-			App:    appName(host, domain),
 			Issuer: issuer,
 			Why:    why,
 			NoDNS:  !ans.resolves() && issuer == IssuerSelfSigned,
@@ -193,16 +188,6 @@ func joinNames(names []string) string {
 		return names[0] + " and " + names[1]
 	}
 	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
-}
-
-// appName is the app a host belongs to: gamma for gamma.box.example.com, "" for a
-// name outside the domain.
-func appName(host, domain string) string {
-	suffix := "." + domain
-	if !strings.HasSuffix(host, suffix) {
-		return ""
-	}
-	return strings.TrimSuffix(host, suffix)
 }
 
 // appHostRecord is the fix for an app host with no record, in both forms: a wildcard
