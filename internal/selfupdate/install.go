@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // install verifies one release and puts its binary where the running box is.
@@ -156,9 +158,8 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-// keepPrevious copies the running binary to box.previous through a temporary
-// file and a rename. It streams rather than using internal/atomicfile, which
-// would hold two copies of a tens-of-megabytes binary in memory.
+// keepPrevious copies the running binary to box.previous, streamed through a
+// temporary name and a rename.
 func keepPrevious(binary string) error {
 	previous := previousPath(binary)
 	src, err := os.Open(binary)
@@ -166,36 +167,9 @@ func keepPrevious(binary string) error {
 		return fmt.Errorf("keeping a copy of the running box: %w", err)
 	}
 	defer src.Close()
-
-	dir := filepath.Dir(binary)
-	file, err := os.CreateTemp(dir, "."+filepath.Base(previous)+".tmp-")
-	if err != nil {
-		return fmt.Errorf("keeping a copy of the running box: %w", err)
-	}
-	staged := file.Name()
-	fail := func(err error) error {
-		file.Close()
-		os.Remove(staged)
-		return err
-	}
-	if _, err := io.Copy(file, src); err != nil {
-		return fail(fmt.Errorf("keeping a copy of the running box: %w", err))
-	}
-	if err := file.Sync(); err != nil {
-		return fail(fmt.Errorf("keeping a copy of the running box: %w", err))
-	}
-	if err := file.Chmod(0o755); err != nil {
-		return fail(fmt.Errorf("keeping a copy of the running box: %w", err))
-	}
-	if err := file.Close(); err != nil {
-		os.Remove(staged)
-		return fmt.Errorf("keeping a copy of the running box: %w", err)
-	}
-	if err := os.Rename(staged, previous); err != nil {
-		os.Remove(staged)
+	if err := atomicfile.Copy(previous, src, 0o755); err != nil {
 		return fmt.Errorf("keeping a copy of the running box at %s: %w", previous, err)
 	}
-	_ = syncDir(dir)
 	return nil
 }
 
