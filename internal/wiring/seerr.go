@@ -132,7 +132,7 @@ func (r *Runner) seerrLibraries(ctx context.Context, res *Result, c *Config, see
 	}
 	if len(enabled) == 0 {
 		return r.ensure(res, "seerr/libraries", apps.Unchanged, fmt.Errorf(
-			"Seerr's library sync lists %s and this release's Jellyfin libraries are %s, so nothing would be enabled and the request page would show nothing",
+			"seerr's library sync lists %s and this release's Jellyfin libraries are %s, so nothing would be enabled and the request page would show nothing",
 			quoted(nameList(libraries)), quoted(libraryNames(c.Jellyfin.Libraries))))
 	}
 	detail := strings.Join(enabled, ", ")

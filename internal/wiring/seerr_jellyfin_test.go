@@ -29,8 +29,8 @@ type fakeSeerr struct {
 	code        string // the message in that refusal
 	libs        []apps.SeerrLibrary
 
-	host, port  int
 	hostname    string
+	port        int
 	serverType  int
 	signIns     int
 	writes      int
@@ -47,76 +47,91 @@ func (f *fakeSeerr) handler() http.HandlerFunc {
 		switch {
 		case r.URL.Path == "/api/v1/settings/public":
 			_, _ = w.Write([]byte(`{"initialized":` + map[bool]string{true: "true", false: "false"}[f.initialized] + `}`))
-		case r.URL.Path == "/api/v1/auth/jellyfin" && r.Method == http.MethodPost:
-			var body struct {
-				Username   string `json:"username"`
-				Password   string `json:"password"`
-				Hostname   string `json:"hostname"`
-				Port       int    `json:"port"`
-				ServerType int    `json:"serverType"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			f.signIns++
-			f.hostname = body.Hostname
-			f.port = body.Port
-			f.serverType = body.ServerType
-			if f.refusal != 0 {
-				w.WriteHeader(f.refusal)
-				_, _ = w.Write([]byte(`{"message":"` + f.code + `"}`))
-				return
-			}
-			if body.Username != f.person || body.Password != f.password {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"message":"INVALID_CREDENTIALS"}`))
-				return
-			}
-			http.SetCookie(w, &http.Cookie{Name: "connect.sid", Value: "s%3Asession", Path: "/"})
-			f.writes++
-			_, _ = w.Write([]byte(`{"id":1,"jellyfinUsername":"` + f.person + `"}`))
-		case r.URL.Path == "/api/v1/settings/jellyfin/library/sync":
-			if !f.authed(w, r) {
-				return
-			}
-			_ = json.NewEncoder(w).Encode(f.libs)
-		case strings.HasPrefix(r.URL.Path, "/api/v1/settings/jellyfin/library/") && r.Method == http.MethodPut:
-			if !f.authed(w, r) {
-				return
-			}
-			id := strings.TrimPrefix(r.URL.Path, "/api/v1/settings/jellyfin/library/")
-			var body struct {
-				Enabled bool `json:"enabled"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			for i := range f.libs {
-				if f.libs[i].ID == id {
-					f.libs[i].Enabled = body.Enabled
-				}
-			}
-			f.writes++
-			_, _ = w.Write([]byte(`{}`))
-		case r.URL.Path == "/api/v1/settings/jellyfin" && r.Method == http.MethodPost:
-			if !f.authed(w, r) {
-				return
-			}
-			var body struct {
-				ExternalHostname string `json:"externalHostname"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			f.hostnameSet = body.ExternalHostname
-			f.writes++
-			_, _ = w.Write([]byte(`{}`))
-		case r.URL.Path == "/api/v1/settings/initialize" && r.Method == http.MethodPost:
-			if !f.authed(w, r) {
-				return
-			}
-			f.initialized = true
-			f.initialize++
-			f.writes++
-			_, _ = w.Write([]byte(`{"initialized":true}`))
+		case r.URL.Path == "/api/v1/auth/jellyfin":
+			f.signIn(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/v1/settings/jellyfin"),
+			r.URL.Path == "/api/v1/settings/initialize":
+			f.settings(w, r)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	}
+}
+
+// signIn is the Jellyfin sign-in: the account it was given, the refusal a test configured,
+// and the session the answer sets.
+func (f *fakeSeerr) signIn(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		Hostname   string `json:"hostname"`
+		Port       int    `json:"port"`
+		ServerType int    `json:"serverType"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.signIns++
+	f.hostname = body.Hostname
+	f.port = body.Port
+	f.serverType = body.ServerType
+	if f.refusal != 0 {
+		w.WriteHeader(f.refusal)
+		_, _ = w.Write([]byte(`{"message":"` + f.code + `"}`))
+		return
+	}
+	if body.Username != f.person || body.Password != f.password {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"INVALID_CREDENTIALS"}`))
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "connect.sid", Value: "s%3Asession", Path: "/"})
+	f.writes++
+	_, _ = w.Write([]byte(`{"id":1,"jellyfinUsername":"` + f.person + `"}`))
+}
+
+// settings is the four settings endpoints the setup uses, each behind the session.
+func (f *fakeSeerr) settings(w http.ResponseWriter, r *http.Request) {
+	if !f.authed(w, r) {
+		return
+	}
+	switch r.URL.Path {
+	case "/api/v1/settings/jellyfin/library/sync":
+		_ = json.NewEncoder(w).Encode(f.libs)
+	case "/api/v1/settings/jellyfin":
+		var body struct {
+			ExternalHostname string `json:"externalHostname"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.hostnameSet = body.ExternalHostname
+		f.writes++
+		_, _ = w.Write([]byte(`{}`))
+	case "/api/v1/settings/initialize":
+		f.initialized = true
+		f.initialize++
+		f.writes++
+		_, _ = w.Write([]byte(`{"initialized":true}`))
+	default:
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/settings/jellyfin/library/") || r.Method != http.MethodPut {
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		f.enableLibrary(w, r)
+	}
+}
+
+// enableLibrary switches one library on or off, by the server's own key.
+func (f *fakeSeerr) enableLibrary(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/settings/jellyfin/library/")
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	for i := range f.libs {
+		if f.libs[i].ID == id {
+			f.libs[i].Enabled = body.Enabled
+		}
+	}
+	f.writes++
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // authed is Seerr's own rule for a settings endpoint: no session, no answer.
@@ -138,7 +153,7 @@ const seerrJellyfinURL = "https://jellyfin.example.test"
 // newSeerrHarness wires a Jellyfin-mode Seerr and a Jellyfin box cannot sign in to: the
 // Job's Seerr setup does not depend on that sign-in, so it is the plainest server that
 // lets the Seerr steps be asserted alone.
-func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr, *jellyfinNoAccount) {
+func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr) {
 	t.Helper()
 	f := &fakeSeerr{
 		person:   "alice",
@@ -202,14 +217,14 @@ func newSeerrHarness(t *testing.T) (*Runner, *fakeSeerr, *jellyfinNoAccount) {
 			return []byte(v), nil
 		},
 	}
-	return runner, f, jf
+	return runner, f
 }
 
 // The fresh instance: the Job signs the person's own server account in, which is what
 // makes it Seerr's owner, switches on the libraries this release made, stores the
 // address people reach the server at, and initializes -- the setup page's own order.
 func TestWiringSeerrJellyfinSetsUpAFreshInstance(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	res, err := r.Run(context.Background())
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, Summary(res))
@@ -269,7 +284,7 @@ func TestWiringSeerrJellyfinSetsUpAFreshInstance(t *testing.T) {
 // A Seerr that is already initialized is the person's: a migrated one brought its
 // settings and an admin, and redoing the setup would overwrite them.
 func TestWiringSeerrJellyfinLeavesAnInitializedInstanceAlone(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.initialized = true
 	res, err := r.Run(context.Background())
 	if err != nil {
@@ -287,7 +302,7 @@ func TestWiringSeerrJellyfinLeavesAnInitializedInstanceAlone(t *testing.T) {
 // The record outranks the flag: a person who reset a Seerr this Job set up, or deleted
 // the admin it made, is not given a second setup written under them.
 func TestWiringSeerrJellyfinIsNotSetUpTwice(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	ctx := context.Background()
 	if _, err := r.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -314,7 +329,7 @@ func TestWiringSeerrJellyfinIsNotSetUpTwice(t *testing.T) {
 // A password changed in Jellyfin is the person's to settle: the run reports the account
 // and stops at that row, and nothing is half-configured.
 func TestWiringSeerrJellyfinWithAChangedPasswordIsPending(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.refusal = http.StatusUnauthorized
 	f.code = "INVALID_CREDENTIALS"
 	res, err := r.Run(context.Background())
@@ -352,7 +367,7 @@ func TestWiringSeerrJellyfinWithAChangedPasswordIsPending(t *testing.T) {
 // An account that is not the server's administrator cannot own a Seerr, and Seerr says
 // so with its own code: the row says what to change in Jellyfin.
 func TestWiringSeerrJellyfinWithANonAdminAccountIsPending(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.refusal = http.StatusForbidden
 	f.code = "NOT_ADMIN"
 	res, err := r.Run(context.Background())
@@ -371,7 +386,7 @@ func TestWiringSeerrJellyfinWithANonAdminAccountIsPending(t *testing.T) {
 // A server with libraries this release does not make keeps them off: enabling them is
 // the person's choice, and the row says which were left.
 func TestWiringSeerrJellyfinLeavesAForeignLibraryOff(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.libs = append(f.libs, apps.SeerrLibrary{ID: "c3", Name: "home videos"})
 	res, err := r.Run(context.Background())
 	if err != nil {
@@ -392,7 +407,7 @@ func TestWiringSeerrJellyfinLeavesAForeignLibraryOff(t *testing.T) {
 // With none of the release's libraries on the server there is nothing to enable, and a
 // Seerr nobody can request anything from is a failed setup, not a quiet one.
 func TestWiringSeerrJellyfinFailsWhenNoLibraryMatches(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.libs = []apps.SeerrLibrary{{ID: "c3", Name: "home videos"}}
 	res, err := r.Run(context.Background())
 	if err == nil {
@@ -415,7 +430,7 @@ func TestWiringSeerrJellyfinFailsWhenNoLibraryMatches(t *testing.T) {
 // Plex mode is the shape it has always been: the same one row asking for the person's
 // own sign-in, and no settings call, because the Job has no session to make one with.
 func TestWiringSeerrPlexModeIsUnchanged(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	r.Config.Seerr.MediaServer = mediaServerPlex
 	res, err := r.Run(context.Background())
 	if err != nil {
@@ -483,7 +498,7 @@ func TestAnOlderSeerrConfigLoadsAsPlex(t *testing.T) {
 // A refusal that is not about the account is the release's: a Seerr that cannot be
 // reached after its readiness is a failed step, never a pending row.
 func TestWiringSeerrJellyfinUnreachableSettingsFails(t *testing.T) {
-	r, f, _ := newSeerrHarness(t)
+	r, f := newSeerrHarness(t)
 	f.refusal = http.StatusInternalServerError
 	f.code = "UNKNOWN"
 	res, err := r.Run(context.Background())

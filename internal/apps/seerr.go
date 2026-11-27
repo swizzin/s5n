@@ -78,10 +78,11 @@ func (s *Seerr) WaitReady(ctx context.Context, timeout time.Duration) error {
 // Seerr dials it: the Service, not the address a person's browser uses.
 func (s *Seerr) LoginJellyfin(ctx context.Context, username, password, host string, port int) error {
 	payload, err := json.Marshal(map[string]any{
-		"username":   username,
-		"password":   password,
+		fieldUsername: username,
+		fieldPassword: password,
+		// Seerr's own spelling: the server it reaches, not the address it serves.
 		"hostname":   host,
-		"port":       port,
+		fieldPort:    port,
 		"urlBase":    "",
 		"useSsl":     false,
 		"serverType": seerrServerJellyfin,
@@ -129,7 +130,7 @@ func (s *Seerr) SyncLibraries(ctx context.Context) ([]SeerrLibrary, error) {
 
 // SetLibraryEnabled turns one synced library on or off, by the server's own key.
 func (s *Seerr) SetLibraryEnabled(ctx context.Context, id string, enabled bool) error {
-	return s.client.Put(ctx, "/api/v1/settings/jellyfin/library/"+id, map[string]bool{"enabled": enabled}, nil)
+	return s.client.Put(ctx, "/api/v1/settings/jellyfin/library/"+id, map[string]bool{fieldEnabled: enabled}, nil)
 }
 
 // SetExternalHostname stores where people reach the media server: Seerr builds the
