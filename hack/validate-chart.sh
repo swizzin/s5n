@@ -369,6 +369,50 @@ if [ -n "$qui_problems" ]; then
 fi
 echo "== qui render: every Sonarr and Radarr instance admits qui"
 
+# Every app on, both 4K pairs: each instance's ingress admits exactly the apps whose `calls`
+# name it. The spot list is integrations an operator sets up by hand (an Arr's Connect, a
+# second media server, autobrr's usenet action), which nothing in e2e dials.
+calls_policy=$(mktemp)
+helm template t charts/s5n -n seedbox -f charts/s5n/ci/all-apps-values.yaml \
+  --set gateway.host=box.example.com >"$calls_policy"
+calls_problems=$(python3 - "$calls_policy" charts/s5n/catalog.yaml <<'PY'
+import sys, yaml
+
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+catalog = yaml.safe_load(open(sys.argv[2], encoding="utf-8"))["apps"]
+spot = [("plex", "sonarr-4k"), ("jellyfin", "radarr"), ("qui", "lidarr"), ("jellyfin", "seerr"),
+        ("jellyfin", "maintainerr"), ("jellyfin", "bazarr-4k"), ("tautulli", "seerr"),
+        ("sabnzbd", "autobrr"), ("prowlarr", "qui"), ("qbittorrent", "prowlarr")]
+admitted = {}
+for d in docs:
+    name = d["metadata"]["name"]
+    if d.get("kind") != "NetworkPolicy" or not name.endswith("-ingress"):
+        continue
+    peers = [peer for rule in d["spec"].get("ingress", []) for peer in (rule.get("from") or [])]
+    admitted[name[: -len("-ingress")]] = {
+        ((peer.get("podSelector") or {}).get("matchLabels") or {}).get("s5n.io/app") for peer in peers} - {None}
+problems = []
+for inst, callers in sorted(admitted.items()):
+    app = next((a for a in sorted(catalog, key=len, reverse=True) if inst == a or inst.startswith(a + "-")), None)
+    want = {c for c, e in catalog.items() if app in (e.get("calls") or [])}
+    if callers != want:
+        problems.append(f"{inst} admits {sorted(callers)}, the catalog says {sorted(want)}")
+for callee, caller in spot:
+    caller_app = caller.split("-")[0]
+    if caller_app not in admitted.get(callee, set()):
+        problems.append(f"{callee} does not admit {caller_app}")
+if not admitted:
+    problems.append("the render has no ingress policies")
+print("; ".join(problems))
+PY
+)
+rm -f "$calls_policy"
+if [ -n "$calls_problems" ]; then
+  echo "catalog calls: $calls_problems"
+  exit 1
+fi
+echo "== all-apps render: every instance admits exactly the apps whose calls name it"
+
 # Jellyfin's first-run window is closed inside its pod: an init container runs the app's own
 # image, binds it to loopback and completes the wizard before the app starts, so the route
 # carries no /Startup rule to be bypassed in another spelling. The password is mounted by
