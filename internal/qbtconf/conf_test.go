@@ -79,7 +79,7 @@ func TestSeal(t *testing.T) {
 		"[LegalNotice]\nAccepted=true",
 		"Username=admin",
 		`Password_PBKDF2="@ByteArray(`,
-		"CSRFProtection=false",
+		"CSRFProtection=true",
 		"HostHeaderValidation=false",
 		"LocalHostAuth=false",
 		"AuthSubnetWhitelistEnabled=true",
@@ -254,6 +254,23 @@ func TestSealBypassesTheLoginForPrivateAddresses(t *testing.T) {
 	}
 	if !strings.Contains(stored, storedHash) {
 		t.Fatalf("sealing replaced the stored hash: %q does not carry %q", stored, storedHash)
+	}
+}
+
+// A config an earlier release sealed carries CSRFProtection=false, and the WebUI's own
+// login is skipped for the Gateway's address, so the edge's cookie is all that stands
+// between a same-site page and the API: the upgrade has to flip the key.
+func TestSealTurnsCSRFProtectionOn(t *testing.T) {
+	old, _ := preBypassConfig(t, "s3cret")
+	out, changed, err := Seal(old, "admin", "s3cret", 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("sealing a config from before the change reported no change")
+	}
+	if got, ok := Parse(out).Get("WebUI", "CSRFProtection"); !ok || got != "true" {
+		t.Fatalf("WebUI/CSRFProtection = %q (present %v), want true", got, ok)
 	}
 }
 

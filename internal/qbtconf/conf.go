@@ -326,9 +326,10 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 		{"WebUI", "LocalHostAuth", "false"},
 		{"WebUI", "AuthSubnetWhitelistEnabled", "true"},
 		{"WebUI", "AuthSubnetWhitelist", subnetListValue()},
-		// The API is cookie-authenticated; CSRF protection only breaks
-		// non-browser clients.
-		{"WebUI", "CSRFProtection", "false"},
+		// A same-site page holding the edge's cookie could POST here, the WebUI's own
+		// login being skipped for the Gateway's address; a client with neither Origin
+		// nor Referer passes (src/webui/webapplication.cpp:969 at release-5.3.1).
+		{"WebUI", "CSRFProtection", "true"},
 		{"LegalNotice", "Accepted", "true"},
 	}
 	if storedHash != "" {
