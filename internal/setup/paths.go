@@ -285,6 +285,13 @@ func under(path, point string) bool {
 // makeDirs creates the directories init owns with the box's owner: the path roots and one
 // per app instance under the config path, which the chart mounts as `subPath`. A kubelet
 // creating a missing one makes it root-owned: an app that cannot save its settings.
+//
+// Every run re-owns them, as root, in a config path the box's owner can write. So each
+// one must be a directory of its own, never a link: a settings directory replaced by a
+// link to /etc would otherwise hand /etc to that owner. MkdirAll accepts a link to a
+// directory, so the check is an Lstat after it, and the chown is an Lchown: a link
+// swapped in after the check is owned itself, not followed. A link here never worked
+// anyway -- the kubelet refuses a subPath that resolves outside its volume.
 func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	seen := map[string]bool{}
 	var created []string
@@ -296,7 +303,17 @@ func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 		if err := d.Host.MkdirAll(p, 0o775); err != nil {
 			return created, fmt.Errorf("create %s: %w", p, err)
 		}
-		if err := d.Host.Chown(p, uid, gid); err != nil {
+		info, err := d.Host.Lstat(p)
+		if err != nil {
+			return created, fmt.Errorf("check %s: %w", p, err)
+		}
+		if info.Symlink {
+			return created, fmt.Errorf("%s is a symlink: init gives this directory to %d:%d and does not follow a link to do it; replace the link with a plain directory (move what it points to there) and run init again", p, uid, gid)
+		}
+		if !info.IsDir {
+			return created, fmt.Errorf("%s exists and is not a directory: init keeps an app's settings there; move it aside and run init again", p)
+		}
+		if err := d.Host.Lchown(p, uid, gid); err != nil {
 			return created, fmt.Errorf("give %s to %d:%d: %w", p, uid, gid, err)
 		}
 		created = append(created, p)

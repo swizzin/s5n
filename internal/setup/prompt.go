@@ -128,8 +128,9 @@ type PathHost interface {
 	ReadDir(path string, max int) ([]DirEntry, bool, error)
 	// MkdirAll creates a directory and its parents.
 	MkdirAll(path string, perm fs.FileMode) error
-	// Chown sets a directory's owner.
-	Chown(path string, uid, gid int) error
+	// Lchown sets a path's owner without following a symlink: a link is owned
+	// itself, so root's chown never lands on what a link points to.
+	Lchown(path string, uid, gid int) error
 }
 
 // FileInfo is what init needs from a stat: directory, link, owner.

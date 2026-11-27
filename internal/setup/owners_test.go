@@ -276,7 +276,7 @@ func TestGuidedInitShowsTheLoginAndTheFileOwner(t *testing.T) {
 func TestTheHostSeamCannotCreateAnOSUser(t *testing.T) {
 	want := map[string]bool{
 		"Stat": true, "Lstat": true, "StatFS": true, "MountInfo": true,
-		"ReadDir": true, "MkdirAll": true, "Chown": true,
+		"ReadDir": true, "MkdirAll": true, "Lchown": true,
 	}
 	typ := reflect.TypeOf((*PathHost)(nil)).Elem()
 	for i := 0; i < typ.NumMethod(); i++ {
