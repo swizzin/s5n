@@ -18,11 +18,18 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
 	"github.com/swizzin/s5n/internal/linktree"
+	"github.com/swizzin/s5n/internal/safefs"
 )
+
+// beforeRead is a test's seam: it runs as one file of a tree is about to be read,
+// which is when the tree -- the seedbox's user writes it -- can change under the
+// walk that listed it.
+var beforeRead = func(file string) error { return nil }
 
 // Skipped is one link a tree carried that is not in the archive.
 type Skipped struct {
@@ -125,6 +132,10 @@ func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
 //
 // A skip entry that is not a directory inside dir is a refusal, not a silent no-op: a
 // path spelled wrong would put a library back into a snapshot somebody left it out of.
+//
+// The walk and every read below it go through the tree's os.Root: the directory is
+// the seedbox's, so an entry or a parent swapped for a symlink after the walk listed
+// it would otherwise be read out of, or copied from, wherever it now points.
 func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skipped, error) {
 	if err := w.ready(prefix); err != nil {
 		return nil, err
@@ -149,12 +160,17 @@ func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skippe
 	if !info.IsDir() {
 		return nil, fmt.Errorf("add %s: not a directory", dir)
 	}
+	tree, err := safefs.Open(dir)
+	if err != nil {
+		return nil, fmt.Errorf("add %s: %w", dir, err)
+	}
+	defer tree.Close()
 	if err := w.addDir(prefix, info); err != nil {
 		return nil, err
 	}
 	var left []Skipped
-	t := &treeWalk{w: w, prefix: prefix, dir: dir, sub: sub, skip: skipped, left: &left}
-	if err := filepath.WalkDir(dir, t.entry); err != nil {
+	t := &treeWalk{w: w, prefix: prefix, tree: tree, sub: sub, skip: skipped, left: &left}
+	if err := fs.WalkDir(tree.Root().FS(), ".", t.entry); err != nil {
 		w.fail(err)
 		return nil, err
 	}
@@ -166,7 +182,7 @@ func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skippe
 type treeWalk struct {
 	w      *Writer
 	prefix string
-	dir    string
+	tree   *safefs.Tree
 	// sub is the one directory of the tree whose contents travel, and skip the
 	// directories inside it that do not.
 	sub  string
@@ -177,36 +193,31 @@ type treeWalk struct {
 // entry is one entry the walk met. A directory beside the subtree a snapshot
 // carries is not entered, and neither is a left-out one: everything under them is
 // another program's or something Plex rebuilds.
-func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(t.dir, p)
+func (t *treeWalk) entry(rel string, d fs.DirEntry, err error) error {
 	if err != nil {
 		return err
 	}
 	if rel == "." {
 		return nil
 	}
-	slash := filepath.ToSlash(rel)
-	if t.sub != "" && !within(slash, t.sub) {
+	if t.sub != "" && !within(rel, t.sub) {
 		return leave(d)
 	}
-	if t.skip[slash] {
+	if t.skip[rel] {
 		return leave(d)
 	}
-	name := path.Join(t.prefix, slash)
-	info, err := os.Lstat(p)
+	name := path.Join(t.prefix, rel)
+	info, err := d.Info()
 	if err != nil {
-		return err
+		return t.tree.Err(rel, err)
 	}
 	switch {
 	case d.IsDir():
 		return t.w.addDir(name, info)
 	case info.Mode().IsRegular():
-		return t.w.addFileFrom(name, p, info)
+		return t.w.addFileFrom(name, t.tree, rel, info)
 	case info.Mode()&fs.ModeSymlink != 0:
-		skip, err := t.w.addLink(name, p, t.dir, rel)
+		skip, err := t.w.addLink(name, t.tree, rel)
 		if err != nil {
 			return err
 		}
@@ -226,7 +237,7 @@ func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s is a %s: an archive carries files, directories and links inside the tree, not devices",
-		p, modeName(info.Mode()))
+		t.tree.Path(rel), modeName(info.Mode()))
 }
 
 func leave(d fs.DirEntry) error {
@@ -319,25 +330,30 @@ func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, err
 	if !info.IsDir() {
 		return res, fmt.Errorf("add %s: not a directory", dir)
 	}
+	tree, err := safefs.Open(dir)
+	if err != nil {
+		return res, fmt.Errorf("add %s: %w", dir, err)
+	}
+	defer tree.Close()
 	if err := w.addDir(prefix, info); err != nil {
 		return res, err
 	}
 	// The app's own directory, and the ones that lead to it: the extract has to
 	// put the files where the app looks for them.
-	base, at := dir, prefix
+	base, at := "", prefix
 	if sub != "" {
 		parts := strings.Split(sub, "/")
 		for i := 1; i <= len(parts); i++ {
 			rel := strings.Join(parts[:i], "/")
-			info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel)))
+			info, err := tree.Root().Lstat(rel)
 			if err != nil {
-				return res, fmt.Errorf("add %s: %w", filepath.Join(dir, filepath.FromSlash(rel)), err)
+				return res, fmt.Errorf("add %s: %w", tree.Path(rel), tree.Err(rel, err))
 			}
 			if err := w.addDir(path.Join(prefix, rel), info); err != nil {
 				return res, err
 			}
 		}
-		base, at = filepath.Join(dir, filepath.FromSlash(sub)), path.Join(prefix, sub)
+		base, at = sub, path.Join(prefix, sub)
 	}
 	// made is every directory of the tree already in the archive: a set of files
 	// shares them, and an entry asked for twice is a refusal rather than two.
@@ -346,7 +362,7 @@ func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, err
 		if !safeName(rel) {
 			return res, fmt.Errorf("%q is not a file inside %s: a carried file is a relative path with no .. in it", rel, dir)
 		}
-		skip, added, err := w.addCarried(at, base, rel, made)
+		skip, added, err := w.addCarried(at, tree, base, rel, made)
 		switch {
 		case err != nil:
 			return res, err
@@ -363,36 +379,36 @@ func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, err
 
 // addCarried adds one named file and the directories above it. A nil skip with
 // added false is the tree not having it.
-func (w *Writer) addCarried(prefix, dir, rel string, made map[string]bool) (skip *Skipped, added bool, err error) {
-	if err := w.addCarryDirs(prefix, dir, rel, made); err != nil {
+func (w *Writer) addCarried(prefix string, tree *safefs.Tree, dir, rel string, made map[string]bool) (skip *Skipped, added bool, err error) {
+	if err := w.addCarryDirs(prefix, tree, dir, rel, made); err != nil {
 		if errors.Is(err, errAbsent) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	full := filepath.Join(dir, filepath.FromSlash(rel))
-	info, err := os.Lstat(full)
+	full := path.Join(dir, rel)
+	info, err := tree.Root().Lstat(full)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("add %s: %w", full, err)
+		return nil, false, fmt.Errorf("add %s: %w", tree.Path(full), tree.Err(full, err))
 	}
 	name := path.Join(prefix, rel)
 	switch {
 	case info.Mode().IsRegular():
-		return nil, true, w.addFileFrom(name, full, info)
+		return nil, true, w.addFileFrom(name, tree, full, info)
 	case info.Mode()&fs.ModeSymlink != 0:
-		skip, err := w.addLink(name, full, dir, rel)
+		skip, err := w.addLink(name, tree, full)
 		if err != nil {
 			return nil, false, err
 		}
 		return skip, skip == nil, nil
 	}
 	if info.IsDir() {
-		return nil, false, fmt.Errorf("%s is a directory: a carried file is a file or a link inside the tree", full)
+		return nil, false, fmt.Errorf("%s is a directory: a carried file is a file or a link inside the tree", tree.Path(full))
 	}
-	return nil, false, fmt.Errorf("%s is a %s: a carried file is a file or a link inside the tree", full, modeName(info.Mode()))
+	return nil, false, fmt.Errorf("%s is a %s: a carried file is a file or a link inside the tree", tree.Path(full), modeName(info.Mode()))
 }
 
 // errAbsent is a directory above a carried file not being there, which makes the
@@ -401,23 +417,23 @@ var errAbsent = errors.New("not in the tree")
 
 // addCarryDirs adds the directories above one carried file, once each, so the
 // subset's shape is in the archive before the file that names it.
-func (w *Writer) addCarryDirs(prefix, dir, rel string, made map[string]bool) error {
+func (w *Writer) addCarryDirs(prefix string, tree *safefs.Tree, dir, rel string, made map[string]bool) error {
 	parts := strings.Split(rel, "/")
 	for i := 1; i < len(parts); i++ {
 		parent := strings.Join(parts[:i], "/")
 		if made[parent] {
 			continue
 		}
-		full := filepath.Join(dir, filepath.FromSlash(parent))
-		info, err := os.Lstat(full)
+		full := path.Join(dir, parent)
+		info, err := tree.Root().Lstat(full)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return errAbsent
 			}
-			return fmt.Errorf("add %s: %w", full, err)
+			return fmt.Errorf("add %s: %w", tree.Path(full), tree.Err(full, err))
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("add %s: %s is not a directory, so nothing can be carried under it", full, parent)
+			return fmt.Errorf("add %s: %s is not a directory, so nothing can be carried under it", tree.Path(full), parent)
 		}
 		if err := w.addDir(path.Join(prefix, parent), info); err != nil {
 			return err
@@ -566,7 +582,7 @@ func (w *Writer) addDir(name string, info fs.FileInfo) error {
 // smallFile is the size up to which a file is read whole before it is entered.
 const smallFile = 8 << 20
 
-// addFileFrom records one regular file.
+// addFileFrom records one regular file of the tree.
 //
 // A small one is read whole and entered as what was read: a rehearsal reads a
 // running source, and a running app rewrites its cookie jar whenever it likes, while
@@ -574,33 +590,61 @@ const smallFile = 8 << 20
 //
 // A large one is streamed (a database of gigabytes) and one that changed under the
 // copy is a refusal rather than a torn entry.
-func (w *Writer) addFileFrom(name, file string, info fs.FileInfo) error {
-	if info.Size() <= smallFile {
-		raw, err := readSmall(file)
-		if err != nil {
-			return err
-		}
-		if raw != nil {
-			return w.write(name, bytes.NewReader(raw), int64(len(raw)), info.Mode().Perm(), info.ModTime())
-		}
-		// It grew past the small size since its stat: streamed like any
-		// large file, under the same refusal.
+func (w *Writer) addFileFrom(name string, tree *safefs.Tree, rel string, info fs.FileInfo) error {
+	if err := beforeRead(tree.Path(rel)); err != nil {
+		return err
 	}
-	f, err := os.Open(file)
+	f, err := openSource(tree, rel, info)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if info.Size() <= smallFile {
+		raw, err := io.ReadAll(io.LimitReader(f, smallFile+1))
+		if err != nil {
+			return fmt.Errorf("add %s: %w", tree.Path(rel), err)
+		}
+		if int64(len(raw)) <= smallFile {
+			return w.write(name, bytes.NewReader(raw), int64(len(raw)), info.Mode().Perm(), info.ModTime())
+		}
+		// It grew past the small size since its stat: streamed like any
+		// large file, under the same refusal.
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("add %s: %w", tree.Path(rel), err)
+		}
+	}
 	return w.write(name, f, info.Size(), info.Mode().Perm(), info.ModTime())
 }
 
-// addLink records one symlink, or says it is left out.
-func (w *Writer) addLink(name, file, root, rel string) (*Skipped, error) {
-	target, err := os.Readlink(file)
+// openSource opens one file of a tree: the descriptor has to be the regular file the
+// walk listed, or a link, a fifo or another file swapped in since would be read into
+// the archive in its place -- /etc/shadow, as root, out of a tree the seedbox's user
+// writes. O_NOFOLLOW refuses a link at the name and O_NONBLOCK keeps a fifo from
+// holding the open.
+func openSource(tree *safefs.Tree, rel string, info fs.FileInfo) (*os.File, error) {
+	f, err := tree.Root().OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		return nil, tree.Err(rel, err)
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		f.Close()
 		return nil, err
 	}
-	res, err := linktree.Resolve(root, rel, target)
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		f.Close()
+		return nil, fmt.Errorf("%s changed while it was being added: box carries the file it checked, so run the command again", tree.Path(rel))
+	}
+	return f, nil
+}
+
+// addLink records one symlink, or says it is left out.
+func (w *Writer) addLink(name string, tree *safefs.Tree, rel string) (*Skipped, error) {
+	target, err := tree.Root().Readlink(rel)
+	if err != nil {
+		return nil, tree.Err(rel, err)
+	}
+	res, err := linktree.Resolve(tree.Dir(), filepath.FromSlash(rel), target)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
@@ -657,24 +701,6 @@ func (w *Writer) write(name string, r io.Reader, size int64, mode fs.FileMode, m
 	}
 	w.m.Entries[name] = Entry{Size: size, SHA256: hex.EncodeToString(h.Sum(nil)), Mode: modeText(uint32(mode.Perm()))}
 	return nil
-}
-
-// readSmall reads a file that was small when it was stat'ed, and returns nil when
-// it is no longer small: the caller streams that one instead.
-func readSmall(file string) ([]byte, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, smallFile+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > smallFile {
-		return nil, nil
-	}
-	return raw, nil
 }
 
 func digest(b []byte) string {

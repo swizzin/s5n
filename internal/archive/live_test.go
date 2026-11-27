@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/swizzin/s5n/internal/safefs"
 )
 
 // A rehearsal reads a running source, and a running app rewrites its cookie jar
@@ -30,7 +32,8 @@ func TestASmallFileThatChangedSinceItsStatIsEnteredAsRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := w.addFileFrom("config/plex/HTTPCookies", file, stale); err != nil {
+	tree := liveTree(t, dir)
+	if err := w.addFileFrom("config/plex/HTTPCookies", tree, "HTTPCookies", stale); err != nil {
 		t.Fatalf("a file that grew since its stat was refused: %v", err)
 	}
 	if err := w.Close(); err != nil {
@@ -67,7 +70,19 @@ func TestALargeFileThatChangedSinceItsStatIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := w.addFileFrom("config/plex/library.db", file, stale); err == nil {
+	if err := w.addFileFrom("config/plex/library.db", liveTree(t, dir), "library.db", stale); err == nil {
 		t.Fatal("a large file that changed under the copy was entered")
 	}
+}
+
+// liveTree is a tree of a source that is still running, opened the way the writer
+// opens one.
+func liveTree(t *testing.T, dir string) *safefs.Tree {
+	t.Helper()
+	tree, err := safefs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tree.Close() })
+	return tree
 }
