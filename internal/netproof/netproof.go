@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -29,6 +30,10 @@ const (
 	exitOpposite = 3
 	exitBroken   = 4
 )
+
+// probeArg is the subcommand every probe pod runs, and the name of the container
+// that runs it.
+const probeArg = "probe"
 
 // proofLabel marks the pods and policies a proof creates, so neither a person nor
 // a later run mistakes one for an app.
@@ -66,6 +71,8 @@ type objects interface {
 	Delete(ctx context.Context, namespace, name string) error
 	List(ctx context.Context, namespace string) (*corev1.PodList, error)
 	Services(ctx context.Context, namespace string) (*corev1.ServiceList, error)
+	CreateNetworkPolicy(ctx context.Context, policy *networkingv1.NetworkPolicy) (*networkingv1.NetworkPolicy, error)
+	DeleteNetworkPolicy(ctx context.Context, namespace, name string) error
 }
 
 // Cluster is the clientset adapter.
@@ -79,6 +86,14 @@ func (c Cluster) Create(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, erro
 
 func (c Cluster) Get(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	return c.Client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c Cluster) CreateNetworkPolicy(ctx context.Context, policy *networkingv1.NetworkPolicy) (*networkingv1.NetworkPolicy, error) {
+	return c.Client.NetworkingV1().NetworkPolicies(policy.Namespace).Create(ctx, policy, metav1.CreateOptions{})
+}
+
+func (c Cluster) DeleteNetworkPolicy(ctx context.Context, namespace, name string) error {
+	return c.Client.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
 func (c Cluster) Delete(ctx context.Context, namespace, name string) error {
@@ -115,7 +130,7 @@ func newPod(namespace, image, prefix string, labels map[string]string, command [
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			Containers: []corev1.Container{{
-				Name:            "probe",
+				Name:            probeArg,
 				Image:           image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Command:         command,
@@ -135,7 +150,7 @@ func newPod(namespace, image, prefix string, labels map[string]string, command [
 // dialCommand is a probe pod that dials one address until --want holds.
 func dialCommand(target Target, want string, timeout, settle time.Duration) []string {
 	command := []string{
-		"/usr/local/bin/s5n", "probe", "tcp",
+		"/usr/local/bin/s5n", probeArg, "tcp",
 		"--address", target.String(),
 		"--want", want,
 		"--timeout", timeout.String(),
@@ -193,6 +208,63 @@ func runPod(ctx context.Context, client objects, timeout, poll time.Duration, po
 		}
 		out = next
 	}
+}
+
+// target is a listener that may already be reachable: its pod and its address.
+type target struct {
+	name string
+	ip   string
+}
+
+// startPod creates a listening probe pod and waits until it is running with an
+// address. Unlike runPod it waits for a pod that is meant never to end: a dial
+// needs an address, and a proof that dials an empty one proves nothing.
+func startPod(ctx context.Context, client objects, timeout, poll time.Duration, pod *corev1.Pod) (target, error) {
+	out, err := client.Create(ctx, pod)
+	if err != nil {
+		return target{}, fmt.Errorf("create the %s probe pod in %s: %w", pod.GenerateName, pod.Namespace, err)
+	}
+	timeout, poll = bounds(timeout, poll)
+	deadline := time.NewTimer(timeout + 30*time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		if ip, ok := listening(out); ok {
+			return target{name: out.Name, ip: ip}, nil
+		}
+		if exit, done := finished(out); done {
+			return target{name: out.Name}, fmt.Errorf("the %s probe pod ended (%d, %s) before it listened", out.Name, exit.code, resultDetail(result{exit: exit.code, message: exit.message}))
+		}
+		select {
+		case <-ctx.Done():
+			return target{name: out.Name}, ctx.Err()
+		case <-deadline.C:
+			return target{name: out.Name}, fmt.Errorf("the %s probe pod was not running after %s", out.Name, timeout+30*time.Second)
+		case <-tick.C:
+		}
+		next, err := client.Get(ctx, pod.Namespace, out.Name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return target{name: out.Name}, fmt.Errorf("the %s probe pod was deleted while box waited for it", out.Name)
+			}
+			return target{name: out.Name}, fmt.Errorf("read the %s probe pod: %w", out.Name, err)
+		}
+		out = next
+	}
+}
+
+// listening reports a pod's address once its container is up.
+func listening(pod *corev1.Pod) (string, bool) {
+	if pod.Status.PodIP == "" {
+		return "", false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Running != nil || cs.Ready {
+			return pod.Status.PodIP, true
+		}
+	}
+	return "", false
 }
 
 // bounds are the waits a proof falls back to when a caller names none.

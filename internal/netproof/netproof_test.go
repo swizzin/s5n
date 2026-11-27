@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -38,6 +39,15 @@ type fakePods struct {
 	// dnsServices are kube-system's Services, for DNSTarget.
 	dnsServices []corev1.Service
 	next        int
+
+	// policies and deletedPolicies are what an ingress proof wrote and removed.
+	policies        []*networkingv1.NetworkPolicy
+	deletedPolicies []string
+	// policyErr fails the policy write; createErr fails the create whose generated
+	// name starts with createErrOn.
+	policyErr   error
+	createErr   error
+	createErrOn string
 }
 
 func (f *fakePods) Services(_ context.Context, _ string) (*corev1.ServiceList, error) {
@@ -45,6 +55,9 @@ func (f *fakePods) Services(_ context.Context, _ string) (*corev1.ServiceList, e
 }
 
 func (f *fakePods) Create(_ context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if f.createErr != nil && strings.HasPrefix(pod.GenerateName, f.createErrOn) {
+		return nil, f.createErr
+	}
 	if f.next >= len(f.script) {
 		return nil, fmt.Errorf("unexpected pod %q: the test scripted %d", pod.GenerateName, len(f.script))
 	}
@@ -101,6 +114,21 @@ func (f *fakePods) Get(_ context.Context, _, name string) (*corev1.Pod, error) {
 
 func (f *fakePods) Delete(_ context.Context, _, name string) error {
 	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakePods) CreateNetworkPolicy(_ context.Context, policy *networkingv1.NetworkPolicy) (*networkingv1.NetworkPolicy, error) {
+	if f.policyErr != nil {
+		return nil, f.policyErr
+	}
+	p := policy.DeepCopy()
+	p.Name = fmt.Sprintf("%s%d", policy.GenerateName, len(f.policies)+1)
+	f.policies = append(f.policies, p)
+	return p, nil
+}
+
+func (f *fakePods) DeleteNetworkPolicy(_ context.Context, _, name string) error {
+	f.deletedPolicies = append(f.deletedPolicies, name)
 	return nil
 }
 
@@ -307,15 +335,6 @@ func TestEgressChecksAPublicAddress(t *testing.T) {
 	if !strings.Contains(rep.Note, "no internet") {
 		t.Errorf("note = %q, want it to say a host without internet looks the same", rep.Note)
 	}
-}
-
-func contains(list []string, want string) bool {
-	for _, got := range list {
-		if got == want {
-			return true
-		}
-	}
-	return false
 }
 
 // TestDNSTargetIsTheDNSServiceMetricsPort: a Service address outlives any CoreDNS
