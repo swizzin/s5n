@@ -383,10 +383,13 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		d.steps++
 	}
 
-	// The names the chosen apps are served at: an app's host must answer where the
+	// The document the release will render: the app list decides which entries are on,
+	// and its instance list is then the workloads, each with the name it is served at.
+	values := withApps(base, apps, d.Catalog)
+	// The names the chosen workloads are served at: an app's host must answer where the
 	// domain does, or its certificate can never issue. Both resolving to nothing is the
 	// test-box case; a real mismatch stops naming the record (docs/box.md).
-	appHosts, err := appHostsFor(ctx, d.Resolver, d.Catalog, domain, domAnswer, text(forced), "init", apps)
+	appHosts, err := appHostsFor(ctx, d.Resolver, d.Catalog, domain, domAnswer, text(forced), "init", seedbox.Instances(values))
 	if err != nil {
 		return res, err
 	}
@@ -612,8 +615,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			Name:        loginName,
 			Password:    password,
 			NewPassword: newPassword,
-			Values:      withApps(base, apps, d.Catalog),
-			Hosted:      appHostApps(appHosts),
+			Values:      values,
+			Hosted:      appHostNames(appHosts),
 			OwnLogin:    d.Catalog.SelfAuthenticating(),
 			Namespace:   namespace,
 			OIDC:        d.Catalog.OIDCApps(apps),

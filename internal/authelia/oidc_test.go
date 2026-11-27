@@ -3,6 +3,7 @@ package authelia
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"strings"
 	"testing"
 )
@@ -79,7 +80,7 @@ func TestRenderOIDCNoClientsIsNoProvider(t *testing.T) {
 		EncryptionKey: testKey,
 		Theme:         BaseDark,
 		AssetPath:     AssetPath,
-		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin),
+		Rules:         Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), nil, selfLogin),
 		OIDC:          &OIDC{},
 	})
 	if err != nil {

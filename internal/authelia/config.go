@@ -3,83 +3,14 @@ package authelia
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"text/template"
 
 	"go.yaml.in/yaml/v3"
 
 	autheliaassets "github.com/swizzin/s5n/install/platform/authelia"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
-
-// Instance is one workload the chart serves on this host: one URL prefix on the
-// seedbox's domain. It mirrors `s5n.instances`, because the prefix
-// access_control talks about is the route's own, not a hand-typed rule list.
-type Instance struct {
-	// Name is the workload name -- an app's, or an Arr's with its instance
-	// suffix -- and therefore the URL prefix.
-	Name string
-	// App is the values key it came from.
-	App string
-	// Arr is whether it is one of the Arrs (or Prowlarr): their /api and /ping
-	// carry their own key, their UI does not.
-	Arr bool
-}
-
-// InstancesFromValues is the chart's `s5n.instances` list, rebuilt from the values
-// document box already has: an enabled instance of an Arr with suffix "4k" is
-// `sonarr-4k`, which is also its URL prefix.
-//
-// It reads the merged values (defaults, the user's file, the grant), the same
-// document Helm renders, so a 4K instance that exists has its own rules and one
-// that does not is never mentioned.
-func InstancesFromValues(values map[string]any) []Instance {
-	apps, _ := values["apps"].(map[string]any)
-	out := make([]Instance, 0, len(apps))
-	names := make([]string, 0, len(apps))
-	for name := range apps {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, app := range names {
-		cfg, ok := apps[app].(map[string]any)
-		if !ok {
-			continue
-		}
-		if on, _ := cfg["enabled"].(bool); !on {
-			continue
-		}
-		arr := hasEnvPrefix(cfg)
-		instances, _ := cfg["instances"].([]any)
-		if len(instances) == 0 {
-			out = append(out, Instance{Name: app, App: app, Arr: arr})
-			continue
-		}
-		for _, raw := range instances {
-			inst, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if on, _ := inst["enabled"].(bool); !on {
-				continue
-			}
-			suffix, _ := inst["suffix"].(string)
-			name := app
-			if suffix != "" {
-				name = app + "-" + suffix
-			}
-			out = append(out, Instance{Name: name, App: app, Arr: arr})
-		}
-	}
-	return out
-}
-
-// hasEnvPrefix is the chart's own test for "this app is an Arr": every Arr and
-// Prowlarr declares the environment prefix its settings are read from.
-func hasEnvPrefix(cfg map[string]any) bool {
-	_, ok := cfg["envPrefix"]
-	return ok
-}
 
 // The three policies a rule can carry, in Authelia's vocabulary: bypass means the
 // request carries its own credential (or the app signs the user in), and
@@ -106,10 +37,11 @@ type Rule struct {
 
 // Rules is the access-control list for one seedbox host: the portal first, then
 // the paths that carry their own credentials, then the one login for everything
-// else. hosted names the apps served at a name of their own, whose rule is the
-// whole <app>.<host>; a path rule would leave the name with no rule and
-// default_policy deny. ownLogin names the apps that sign their users in
-// themselves: their whole host or path bypasses the login.
+// else. hosted names the hosts themselves -- <instance>.<host> for every instance of
+// an app the chart serves at a name of its own -- because that name, not the app, is
+// what a second instance is reached at; a name with no rule falls into
+// default_policy deny. ownLogin names the apps that sign their users in themselves:
+// their whole host or path bypasses the login.
 //
 // The order is the design: Authelia takes the first matching rule, and a client
 // presenting a key must never be asked for a form.
@@ -117,15 +49,15 @@ type Rule struct {
 // There is deliberately no bypass for the ACME challenge: it arrives on the
 // host's port-80 listener, which carries no login, and Authelia refuses an http://
 // target before reading any rule ("has an insecure scheme 'http'", 4.39).
-func Rules(host, login string, instances []Instance, hosted, ownLogin []string) []Rule {
+func Rules(host, login string, instances []seedbox.Instance, hosted, ownLogin []string) []Rule {
 	rules := []Rule{
 		// The portal itself. Without this the redirect to /auth/ would be
 		// redirected to /auth/, forever.
 		{Domain: host, Policy: PolicyBypass, Resources: []string{`^/auth([/?].*)?$`}},
 	}
 	ownHost := make(map[string]bool, len(hosted))
-	for _, app := range hosted {
-		ownHost[app] = true
+	for _, name := range hosted {
+		ownHost[name] = true
 	}
 	selfAuth := make(map[string]bool, len(ownLogin))
 	for _, app := range ownLogin {
@@ -136,8 +68,8 @@ func Rules(host, login string, instances []Instance, hosted, ownLogin []string) 
 	// a rule would fall into default_policy deny.
 	loginHosts := []string{host}
 	for _, inst := range instances {
-		if ownHost[inst.App] {
-			appHost := inst.App + "." + host
+		appHost := inst.Name + "." + host
+		if ownHost[appHost] {
 			if selfAuth[inst.App] {
 				// An app that signs its users in itself does so on whatever name it
 				// is served at.

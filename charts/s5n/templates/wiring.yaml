@@ -125,12 +125,12 @@
        one row that asks a human to sign in names that address. */}}
 {{- $_ := set $cfg "seerr" (dict
       "url" (printf "http://seerr:%v" .Values.apps.seerr.port)
-      "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr") | trim)
+      "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr" "name" "seerr") | trim)
       "mediaServer" $mediaServer) }}
 {{- if eq $mediaServer "jellyfin" }}
 {{- /* Seerr stores where people reach the server and builds its links from it, so the
        address is the name root's certificate answers on. */}}
-{{- $_ := set $cfg.seerr "mediaServerUrl" (printf "https://%s" (include "s5n.appHost" (dict "root" . "app" "jellyfin") | trim)) }}
+{{- $_ := set $cfg.seerr "mediaServerUrl" (printf "https://%s" (include "s5n.appHost" (dict "root" . "app" "jellyfin" "name" "jellyfin") | trim)) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.apps.qui .Values.apps.qui.enabled }}

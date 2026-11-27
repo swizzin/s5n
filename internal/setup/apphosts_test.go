@@ -1,11 +1,13 @@
 package setup
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // hostedOptions is an unattended run with alpha (a path app) and gamma (served at a
@@ -48,7 +50,7 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 			if !strings.Contains(h.out.String(), "· certificates   Let's Encrypt for 2 hosts · resolves to 203.0.113.7\n") {
 				t.Fatalf("init did not explain the hosts' issuer:\n%s", h.out)
 			}
-			if len(h.logins) != 1 || strings.Join(h.logins[0].Hosted, ",") != "gamma" {
+			if len(h.logins) != 1 || strings.Join(h.logins[0].Hosted, ",") != "gamma.box.example.com" {
 				t.Fatalf("the login was not told about gamma's host: %+v", h.logins)
 			}
 			// gamma signs its own users in, so the login bypasses it.
@@ -193,5 +195,36 @@ func TestTheHostsWithNoRecordAreOneRow(t *testing.T) {
 		if !strings.Contains(log.String(), "dns "+name+": lookup "+name+": no such host") {
 			t.Fatalf("the log does not carry the resolver's answer for %s:\n%s", name, log.String())
 		}
+	}
+}
+
+// A name is the instance's, not its app's: a second instance of an app served at a host
+// of its own is reached under a name of its own, and App stays the app, which is what
+// the login's own-sign-in list is keyed by.
+func TestASecondInstanceIsServedAtItsOwnName(t *testing.T) {
+	h := newHarness(t)
+	instances := []seedbox.Instance{
+		{Name: "gamma", App: "gamma"},
+		{Name: "gamma-extra", App: "gamma"},
+	}
+	hosts, err := appHostsFor(context.Background(), h.decision.Resolver, h.decision.Catalog,
+		"box.example.com", hostAnswer{}, "", "init", instances)
+	if err != nil {
+		t.Fatalf("appHostsFor: %v", err)
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("hosts = %+v, want one per instance", hosts)
+	}
+	for i, want := range []string{"gamma.box.example.com", "gamma-extra.box.example.com"} {
+		if hosts[i].Host != want {
+			t.Fatalf("hosts[%d] = %q, want %q", i, hosts[i].Host, want)
+		}
+		if hosts[i].App != "gamma" {
+			t.Fatalf("hosts[%d].App = %q, want the app both instances come from", i, hosts[i].App)
+		}
+	}
+	// The login's rules are keyed by the names, portal included.
+	if got := strings.Join(appHostNames(hosts), ","); got != "gamma.box.example.com,gamma-extra.box.example.com" {
+		t.Fatalf("the login's hosted names = %q", got)
 	}
 }

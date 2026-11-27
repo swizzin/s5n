@@ -764,7 +764,7 @@ func ruleOptions() RulesOptions {
 		Hosts:  []string{"seerr.box.example.com"},
 		Image:  "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values: hostedValues(),
-		Hosted: []string{"plex", "seerr"},
+		Hosted: []string{"plex.box.example.com", "seerr.box.example.com"},
 		// The same catalog answer the hosted list comes from: both sign their own
 		// users in, so each name is a bypass.
 		OwnLogin: []string{"plex", "seerr"},
@@ -848,7 +848,7 @@ func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
 	opts := testOptions()
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
-	opts.Hosted = []string{"plex", "seerr"}
+	opts.Hosted = []string{"plex.box.example.com", "seerr.box.example.com"}
 	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -877,7 +877,7 @@ func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	opts := testOptions()
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
-	opts.Hosted = []string{"plex", "seerr"}
+	opts.Hosted = []string{"plex.box.example.com", "seerr.box.example.com"}
 	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := init.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -1283,7 +1283,7 @@ func TestEnsureRulesSaysWhatItDidInOneRow(t *testing.T) {
 	opts := testOptions()
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
-	opts.Hosted = []string{"plex", "seerr"}
+	opts.Hosted = []string{"plex.box.example.com", "seerr.box.example.com"}
 	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -1304,7 +1304,7 @@ func TestEnsureRulesSaysWhatItDidInOneRow(t *testing.T) {
 	f.decision.Say = &say.Plain{W: &written}
 	opts2 := ruleOptions()
 	opts2.Hosts = []string{"plex.box.example.com", "seerr.box.example.com", "pbh.box.example.com"}
-	opts2.Hosted = []string{"plex", "seerr", "pbh"}
+	opts2.Hosted = []string{"plex.box.example.com", "seerr.box.example.com", "pbh.box.example.com"}
 	opts2.OwnLogin = []string{"plex", "seerr", "pbh"}
 	opts2.Values = hostedValues()
 	opts2.Values["apps"].(map[string]any)["pbh"] = map[string]any{"enabled": true}

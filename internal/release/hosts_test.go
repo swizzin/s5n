@@ -369,8 +369,10 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if rule.Login != "alice" {
 		t.Fatalf("the rule names %q, want the grant's login", rule.Login)
 	}
-	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr" {
-		t.Fatalf("hosted apps = %v, want radarr", rule.Hosted)
+	// The list is the names themselves: the rule is the whole <instance>.<domain>, and
+	// the default instance's name is the app's.
+	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr.box.example.com" {
+		t.Fatalf("hosted names = %v, want radarr's host", rule.Hosted)
 	}
 	// The catalog's own-login list reaches the rule write.
 	if len(rule.OwnLogin) != 1 || rule.OwnLogin[0] != "radarr" {
@@ -631,4 +633,29 @@ func TestAnApplyWithoutALoginHalfNeverTouchesThePage(t *testing.T) {
 	if f.rel.upgrades != 1 {
 		t.Fatalf("upgrades = %d, want the values change to land", f.rel.upgrades)
 	}
+}
+
+// A workload's host is the instance's name, not the app's: a second instance of an app
+// that lives at a name of its own is reached at <instance>.<domain>, and the first
+// instance is named after the app, which is every name a one-instance box has.
+func TestAHostIsTheInstancesName(t *testing.T) {
+	chart := testChart(t)
+	values := map[string]any{"apps": map[string]any{
+		"radarr": map[string]any{"enabled": true, "instances": []any{
+			map[string]any{"suffix": "", "enabled": true},
+			map[string]any{"suffix": "4k", "enabled": true},
+			map[string]any{"suffix": "off", "enabled": false},
+		}},
+		// Path-served: no host of its own, however many instances it has.
+		"sonarr": map[string]any{"enabled": true},
+	}}
+	hosts, err := hostedHosts(chart, values, "box.example.com")
+	if err != nil {
+		t.Fatalf("hostedHosts: %v", err)
+	}
+	want := []string{"radarr.box.example.com", "radarr-4k.box.example.com"}
+	if strings.Join(hosts, ",") != strings.Join(want, ",") {
+		t.Fatalf("hosts = %v, want %v", hosts, want)
+	}
+
 }

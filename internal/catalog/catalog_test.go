@@ -200,18 +200,22 @@ func TestUnknownExposureIsNamed(t *testing.T) {
 	}
 }
 
-// A host of its own needs one name to put before the domain, which instances
-// cannot give it.
-func TestHostedAppWithInstancesIsRefused(t *testing.T) {
+// A host of its own is one name per instance, so an app that takes instances can be
+// served at names of their own: the first instance is named after the app.
+func TestHostedAppWithInstancesIsAccepted(t *testing.T) {
 	manifest := strings.Replace(miniManifest,
 		"    instances: true\n",
 		"    instances: true\n    exposure: host\n", 1)
-	_, err := parseMini(t, manifest)
-	if err == nil {
-		t.Fatal("an app with instances and a host of its own was accepted")
+	cat, err := parseMini(t, manifest)
+	if err != nil {
+		t.Fatalf("an app with instances and a host of its own was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "apps.beta.exposure: host needs one name, but this app takes instances") {
-		t.Fatalf("error = %v, want it to name the entry", err)
+	app, ok := cat.App("beta")
+	if !ok || app.Exposure != ExposureHost {
+		t.Fatalf("apps.beta = %+v, want it served at a host of its own", app)
+	}
+	if got := strings.Join(cat.Hosted(), ","); got != "beta" {
+		t.Fatalf("hosted apps = %q, want beta", got)
 	}
 }
 

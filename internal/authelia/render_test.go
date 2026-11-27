@@ -3,6 +3,7 @@ package authelia
 import (
 	"bytes"
 	"errors"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"io"
 	"regexp"
 	"strings"
@@ -21,7 +22,7 @@ func testConfiguration() Configuration {
 		EncryptionKey: testKey,
 		Theme:         BaseDark,
 		AssetPath:     AssetPath,
-		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin),
+		Rules:         Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), nil, selfLogin),
 	}
 }
 
@@ -404,7 +405,7 @@ func TestGeneratePassword(t *testing.T) {
 // file never mentions, which is the 403 the per-host step prevents.
 func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
 	c := testConfiguration()
-	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"}, selfLogin)
+	c.Rules = Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), []string{"seerr.box.example.com"}, selfLogin)
 	rendered, err := RenderConfiguration(c)
 	if err != nil {
 		t.Fatalf("RenderConfiguration: %v", err)

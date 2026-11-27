@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // fixtureValues is a seedbox's merged values with both flavours of instance.
@@ -38,42 +40,12 @@ func fixtureValues() map[string]any {
 	}
 }
 
-func TestInstancesFromValues(t *testing.T) {
-	got := InstancesFromValues(fixtureValues())
-	want := []Instance{
-		{Name: "plex", App: "plex"},
-		{Name: "prowlarr", App: "prowlarr", Arr: true},
-		{Name: "qbittorrent", App: "qbittorrent"},
-		{Name: "radarr", App: "radarr", Arr: true},
-		{Name: "seerr", App: "seerr"},
-		{Name: "sonarr", App: "sonarr", Arr: true},
-		{Name: "sonarr-4k", App: "sonarr", Arr: true},
-		{Name: "tautulli", App: "tautulli"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("instances = %#v\nwant %#v", got, want)
-	}
-}
-
-// A disabled instance is not served, so a rule for it would be a rule about a
-// route that does not exist: the 4K Radarr here is off.
-func TestInstancesFromValuesSkipsDisabled(t *testing.T) {
-	for _, inst := range InstancesFromValues(fixtureValues()) {
-		if inst.Name == "radarr-4k" {
-			t.Fatal("a disabled instance is in the list")
-		}
-	}
-}
-
-// selfLogin is the catalog's answer for this fixture: the apps that sign their
-// users in themselves.
+// selfLogin is the catalog's answer for this fixture: the apps that sign their users in
+// themselves.
 var selfLogin = []string{"plex", "seerr", "tautulli"}
 
-// The access_control contract, in order: the portal, each app's own credentials,
-// then the login. A reordering is a login that answers its own redirect, or an API
-// client asked for a form.
 func TestRulesExact(t *testing.T) {
-	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin)
+	got := Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), nil, selfLogin)
 	host := "box.example.com"
 	want := []Rule{
 		{Domain: host, Policy: "bypass", Resources: []string{`^/auth([/?].*)?$`}},
@@ -99,7 +71,7 @@ func TestRulesExact(t *testing.T) {
 // qBittorrent's UI and API are behind the login: the Arrs reach it over the
 // cluster network, not through the Gateway.
 func TestRulesLeaveQBittorrentBehindTheLogin(t *testing.T) {
-	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin) {
+	for _, r := range Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), nil, selfLogin) {
 		for _, resource := range r.Resources {
 			if strings.HasPrefix(resource, `^/qbittorrent`) {
 				t.Fatalf("qBittorrent is exempted from the login by %q", resource)
@@ -126,7 +98,7 @@ func TestRulesWithNoApps(t *testing.T) {
 // <app>.<domain>, and a leftover path rule would serve a route the chart no longer
 // creates.
 func TestRulesFollowAnAppToItsOwnHost(t *testing.T) {
-	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"plex", "seerr"}, selfLogin)
+	got := Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), []string{"plex.box.example.com", "seerr.box.example.com"}, selfLogin)
 	host := "box.example.com"
 	want := []Rule{
 		{Domain: host, Policy: "bypass", Resources: []string{`^/auth([/?].*)?$`}},
@@ -155,7 +127,7 @@ func TestRulesFollowAnAppToItsOwnHost(t *testing.T) {
 // No rule mentions the ACME challenge: it is answered on the host's port-80
 // listener, which has no login, so a bypass would be dead config.
 func TestRulesMentionNoACMEChallenge(t *testing.T) {
-	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin) {
+	for _, r := range Rules("box.example.com", "alice", seedbox.Instances(fixtureValues()), nil, selfLogin) {
 		for _, resource := range r.Resources {
 			if strings.Contains(resource, "acme-challenge") || strings.Contains(resource, ".well-known") {
 				t.Fatalf("rule %q still exempts the ACME challenge from the login", resource)
@@ -169,12 +141,12 @@ func TestRulesMentionNoACMEChallenge(t *testing.T) {
 func TestRulesBypassAnAppThatSignsItsUsersIn(t *testing.T) {
 	host := "box.example.com"
 	pathRule := Rule{Domain: host, Policy: PolicyBypass, Resources: []string{`^/qbittorrent([/?].*)?$`}}
-	if got := Rules(host, "alice", InstancesFromValues(fixtureValues()), nil, []string{"qbittorrent"}); !hasRule(got, pathRule) {
+	if got := Rules(host, "alice", seedbox.Instances(fixtureValues()), nil, []string{"qbittorrent"}); !hasRule(got, pathRule) {
 		t.Fatalf("rules = %#v, want a bypass for the app under its path: %#v", got, pathRule)
 	}
 
 	hostRule := Rule{Domain: "qbittorrent." + host, Policy: PolicyBypass}
-	got := Rules(host, "alice", InstancesFromValues(fixtureValues()), []string{"qbittorrent"}, []string{"qbittorrent"})
+	got := Rules(host, "alice", seedbox.Instances(fixtureValues()), []string{"qbittorrent.box.example.com"}, []string{"qbittorrent"})
 	if !hasRule(got, hostRule) {
 		t.Fatalf("rules = %#v, want the whole app host to bypass: %#v", got, hostRule)
 	}
@@ -183,7 +155,7 @@ func TestRulesBypassAnAppThatSignsItsUsersIn(t *testing.T) {
 // A name the list leaves out is behind the login: the list is the whole answer.
 func TestRulesLeaveAnAppOutOfTheBypass(t *testing.T) {
 	host := "box.example.com"
-	got := Rules(host, "alice", InstancesFromValues(fixtureValues()), nil, []string{"plex", "seerr"})
+	got := Rules(host, "alice", seedbox.Instances(fixtureValues()), nil, []string{"plex", "seerr"})
 	for _, r := range got {
 		for _, resource := range r.Resources {
 			if strings.HasPrefix(resource, `^/tautulli`) {
@@ -217,4 +189,28 @@ func hasRule(rules []Rule, want Rule) bool {
 		}
 	}
 	return false
+}
+
+// A second instance of an app that signs its users in has a name of its own, and its
+// rule is that name: the catalog decides the posture per app, so both instances of
+// Seerr bypass the login and neither is left on a path rule.
+func TestRulesFollowASecondInstanceToItsOwnName(t *testing.T) {
+	values := map[string]any{"apps": map[string]any{
+		"seerr": map[string]any{"enabled": true, "instances": []any{
+			map[string]any{"suffix": "", "enabled": true},
+			map[string]any{"suffix": "jellyfin", "enabled": true},
+		}},
+	}}
+	host := "box.example.com"
+	hosted := []string{"seerr." + host, "seerr-jellyfin." + host}
+	got := Rules(host, "alice", seedbox.Instances(values), hosted, []string{"seerr"})
+	for _, name := range hosted {
+		if !hasRule(got, Rule{Domain: name, Policy: PolicyBypass}) {
+			t.Fatalf("%s has no bypass rule:\n%+v", name, got)
+		}
+	}
+	// One login rule per name that keeps the portal, not one per app.
+	if !hasRule(got, Rule{Domain: host, Policy: PolicyOneFactor, Subject: "alice"}) {
+		t.Fatalf("the box's own name lost its login rule:\n%+v", got)
+	}
 }

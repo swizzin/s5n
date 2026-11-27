@@ -27,7 +27,7 @@
 {{- end }}
 {{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") (ne $oidcIP "") }}
 {{- $appHost := "" }}
-{{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
+{{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app "name" $inst.name) | trim }}{{ end }}
 {{- /* The peer port qBittorrent's Service and container take. The chart ships no default: a
        fixed number in the upper NodePort band is one the API server may hand to another
        Service first. box picks a free one from the lower band and records it in the grant. */}}

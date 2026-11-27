@@ -154,8 +154,9 @@ type Options struct {
 	// Values is the seedbox's merged values: the chart's instance list is what the
 	// rules derive from, and it is the document the release renders.
 	Values map[string]any
-	// Hosted are the apps the chart serves at <app>.<domain>, whose rule is the
-	// whole name and whose path rule must not exist.
+	// Hosted are the names the chart serves at a host of their own -- one per instance
+	// of an `exposure: host` app -- whose rule is the whole name and whose path rule
+	// must not exist.
 	Hosted []string
 	// OwnLogin are the apps whose own sign-in bypasses the login.
 	OwnLogin []string
@@ -875,7 +876,7 @@ func renderLogin(values map[string]any, host, name, key string, hosted, ownLogin
 		EncryptionKey: key,
 		Theme:         lt.Base,
 		AssetPath:     authelia.AssetPath,
-		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted, ownLogin),
+		Rules:         authelia.Rules(host, name, seedbox.Instances(values), hosted, ownLogin),
 		OIDC:          oidc,
 	})
 	if err != nil {

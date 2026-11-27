@@ -954,7 +954,7 @@ func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []
 	}
 	return HostRule{
 		Login:     login,
-		Hosted:    hostedApps(hosts, domain),
+		Hosted:    hosts,
 		OwnLogin:  cat.SelfAuthenticating(),
 		Values:    values,
 		Image:     chart.Pins.Authelia,
@@ -1024,7 +1024,9 @@ func oidcGatewayIP(values map[string]any) string {
 	return strings.TrimSpace(ip)
 }
 
-// hostedHosts is <app>.<domain> for each enabled `exposure: host` app.
+// hostedHosts is <instance>.<domain> for every enabled instance of an `exposure: host`
+// app: the name is the instance's, because a second instance of one app is reached under
+// a name of its own.
 func hostedHosts(chart Chart, values map[string]any, domain string) ([]string, error) {
 	if len(chart.Catalog) == 0 || domain == "" {
 		return nil, nil
@@ -1033,34 +1035,15 @@ func hostedHosts(chart Chart, values map[string]any, domain string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	apps, _ := values["apps"].(map[string]any)
 	var hosts []string
-	for _, name := range cat.Names() {
-		app, ok := cat.App(name)
+	for _, inst := range seedbox.Instances(values) {
+		app, ok := cat.App(inst.App)
 		if !ok || app.Exposure != catalog.ExposureHost {
 			continue
 		}
-		entry, _ := apps[name].(map[string]any)
-		if on, _ := entry["enabled"].(bool); !on {
-			continue
-		}
-		hosts = append(hosts, name+"."+domain)
+		hosts = append(hosts, inst.Name+"."+domain)
 	}
 	return hosts, nil
-}
-
-// hostedApps is the app names behind hostedHosts, which the rules are keyed by.
-func hostedApps(hosts []string, domain string) []string {
-	suffix := "." + domain
-	out := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		app := strings.TrimSuffix(host, suffix)
-		if app == host {
-			continue
-		}
-		out = append(out, app)
-	}
-	return out
 }
 
 // forcedIssuer is tls.issuer; "" means each name's DNS answer decides.

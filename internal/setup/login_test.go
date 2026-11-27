@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/swizzin/s5n/internal/authelia"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // The password has three sources and one rule: used once, never written to either
@@ -160,7 +161,7 @@ func TestLoginCarriesTheEnabledApps(t *testing.T) {
 		t.Fatalf("init: %v\n%s", err, h.out)
 	}
 	var names []string
-	for _, inst := range authelia.InstancesFromValues(h.logins[0].Values) {
+	for _, inst := range seedbox.Instances(h.logins[0].Values) {
 		names = append(names, inst.Name)
 	}
 	if strings.Join(names, ",") != "alpha,beta" {

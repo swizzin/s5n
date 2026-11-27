@@ -197,12 +197,15 @@ s5n
 {{- if $entry.oidc -}}true{{- end -}}
 {{- end -}}
 
-{{- /* s5n.appHost: the name one app is served on when it has a host of its own,
-       <app>.<domain>. A domain is required: a route on a name that is not there serves
-       nothing, so a plain install with gateway.host empty is refused with the app named. */}}
+{{- /* s5n.appHost: the name one workload is served on when its app has a host of its own
+       (`exposure: host`), <instance>.<domain>. The name is the instance's, not the app's, so
+       a second Seerr is reachable under a name of its own; the first instance is named
+       after the app, which is every name a one-instance box has. A domain is required: a
+       route on a name that is not there serves nothing, so a plain install with
+       gateway.host empty is refused with the app named. */}}
 {{- define "s5n.appHost" -}}
-{{- $domain := required (printf "gateway.host: apps.%s is served at its own host name (<app>.<domain>), so set gateway.host to the box's domain" .app) .root.Values.gateway.host -}}
-{{- printf "%s.%s" .app $domain -}}
+{{- $domain := required (printf "gateway.host: apps.%s is served at its own host name (<instance>.<domain>), so set gateway.host to the box's domain" .app) .root.Values.gateway.host -}}
+{{- printf "%s.%s" .name $domain -}}
 {{- end -}}
 
 {{- /* Restricted-profile container security context, shared by every container. */}}

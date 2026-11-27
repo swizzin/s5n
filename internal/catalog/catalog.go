@@ -396,18 +396,16 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 	return cat, problems
 }
 
-// validateExposure checks how the chart serves the app. An unknown value would
-// render the route under a path nobody meant. An app that takes instances has no
-// single name, so it cannot take a host of its own.
+// validateExposure checks how the chart serves the app. An unknown value would render the
+// route under a path nobody meant. A host of its own is one name per instance
+// (`s5n.appHost`): the first instance is named after the app, so an app with instances can
+// be served at names of their own.
 func validateExposure(app *App) []string {
 	switch app.Exposure {
 	case "", ExposurePath:
 		app.Exposure = ExposurePath
 		return nil
 	case ExposureHost:
-		if app.Instances {
-			return []string{fmt.Sprintf("apps.%s.exposure: host needs one name, but this app takes instances; serve it under a path", app.Name)}
-		}
 		return nil
 	default:
 		return []string{fmt.Sprintf("apps.%s.exposure: %q is not %s or %s", app.Name, app.Exposure, ExposurePath, ExposureHost)}

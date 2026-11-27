@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // Host is one certificate host init decided: the box's domain, and one per enabled
@@ -26,22 +27,26 @@ type Host struct {
 	Detail string
 }
 
-// appHostsFor resolves every name an enabled app is served at and checks it answers
+// appHostsFor resolves every name an enabled workload is served at and checks it answers
 // where the domain does: a certificate for a name not pointing at the box can never
 // issue, so the run ends naming the record rather than leaving a box half served.
+//
+// A name is the instance's, not its app's (`s5n.appHost`): a second instance of an app
+// that lives at a host of its own is reached at <instance>.<domain>, and App stays the app
+// so the login's own rules can tell which instances sign their users in.
 //
 // A plain function because apply makes the same decision (TLSHosts.Ensure). Two empty
 // answers are a match on purpose: a made-up name resolves nothing under it, so a test box
 // goes self-signed until its records exist. A real mismatch is one answering and the
 // other not.
-func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, domain string, dom hostAnswer, forced, command string, apps []string) ([]Host, error) {
+func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, domain string, dom hostAnswer, forced, command string, instances []seedbox.Instance) ([]Host, error) {
 	var out []Host
-	for _, app := range apps {
-		entry, ok := cat.App(app)
+	for _, inst := range instances {
+		entry, ok := cat.App(inst.App)
 		if !ok || entry.Exposure != catalog.ExposureHost {
 			continue
 		}
-		host := app + "." + domain
+		host := inst.Name + "." + domain
 		ans := resolveHost(ctx, resolver, host)
 		if err := appHostProblem(domain, dom, host, ans, command); err != nil {
 			return nil, err
@@ -54,7 +59,7 @@ func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, d
 		}
 		out = append(out, Host{
 			Host:   host,
-			App:    app,
+			App:    inst.App,
 			Issuer: issuer,
 			Why:    why,
 			NoDNS:  noDNS,
@@ -116,13 +121,13 @@ func hostIssuers(hosts []Host) map[string]string {
 	return out
 }
 
-// appHostApps is the catalog names of the apps that left the path, for the login's
-// rules.
-func appHostApps(hosts []Host) []string {
+// appHostNames is the names that left the path, for the login's rules: the rule is the
+// whole <instance>.<domain>, so the name is what they are keyed by.
+func appHostNames(hosts []Host) []string {
 	var out []string
 	for _, h := range hosts {
-		if h.App != "" {
-			out = append(out, h.App)
+		if h.Host != "" {
+			out = append(out, h.Host)
 		}
 	}
 	return out
