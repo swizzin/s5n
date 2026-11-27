@@ -4341,6 +4341,73 @@ PY
   echo "  GET https://${SEERR_HOST}/: ${seerr_ui}"
   [ "$seerr_ui" = 200 ] && grep -qi '<!doctype html' "$WORK/seerr.html" ||
     { echo "Seerr's host did not serve its UI: ${seerr_ui}"; fail=1; }
+
+  # ---- a renamed host: the one it stopped serving is removed ---------------
+  # The Seerr instance moves to requests.<domain>: its listener, Certificate and login rule
+  # follow it, and the pair for the old name is removed rather than left answering forever.
+  # Nothing redirects from the old name -- it is simply not served.
+  log "box apply: Seerr moves to requests.${DOMAIN}"
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not rename the Seerr host in the grant"; fail=1; }
+import sys, yaml
+path = sys.argv[1]
+grant = yaml.safe_load(open(path, encoding="utf-8"))
+# The instance list is the grant's to write as a whole: init leaves the chart's default in
+# place, so the rename states the list it wants.
+grant["apps"]["seerr"]["instances"] = [{"suffix": "", "enabled": True, "host": "requests"}]
+open(path, "w", encoding="utf-8").write(yaml.safe_dump(grant, sort_keys=False))
+PY
+  [ "$fail" = 0 ] || return 0
+  if apply "$WORK/apply-host.txt"; then
+    cat "$WORK/apply-host.txt"
+  else
+    cat "$WORK/apply-host.txt"; fail=1; return 0
+  fi
+  # The row names what went, and Seerr's own setting is the person's to change.
+  grep -qE '^✓ hosts +removed +seerr\.' "$WORK/apply-host.txt" ||
+    { echo "box did not say it removed the old host:"; grep -iE "host|certificate" "$WORK/apply-host.txt" | head -5; fail=1; }
+  grep -qF "Seerr's Application URL" "$WORK/apply-host.txt" ||
+    { echo "box did not say Seerr's Application URL is the person's to update"; fail=1; }
+
+  old_flat=$(printf '%s' "${SEERR_HOST}" | tr '.' '-')
+  new_flat=$(printf 'requests.%s' "${DOMAIN}" | tr '.' '-')
+  box_flat=$(printf '%s' "${DOMAIN}" | tr '.' '-')
+  listeners=$($K -n s5n-gateway get gateway s5n -o jsonpath='{range .spec.listeners[*]}{.name}{"\n"}{end}')
+  certs=$($K -n s5n-gateway get certificate -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+  for want in "http-${new_flat}" "https-${new_flat}" "https-${box_flat}"; do
+    printf '%s\n' "$listeners" | grep -qx -- "$want" ||
+      { echo "the Gateway has no listener ${want} after the rename:"; printf '%s\n' "$listeners"; fail=1; }
+  done
+  for gone in "http-${old_flat}" "https-${old_flat}"; do
+    if printf '%s\n' "$listeners" | grep -qx -- "$gone"; then
+      echo "the Gateway still has the listener ${gone} for a name box no longer serves"
+      fail=1
+    fi
+  done
+  printf '%s\n' "$certs" | grep -qx -- "s5n-tls-${new_flat}" ||
+    { echo "requests.${DOMAIN} has no Certificate after the rename:"; printf '%s\n' "$certs"; fail=1; }
+  if printf '%s\n' "$certs" | grep -qx -- "s5n-tls-${old_flat}"; then
+    echo "the Certificate for ${SEERR_HOST} outlived the name box stopped serving"
+    fail=1
+  fi
+
+  # The new name serves Seerr; the old one is not there, on 443 or as a redirect on 80.
+  moved_code=$(curl -sS -L -o "$WORK/seerr-moved.html" -w '%{http_code}' --max-time 30 \
+    --resolve "requests.${DOMAIN}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    "https://requests.${DOMAIN}/" 2>/dev/null || true)
+  echo "  GET https://requests.${DOMAIN}/: ${moved_code}"
+  [ "$moved_code" = 200 ] || { echo "the new name does not serve Seerr: ${moved_code}"; fail=1; }
+  old_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/anchor.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ (the old name): ${old_code:-no answer}"
+  [ "$old_code" != 200 ] || { echo "the old name still serves Seerr after the rename"; fail=1; }
+  old_80=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+    --resolve "${SEERR_HOST}:80:${gw_addr}" "http://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET http://${SEERR_HOST}/ (the old name, port 80): ${old_80:-no answer}"
+  case "$old_80" in
+    301|302|308) echo "port 80 still redirects the old name, so box wrote a redirect for a name it dropped"; fail=1 ;;
+  esac
+
 }
 
 # ---- scenario: preinstalled --------------------------------------------------

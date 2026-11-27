@@ -1133,21 +1133,14 @@ func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
 
 // gatewayWith is a Gateway carrying the listeners a run wrote and the managers that own
 // them, as the API server records them.
-func gatewayWith(listeners map[string]string, managers map[string][]string) map[string]any {
+func gatewayWith(listeners map[string]string, managers []string) map[string]any {
 	spec := make([]any, 0, len(listeners))
 	for name, host := range listeners {
 		spec = append(spec, map[string]any{"name": name, "hostname": host, "port": int64(443)})
 	}
 	fields := make([]any, 0, len(managers))
-	for manager, owned := range managers {
-		paths := map[string]any{}
-		for _, name := range owned {
-			paths["f:"+name] = map[string]any{}
-		}
-		fields = append(fields, map[string]any{
-			"manager":  manager,
-			"fieldsV1": map[string]any{"f:spec": map[string]any{"f:listeners": paths}},
-		})
+	for _, manager := range managers {
+		fields = append(fields, map[string]any{"manager": manager})
 	}
 	return map[string]any{
 		"kind":     "Gateway",
@@ -1166,10 +1159,12 @@ func TestBoxHostsAreTheOnesBoxWrote(t *testing.T) {
 			"https-plex-box-example-com":  "plex.box.example.com",
 			"https-mine":                  "mine.example.com",
 		},
-		map[string][]string{
-			httpsListenerManager("seerr.box.example.com"): {"https-seerr-box-example-com"},
-			httpsListenerManager("plex.box.example.com"):  {"https-plex-box-example-com"},
-			"kubectl": {"https-mine"},
+		[]string{
+			httpsListenerManager("seerr.box.example.com"),
+			httpListenerManager("seerr.box.example.com"),
+			httpsListenerManager("plex.box.example.com"),
+			// An operator's own listener: its manager is not one of box's.
+			"kubectl",
 		}))
 	got, err := BoxHosts(context.Background(), cl)
 	if err != nil {

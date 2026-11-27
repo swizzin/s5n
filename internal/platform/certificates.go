@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -790,34 +789,44 @@ func certificateAccess() []Access {
 }
 
 // BoxHosts is every host box's own TLS managers put a listener on: the names this box
-// served, read off the Gateway's managedFields rather than a record, so an operator's own
-// listener is never one of them.
+// served, read off the Gateway rather than a record, so an operator's own listener is never
+// one of them.
+//
+// A manager is `box-tls-<label>-https` / `-http`, one per listener box wrote, and a
+// listener's `hostname` says which host it is: the label is the host's own flattening, so
+// matching the two is exact for box's objects and needs no record of what a run wrote.
 func BoxHosts(ctx context.Context, cl CertificateCluster) ([]string, error) {
 	gw, ok, err := cl.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
 	if err != nil || !ok {
 		return nil, err
 	}
-	byListener := map[string]string{}
+	byLabel := map[string]string{}
 	listeners, _ := gw["spec"].(map[string]any)["listeners"].([]any)
 	for _, raw := range listeners {
 		l, _ := raw.(map[string]any)
-		name, _ := l["name"].(string)
 		host, _ := l["hostname"].(string)
-		if name != "" && host != "" {
-			byListener[name] = host
+		if host != "" {
+			byLabel[dnsLabel(host)] = host
 		}
 	}
 	var out []string
 	seen := map[string]bool{}
 	for _, manager := range boxManagers(gw) {
-		for _, name := range managedListeners(gw, manager) {
-			host := byListener[name]
-			if host == "" || seen[host] {
-				continue
-			}
-			seen[host] = true
-			out = append(out, host)
+		label := strings.TrimPrefix(manager, kube.TLSManagerPrefix)
+		switch {
+		case strings.HasSuffix(label, "-https"):
+			label = strings.TrimSuffix(label, "-https")
+		case strings.HasSuffix(label, "-http"):
+			label = strings.TrimSuffix(label, "-http")
+		default:
+			continue
 		}
+		host, ok := byLabel[label]
+		if !ok || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -836,42 +845,6 @@ func boxManagers(gw map[string]any) []string {
 		}
 	}
 	return out
-}
-
-// managedListeners is the listener names one manager owns: the keys under
-// spec.listeners in its fieldsV1 (the Gateway's listener list is merged by name, so each
-// listener is its own path).
-func managedListeners(gw map[string]any, manager string) []string {
-	meta, _ := gw["metadata"].(map[string]any)
-	fields, _ := meta["managedFields"].([]any)
-	for _, raw := range fields {
-		entry, _ := raw.(map[string]any)
-		if name, _ := entry["manager"].(string); name != manager {
-			continue
-		}
-		raw, _ := entry["fieldsV1"].(map[string]any)
-		if raw == nil {
-			// A fake or a hand-written object may carry it as JSON.
-			text, _ := entry["fieldsV1Raw"].(string)
-			if text == "" {
-				return nil
-			}
-			var parsed map[string]any
-			if json.Unmarshal([]byte(text), &parsed) != nil {
-				return nil
-			}
-			raw = parsed
-		}
-		out := []string{}
-		spec, _ := raw["f:spec"].(map[string]any)
-		listeners, _ := spec["f:listeners"].(map[string]any)
-		for key := range listeners {
-			out = append(out, strings.TrimPrefix(key, "f:"))
-		}
-		sort.Strings(out)
-		return out
-	}
-	return nil
 }
 
 // Unserved is the names box wrote and this run does not serve.
