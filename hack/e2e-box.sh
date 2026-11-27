@@ -9,7 +9,11 @@
 #
 # The chart arrives the way a user's does: `helm package` from this tree, `helm push`
 # to a registry container on 127.0.0.1, and box pulls it with --chart-repo. box never
-# reads `charts/` from its own tree and the kind cluster never pulls the chart.
+# reads `charts/` from its own tree and the kind cluster never pulls the chart. box
+# installs only a chart whose digest a signature covers, so this run signs what it
+# pushes into a release page of its own on 127.0.0.1 (--chart-releases) with a key
+# generated for the run (THE KEY A CHART IS CHECKED AGAINST); `fresh` also pushes one
+# version nothing signed and proves box refuses it.
 #
 # Eight scenarios, eight clusters (`all` runs each once, with its own work directory,
 # cluster name and exit code):
@@ -161,6 +165,35 @@ take_slot() {
 
 ALL_SCENARIOS=(fresh jellyfin preinstalled foreign-gateway update upgrade migrate migrate-keep)
 
+# ---- the key a chart is checked against --------------------------------------
+# box verifies a chart's manifest digest with the key compiled into it, and this run
+# cannot have the release's. So box is built with -overlay: the committed signing.pub
+# resolves to a key generated here. Nothing in the tree is written -- a test key left in
+# a tracked file is one interrupted run away from being committed.
+#
+# hack/sign refuses a seed whose public half is not the key it reads at run time, from
+# internal/selfupdate/signing.pub under its working directory. So the signer is built
+# once and run from this directory, where that file is the run's own key.
+SIGN_DIR=${S5N_E2E_SIGNING_DIR:-}
+SIGN_OVERLAY=""
+
+# signing_setup <dir>: the throwaway seed and a signer that reads it, or nothing when
+# `all` built them and exported the directory every scenario signs from.
+signing_setup() { # signing_setup <dir>
+  [ -n "$SIGN_DIR" ] || SIGN_DIR=$1
+  SIGN_OVERLAY="$SIGN_DIR/overlay.json"
+  if [ -x "$SIGN_DIR/sign" ]; then return 0; fi
+  mkdir -p "$SIGN_DIR/internal/selfupdate"
+  go run ./hack/sign keygen "$SIGN_DIR/box-signing.key" >/dev/null
+  go run ./hack/sign public "$SIGN_DIR/box-signing.key" >"$SIGN_DIR/internal/selfupdate/signing.pub"
+  python3 - "$PWD/internal/selfupdate/signing.pub" "$SIGN_DIR/internal/selfupdate/signing.pub" \
+    "$SIGN_OVERLAY" <<'PY'
+import json, sys
+json.dump({"Replace": {sys.argv[1]: sys.argv[2]}}, open(sys.argv[3], "w"))
+PY
+  go build -o "$SIGN_DIR/sign" ./hack/sign
+}
+
 # ---- all: build once, then the scenarios at once ------------------------------
 # The eight scenarios are separate processes, each with its own work directory, cluster,
 # kubeconfig and exit code, run as many at a time as the slots allow. What all of them
@@ -185,7 +218,10 @@ all_run() {
   }
   log "building the s5n image, box ${chart_version} and the chart package once for all ${#ALL_SCENARIOS[@]} scenarios"
   docker build -q -t "$IMAGE" .
-  CGO_ENABLED=0 go build -ldflags "-X main.version=${chart_version}" -o "$prebuilt/box" ./cmd/box
+  # The key every scenario's chart is signed with, compiled into the one box they run.
+  signing_setup "$prebuilt/signing"
+  export S5N_E2E_SIGNING_DIR=$SIGN_DIR
+  CGO_ENABLED=0 go build -overlay "$SIGN_OVERLAY" -ldflags "-X main.version=${chart_version}" -o "$prebuilt/box" ./cmd/box
   helm package charts/s5n --destination "$prebuilt" >/dev/null
   [ -f "$prebuilt/s5n-${chart_version}.tgz" ] || {
     echo "helm package wrote no s5n-${chart_version}.tgz into ${prebuilt}"
@@ -317,6 +353,10 @@ cleanup() {
   if [ -n "${NOTICE_PID:-}" ]; then
     kill "$NOTICE_PID" >/dev/null 2>&1 || true
   fi
+  # The chart release page this run serves, by pid.
+  if [ -n "${RELEASES_PID:-}" ]; then
+    kill "$RELEASES_PID" >/dev/null 2>&1 || true
+  fi
   # --keep keeps the work directory with the cluster, and prints its path.
   if [ "$KEEP" = --keep ]; then
     printf '\n==> kept work dir: %s\n' "$WORK"
@@ -414,6 +454,48 @@ CHART_VERSION=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
   exit 1
 }
 CHART_REPO="oci://127.0.0.1:${REGISTRY_PORT}/charts/s5n"
+
+# ---- the release page a chart's signature is published on -------------------
+# box reads <page>/releases/download/s5n-v<version>/chart.sig, the layout a GitHub
+# release serves. This run cannot write a GitHub release, so the page is a directory on
+# 127.0.0.1 and every chart the run pushes is signed into it with the run's key.
+signing_setup "$WORK/signing"
+RELEASES="$WORK/releases"
+mkdir -p "$RELEASES/releases/download"
+RELEASES_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+python3 -m http.server "$RELEASES_PORT" --bind 127.0.0.1 --directory "$RELEASES" >"$WORK/releases.log" 2>&1 &
+RELEASES_PID=$!
+CHART_RELEASES="http://127.0.0.1:${RELEASES_PORT}"
+for i in $(seq 1 100); do
+  if curl -fsS -o /dev/null "${CHART_RELEASES}/" 2>/dev/null; then break; fi
+  [ "$i" = 100 ] && { echo "the release page never answered on ${CHART_RELEASES}"; cat "$WORK/releases.log"; exit 1; }
+  sleep 0.1
+done
+log "the chart release page on ${CHART_RELEASES} (pid ${RELEASES_PID})"
+
+# chart_digest <version>: the manifest digest the run's registry serves for a tag now,
+# which is the digest a signature covers and box pulls by.
+chart_digest() { # chart_digest <version>
+  curl -fsSI -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    "http://127.0.0.1:${REGISTRY_PORT}/v2/charts/s5n/manifests/$1" 2>/dev/null | tr -d '\r' |
+    sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1
+}
+
+# sign_chart <version>: publish the signature over the digest that version's tag points
+# at now, where box reads it. Every version this run pushes is signed, or box refuses it.
+sign_chart() { # sign_chart <version>
+  local version=$1 digest dir
+  digest=$(chart_digest "$version") || true
+  [ -n "$digest" ] || { echo "the registry serves no manifest digest for s5n ${version}"; return 1; }
+  dir="$RELEASES/releases/download/s5n-v${version}"
+  mkdir -p "$dir"
+  (cd "$SIGN_DIR" && BOX_SIGNING_KEY=$(cat "$SIGN_DIR/box-signing.key") \
+    "$SIGN_DIR/sign" sign-chart "$version" "$digest" "$dir" >/dev/null) ||
+    { echo "could not sign s5n ${version} (${digest})"; return 1; }
+  echo "  signed s5n ${version} (${digest})"
+}
+
 # Kept for update_chart: a scenario may publish more than the tree's release.
 mkdir -p "$WORK/charts"
 if [ -n "$PREBUILT" ]; then
@@ -426,6 +508,8 @@ else
   chart_tgz="$WORK/charts/s5n-${CHART_VERSION}.tgz"
 fi
 helm push "$chart_tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+sign_chart "$CHART_VERSION" || exit 1
+
 
 # A leftover cluster from an interrupted run is deleted, not reused: its platform would make
 # the probes say "use".
@@ -452,7 +536,7 @@ if [ -n "$PREBUILT" ]; then
   log "using the box binary all built once as ${CHART_VERSION}"
 else
   log "building box ${CHART_VERSION} (the version it pulls the chart as)"
-  CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+  CGO_ENABLED=0 go build -overlay "$SIGN_OVERLAY" -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
 fi
 built=$("$WORK/box" version)
 [ "$built" = "$CHART_VERSION" ] || {
@@ -556,6 +640,13 @@ APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,filebrowser,prowlarr,plex,
 # Jellyfin-mode Seerr, which is what it exists to prove.
 [ "$SCENARIO" = jellyfin ] && APPS="qbittorrent,sonarr,radarr,prowlarr,jellyfin,seerr"
 
+# page_args: the chart's signature page, for this tree's box. The published box the
+# upgrade scenario installs with predates the flag and verifies nothing, so it gets none.
+page_args() {
+  PAGE_ARGS=(--chart-releases "$CHART_RELEASES")
+  [ "${PUBLISHED_BOX:-}" != "$BOX_BIN" ] || PAGE_ARGS=()
+}
+
 # box_bootstrap_args <extra...>: what every bootstrap here passes, without the flag
 # that decides whether it asks. --record points the cluster decision at this work
 # directory, since the e2e is not root. No --chart-version takes the default-version
@@ -567,7 +658,8 @@ box_bootstrap_args() { # box_bootstrap_args [extra...]
   # A scenario installing a published release names it; the rest take the default path.
   local version_args=()
   [ "$INSTALL_VERSION" = "$CHART_VERSION" ] || version_args=(--chart-version "$INSTALL_VERSION")
-  BOX_ARGS=(--chart-repo "$CHART_REPO" ${version_args[@]+"${version_args[@]}"} ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"}
+  page_args
+  BOX_ARGS=(--chart-repo "$CHART_REPO" ${PAGE_ARGS[@]+"${PAGE_ARGS[@]}"} ${version_args[@]+"${version_args[@]}"} ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"}
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml"
     ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN"
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH"
@@ -599,7 +691,8 @@ init() { # init <output file> [extra dev flags]
   # release to the package pushed above, which the apply handed over to installs.
   local ns_args=()
   [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
-  "$BOX_BIN" init --yes --chart-repo "$CHART_REPO" --chart-version "$INSTALL_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
+  page_args
+  "$BOX_BIN" init --yes --chart-repo "$CHART_REPO" ${PAGE_ARGS[@]+"${PAGE_ARGS[@]}"} --chart-version "$INSTALL_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
@@ -612,7 +705,7 @@ init() { # init <output file> [extra dev flags]
 
 apply() { # apply <output file>
   # --paths-in-node: only a script that wrote those directories itself passes it.
-  "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
@@ -3436,7 +3529,7 @@ EOF
   last_before=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastCheck") or "")' "$update_state" 2>/dev/null || true)
   echo "  last check before the wake: '${last_before}'"
   log "box update --timer: a due wake on a box that is already current"
-  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-wake.txt" 2>&1; then
     cat "$WORK/update-wake.txt"
@@ -3454,7 +3547,7 @@ EOF
     { echo "the due wake did not record when it checked: the next wake would be due again"; fail=1; }
 
   log "box update --timer: the next wake is not due, so it asks the registry nothing"
-  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-wake2.txt" 2>&1; then
     cat "$WORK/update-wake2.txt"
@@ -3502,7 +3595,7 @@ EOF
   sed -i 's/^  timer: on  /  timer: off /' "$conf"
   grep -q "^  timer: off " "$conf" || { echo "could not turn the timer off in ${conf}"; fail=1; }
   state_before_off=$(sha256sum "$update_state" | cut -d' ' -f1)
-  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-off.txt" 2>&1; then
     cat "$WORK/update-off.txt"
@@ -4824,7 +4917,7 @@ print(json.dumps({"status": {"conditions": conds}}))' >"$WORK/cert-status.json"
 192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST} ${JELLYFIN_HOST}
 EOF
   anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --dns-file "$WORK/dns-window" --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-dns-window.txt" 2>&1; then
@@ -5282,6 +5375,7 @@ update_chart() {
   done
   helm package "$dest" --destination "$WORK/charts" >/dev/null
   helm push "$WORK/charts/s5n-${version}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+  sign_chart "$version" || return 1
   echo "  published s5n ${version}"
 }
 
@@ -5294,6 +5388,7 @@ vintage_chart() {
   rm -f "$dest/platform.yaml"
   helm package "$dest" --destination "$WORK/charts" >/dev/null
   helm push "$WORK/charts/s5n-${version}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+  sign_chart "$version" || return 1
   echo "  published s5n ${version} without platform.yaml, as a release from before the platform layer"
 }
 
@@ -5521,7 +5616,7 @@ EOF
 
   log "box update: the step moves both apps, and box puts sonarr back on the image it ran"
   update_b_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
-  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-b.txt" 2>&1; then
     cat "$WORK/update-b.txt"
@@ -5702,7 +5797,7 @@ PY
   # The chart renders the old image for a held app, and that is what the release
   # already runs, so the apply has nothing to write: apply overlays a hold as a step does.
   log "box apply: sonarr stays where the rollback left it"
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_b" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$release_b" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-held.txt" 2>&1; then
     cat "$WORK/apply-held.txt"
@@ -5721,7 +5816,7 @@ PY
   log "release C: sonarr's image moves again, so the hold lapses"
   retag_pinned "$sonarr_repo" "$sonarr_digest" "$RESTORED_TAG" || { fail=1; return 0; }
   update_chart "$WORK/chart-c" "$release_c" sonarr "$RESTORED_TAG" prowlarr "$MOVED_TAG"
-  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-c.txt" 2>&1; then
     cat "$WORK/update-c.txt"
@@ -5752,7 +5847,7 @@ PY
   # that image into the values file, so the app stays until the operator takes the
   # pin out, and no hold is left behind.
   log "box rollback sonarr --pin: the newest copy, and a pin where a hold would be"
-  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" \
+  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/rollback.txt" 2>&1; then
     cat "$WORK/rollback.txt"
@@ -5779,7 +5874,7 @@ PY
   [ -n "$release_d" ] || { echo "could not read the release after ${release_c}"; fail=1; return 0; }
   update_chart "$WORK/chart-d" "$release_d"
   revision_before=$(helm_revision "$NS") || true
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_d" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$release_d" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-release-d.txt" 2>&1; then
     cat "$WORK/apply-release-d.txt"
@@ -5827,7 +5922,7 @@ print(f"  values: apps.sonarr.image.tag -> {tag}, digest dropped")
 PY
   grep -qF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" ||
     { echo "sonarr's config lost the marker before the apply: the copy below would prove nothing"; fail=1; return 0; }
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-pin.txt" 2>&1; then
     cat "$WORK/apply-pin.txt"
@@ -5857,7 +5952,7 @@ PY
     sed -i '\\#$MARKER#d' /config/config.xml
     ! grep -qF '$MARKER' /config/config.xml" ||
     { echo "could not take the marker out of sonarr's config through the pod"; fail=1; return 0; }
-  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" \
+  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/rollback-apply.txt" 2>&1; then
     cat "$WORK/rollback-apply.txt"
@@ -5907,7 +6002,7 @@ PY
     { echo "could not put a token into Plex's settings file"; fail=1; return 0; }
   node_root "$CLUSTER" "chmod 0644 '$prefs'; chown --reference='$prefs_dir' '$prefs'" ||
     { echo "could not hand Plex's settings file back to the app's user"; fail=1; return 0; }
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token.txt" 2>&1; then
     cat "$WORK/apply-plex-token.txt"
@@ -5945,7 +6040,7 @@ PY
   $K -n "$NS" patch secret s5n-keys --type merge \
     -p "{\"data\":{\"plex-token\":\"$(printf 'a-token-a-person-set' | base64 -w0)\"}}" >/dev/null ||
     { echo "could not set a plex-token by hand"; fail=1; return 0; }
-  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --record "$WORK/cluster.yaml" --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token-kept.txt" 2>&1; then
     cat "$WORK/apply-plex-token-kept.txt"
@@ -6029,7 +6124,9 @@ PY
 
 # mirror_published_charts: every published chart, pulled anonymously and pushed to
 # this run's registry. The old ones matter twice: a release from before platform.yaml
-# cannot be read at all, and box's listing starts at the installed release.
+# cannot be read at all, and box's listing starts at the installed release. Each mirror
+# is signed into this run's page as it lands, because box reads every release above the
+# installed one and verifies each.
 mirror_published_charts() {
   local v
   mkdir -p "$WORK/published-charts"
@@ -6038,6 +6135,7 @@ mirror_published_charts() {
       return 1
     helm push "$WORK/published-charts/s5n-${v}.tgz" \
       "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null || return 1
+    sign_chart "$v" || return 1
     echo "  mirrored s5n ${v} ($(chart_annotations "$WORK/published-charts/s5n-${v}.tgz" | tr '\n' ' '))"
   done
 }
@@ -6453,7 +6551,7 @@ wiring:
   image:
     tag: ${IMAGE_TAG}
 EOF
-  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-upgrade.txt" 2>&1; then
     cat "$WORK/update-upgrade.txt"
@@ -8554,7 +8652,7 @@ rehearsal_box() {
   # and run as this script's user it would pass while box wrote files nobody else
   # could read -- which the ownership assertions below exist to catch.
   if ! box_root "$rcluster" migrate apply "$rehearsal" --yes --details \
-    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
     --kubeconfig "$WORK/rehearsal-kubeconfig" --record "$WORK/rehearsal-cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -8698,7 +8796,7 @@ PY
   rehearsal_probe "$ctx" s5n-e2e-lock-public yes closed "1.1.1.1:443" || return 1
 
   # The lock is in the grant, so an apply that changes nothing renders it again.
-  if ! "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if ! "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
     --kubeconfig "$WORK/rehearsal-kubeconfig" --paths-in-node \
     >"$WORK/apply-rehearsal-again.txt" 2>&1; then
@@ -8907,7 +9005,7 @@ migrate_box() {
   log "box migrate discover --rehearsal, and apply's refusal on the source's host"
   if ! box_migrate migrate discover --rehearsal --out "$rehearsal" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
-    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     >"$WORK/migrate-rehearsal.txt" 2>&1; then
     cat "$WORK/migrate-rehearsal.txt"; fail=1; return 0
   fi
@@ -8931,7 +9029,7 @@ migrate_box() {
   log "box migrate cutover while the source runs: refused, with a survey kept and the stop commands printed"
   if box_migrate migrate cutover --replace-cluster --yes --out "$snapshot" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
-    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
     --record "$WORK/cluster.yaml" >"$WORK/cutover-refused.txt" 2>&1; then
     echo "cutover took the final snapshot with the source still running"
@@ -9002,7 +9100,7 @@ migrate_box() {
     local out=$1; shift
     box_migrate migrate cutover --replace-cluster --yes --out "$out" \
       --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
-      --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+      --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
       --record "$WORK/cluster.yaml" "$@"
   }
@@ -9171,7 +9269,7 @@ migrate_box() {
   MIGRATE_UNITS="$WORK/migrate-units"
   apply_migrate() { # apply_migrate <transcript> [extra flags...]
     local transcript=$1; shift
-    box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
       --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
       --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
       --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -10006,7 +10104,7 @@ PY
   log "a second box migrate apply of the finished plan: one apply, nothing else"
   revision=$(helm_revision "$NS") || true
   # Root again: the state record it reads is root's, as on a real host.
-  if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -10212,7 +10310,7 @@ migrate_keep_box() {
     shift
     box_migrate migrate cutover --yes --out "$out" \
       --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
-      --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+      --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
       --record "$WORK/cluster.yaml" \
       --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -10548,7 +10646,7 @@ PY
   # ---- assertion 6: a second apply of the finished plan does nothing -------
   log "a second box migrate apply of the finished plan: one apply, nothing else"
   revision=$(helm_revision "$NS") || true
-  if ! box_migrate migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if ! box_migrate migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-releases "$CHART_RELEASES" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
