@@ -29,6 +29,12 @@ type fakeSeerr struct {
 	code        string // the message in that refusal
 	libs        []apps.SeerrLibrary
 
+	// mediaServer is Seerr's settings.main.mediaServerType (4 is NOT_CONFIGURED, 0 here
+	// too); a successful sign-in records the server as Seerr's does.
+	mediaServer int
+	serverIP    string
+	failSyncs   int // library syncs that answer 500 before one succeeds
+
 	hostname    string
 	port        int
 	serverType  int
@@ -46,7 +52,7 @@ func (f *fakeSeerr) handler() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/settings/public":
-			_, _ = w.Write([]byte(`{"initialized":` + map[bool]string{true: "true", false: "false"}[f.initialized] + `}`))
+			_ = json.NewEncoder(w).Encode(map[string]any{"initialized": f.initialized, "mediaServerType": f.mediaServer})
 		case r.URL.Path == "/api/v1/auth/jellyfin":
 			f.signIn(w, r)
 		case strings.HasPrefix(r.URL.Path, "/api/v1/settings/jellyfin"),
@@ -73,6 +79,18 @@ func (f *fakeSeerr) signIn(w http.ResponseWriter, r *http.Request) {
 	f.hostname = body.Hostname
 	f.port = body.Port
 	f.serverType = body.ServerType
+	// server/routes/auth.ts:270-289 at v3.5.2: a Seerr set up for another server refuses the
+	// route, and one whose Jellyfin address is recorded refuses a second address.
+	if f.mediaServer != 0 && f.mediaServer != 4 && f.mediaServer != 2 {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"Jellyfin login is disabled"}`))
+		return
+	}
+	if f.serverIP != "" && body.Hostname != "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"Jellyfin hostname already configured"}`))
+		return
+	}
 	if f.refusal != 0 {
 		w.WriteHeader(f.refusal)
 		_, _ = w.Write([]byte(`{"message":"` + f.code + `"}`))
@@ -82,6 +100,10 @@ func (f *fakeSeerr) signIn(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"message":"INVALID_CREDENTIALS"}`))
 		return
+	}
+	if f.serverIP == "" {
+		f.serverIP = body.Hostname
+		f.mediaServer = 2
 	}
 	http.SetCookie(w, &http.Cookie{Name: "connect.sid", Value: "s%3Asession", Path: "/"})
 	f.writes++
@@ -95,6 +117,11 @@ func (f *fakeSeerr) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/api/v1/settings/jellyfin/library/sync":
+		if f.failSyncs > 0 {
+			f.failSyncs--
+			http.Error(w, `{"message":"sync failed"}`, http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(f.libs)
 	case "/api/v1/settings/jellyfin":
 		var body struct {
@@ -512,5 +539,52 @@ func TestWiringSeerrJellyfinUnreachableSettingsFails(t *testing.T) {
 	var refused *apps.SeerrSignInRefusedError
 	if errors.As(err, &refused) {
 		t.Fatalf("a 500 was reported as an account refusal: %v", err)
+	}
+}
+
+// A run that signs in and then fails leaves Seerr with its owner and its Jellyfin address
+// but not initialized. The next run signs in again without an address: Seerr refuses a
+// second one, and a refusal on every run would be a box that never finishes.
+func TestWiringSeerrJellyfinFinishesASetupAnEarlierRunLeftHalfDone(t *testing.T) {
+	runner, f := newSeerrHarness(t)
+	f.failSyncs = 1
+	if _, err := runner.Run(context.Background()); err == nil {
+		t.Fatal("the first run's failed library sync was not an error")
+	}
+	if f.initialized || f.serverIP == "" {
+		t.Fatalf("after the first run initialized=%v server=%q, want a half-done setup", f.initialized, f.serverIP)
+	}
+	res, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the second run: %v (steps %+v)", err, res.Steps)
+	}
+	if !f.initialized {
+		t.Fatal("the second run did not finish the setup")
+	}
+	if f.hostname != "" || f.port != 0 {
+		t.Fatalf("the second sign-in sent hostname=%q port=%d, want none: Seerr already has the server", f.hostname, f.port)
+	}
+}
+
+// A Seerr someone pointed at Plex by hand, with nobody signed in yet, is theirs: the Job
+// says so instead of failing on Seerr's "Jellyfin login is disabled".
+func TestWiringSeerrJellyfinOnASeerrSetUpForPlexIsPending(t *testing.T) {
+	runner, f := newSeerrHarness(t)
+	f.mediaServer = 1
+	res, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if f.signIns != 0 {
+		t.Fatalf("the Job tried %d sign-ins on a Seerr set up for Plex", f.signIns)
+	}
+	var found bool
+	for _, st := range res.Steps {
+		if strings.HasSuffix(st.Name, "/setup") && st.Result == stepPending && strings.Contains(st.Detail, "Plex") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no pending setup row naming Plex in %+v", res.Steps)
 	}
 }

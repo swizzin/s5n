@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// seerrServerJellyfin is Seerr's MediaServerType for a Jellyfin server
-// (server/constants/server.ts at v3.5.2: PLEX = 1, JELLYFIN, EMBY, NOT_CONFIGURED).
-const seerrServerJellyfin = 2
-
 // Seerr is the request front end for a media server: Plex on a box that runs Plex,
 // Jellyfin on one that does not.
 //
@@ -38,7 +34,18 @@ func NewSeerr(baseURL string) *Seerr {
 // (server/lib/settings/index.ts at v3.5.2), and a migrated Seerr brings it true.
 type Public struct {
 	Initialized bool `json:"initialized"`
+	// MediaServerType is settings.main.mediaServerType: set by the first sign-in, before
+	// initialize, so a setup cut off between the two still says which server it chose.
+	MediaServerType int `json:"mediaServerType"`
 }
+
+// Seerr's MediaServerType (server/constants/server.ts at v3.5.2). An older Seerr that
+// does not send the field reads as 0, which is treated like NOT_CONFIGURED.
+const (
+	SeerrServerPlex     = 1
+	SeerrServerJellyfin = 2
+	SeerrServerEmby     = 3
+)
 
 // SeerrLibrary is one library Seerr synced from the media server: the server's own
 // key, the title it shows, and whether Seerr scans it.
@@ -77,16 +84,22 @@ func (s *Seerr) WaitReady(ctx context.Context, timeout time.Duration) error {
 // account has to be an administrator on the server. host and port are the server as
 // Seerr dials it: the Service, not the address a person's browser uses.
 func (s *Seerr) LoginJellyfin(ctx context.Context, username, password, host string, port int) error {
-	payload, err := json.Marshal(map[string]any{
+	// Seerr's own spelling: "hostname" is the server it reaches, not the address it serves.
+	body := map[string]any{
 		fieldUsername: username,
 		fieldPassword: password,
-		// Seerr's own spelling: the server it reaches, not the address it serves.
-		"hostname":   host,
-		fieldPort:    port,
-		"urlBase":    "",
-		"useSsl":     false,
-		"serverType": seerrServerJellyfin,
-	})
+		"serverType":  SeerrServerJellyfin,
+	}
+	// An empty host is a Seerr that already recorded its server: it refuses a second
+	// address ("Jellyfin hostname already configured", auth.ts:283) and signs in against
+	// the one it has.
+	if host != "" {
+		body["hostname"] = host
+		body[fieldPort] = port
+		body["urlBase"] = ""
+		body["useSsl"] = false
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode seerr sign-in: %w", err)
 	}

@@ -72,6 +72,20 @@ func (r *Runner) seerrJellyfin(ctx context.Context, res *Result, owned *OwnedRec
 	if err != nil {
 		return r.ensure(res, "seerr/login", apps.Unchanged, err)
 	}
+	switch public.MediaServerType {
+	case apps.SeerrServerPlex, apps.SeerrServerEmby:
+		// Someone chose another server on Seerr's own setup page and did not finish it:
+		// Seerr refuses a Jellyfin sign-in from then on, and the choice is theirs.
+		server := map[int]string{apps.SeerrServerPlex: "Plex", apps.SeerrServerEmby: "Emby"}[public.MediaServerType]
+		res.Steps = append(res.Steps, Step{Name: "seerr/setup", Result: stepPending,
+			Detail: fmt.Sprintf("this Seerr was set up for %s on its own setup page and nobody finished it: finish it there, or reset its settings so the Job can set it up for this release's Jellyfin", server)})
+		r.stepLog("seerr/setup", stepPending+" (set up for "+server+")")
+		return nil
+	case apps.SeerrServerJellyfin:
+		// An earlier run signed in and stopped before initialize: Seerr keeps the server it
+		// recorded and refuses a second address, so sign in against that one.
+		host, port = "", 0
+	}
 	if err := seerr.LoginJellyfin(ctx, c.Jellyfin.Username, password, host, port); err != nil {
 		var refused *apps.SeerrSignInRefusedError
 		if !errors.As(err, &refused) {
