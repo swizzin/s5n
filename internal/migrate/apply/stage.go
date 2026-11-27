@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/swizzin/s5n/internal/linktree"
 )
@@ -245,12 +246,23 @@ func (c *copier) entry(path string, d fs.DirEntry, err error) error {
 
 // copyFile copies one regular file, preserving its mode and mtime and owning it
 // as the release's uid. It returns the bytes written.
+//
+// info is the Lstat the caller decided on, so the open must reach that same file:
+// O_NOFOLLOW refuses a link swapped in since, O_NONBLOCK keeps a fifo from holding
+// the open, and the descriptor's own stat must still be info's regular file.
 func (c *copier) copyFile(dst, src string, info fs.FileInfo) (int64, error) {
-	in, err := os.Open(src)
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
+	opened, err := in.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return 0, fmt.Errorf("%s changed while it was being copied: migrate copies the file it checked, so run apply again", src)
+	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 	if err != nil {
 		return 0, fmt.Errorf("create %s: %w", dst, err)

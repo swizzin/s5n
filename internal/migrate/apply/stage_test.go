@@ -10,6 +10,8 @@ package apply
 // refused by name.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -182,5 +184,41 @@ func TestCopyTreeChownsToTheRelease(t *testing.T) {
 		if int(st.Uid) != uid || int(st.Gid) != gid {
 			t.Errorf("%s is owned %d:%d, want %d:%d", rel, st.Uid, st.Gid, uid, gid)
 		}
+	}
+}
+
+// The copy opens the file it checked, not whatever is at that name by then: a file
+// swapped for a link to something the copy may not carry (/etc/shadow, as root) or
+// for another file entirely is refused, and nothing is written.
+func TestCopyFileRefusesAFileSwappedAfterItsCheck(t *testing.T) {
+	src := t.TempDir()
+	checked := filepath.Join(src, "checked.conf")
+	writeFile(t, checked, "mine", 0o600)
+	secret := filepath.Join(t.TempDir(), "secret")
+	writeFile(t, secret, "not mine", 0o600)
+	other := filepath.Join(src, "other.conf")
+	writeFile(t, other, "other", 0o600)
+	info, err := os.Lstat(checked)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(src, "link.conf")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	c := &copier{dst: dst, src: src}
+	for _, swapped := range []string{link, other} {
+		into := filepath.Join(dst, filepath.Base(swapped))
+		if _, err := c.copyFile(into, swapped, info); err == nil {
+			t.Fatalf("%s was copied in place of the file that was checked", swapped)
+		}
+		if _, err := os.Lstat(into); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s was written: %v", into, err)
+		}
+	}
+	if _, err := c.copyFile(filepath.Join(dst, "checked.conf"), checked, info); err != nil {
+		t.Fatalf("the checked file itself: %v", err)
 	}
 }
