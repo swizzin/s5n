@@ -30,6 +30,7 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/selfupdate"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/tui"
 )
@@ -57,6 +58,10 @@ var version = "dev"
 // replaces its own binary, because the manager owns it and would undo that.
 var packaged string
 
+// chartReleases is the release page a chart's signature is published on;
+// --chart-releases moves it, which is how the e2e verifies the chart it pushes itself.
+var chartReleases string
+
 func main() {
 	// A signal cancels the step in flight, instead of killing box between a
 	// volume and its claim.
@@ -72,21 +77,29 @@ func main() {
 		return
 	}
 	atStart()
+	// Every command that pulls a chart reads its signature from this page, so the switch
+	// is taken here rather than in each of them.
+	page, args, err := takeDevFlag(os.Args[2:], "chart-releases")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
+	chartReleases = page
 	switch os.Args[1] {
 	case "bootstrap":
-		runBootstrap(ctx, os.Args[2:])
+		runBootstrap(ctx, args)
 	case "init":
-		runInit(ctx, os.Args[2:])
+		runInit(ctx, args)
 	case "apply":
-		runApply(ctx, os.Args[2:])
+		runApply(ctx, args)
 	case "update":
-		runUpdate(ctx, os.Args[2:])
+		runUpdate(ctx, args)
 	case "status":
-		runStatus(ctx, os.Args[2:])
+		runStatus(ctx, args)
 	case "rollback":
-		runRollback(ctx, os.Args[2:])
+		runRollback(ctx, args)
 	case "migrate":
-		runMigrate(ctx, os.Args[2:])
+		runMigrate(ctx, args)
 	default:
 		usage()
 	}
@@ -137,7 +150,7 @@ commands:
 // chartSource reads a published release; box never loads charts/ from its own
 // tree (docs/box.md, "box only uses published charts").
 func chartSource(r say.Reporter) release.ChartSource {
-	return &release.OCIChart{BoxVersion: version, Say: r}
+	return &release.OCIChart{BoxVersion: version, Say: r, VerifyChart: selfupdate.VerifyChartSignature, ReleasesURL: chartReleases}
 }
 
 // terminalSet is read once, so a run cannot be half live and half plain.

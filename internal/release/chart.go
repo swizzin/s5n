@@ -37,6 +37,9 @@ type Chart struct {
 	Pins Versions
 	// Archive is the packaged chart (.tgz), when it came from a registry.
 	Archive []byte
+	// Digest is that archive's manifest digest in the registry: the digest its
+	// release's signature covers, and the one box pulled. A directory chart has none.
+	Digest string
 }
 
 // ChartRef says which release to load; empty Version is the newest this box

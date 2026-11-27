@@ -56,6 +56,9 @@ type migrateApplyFlags struct {
 	details *bool
 	// yolo allows a downgrade: an older app on a newer config.
 	yolo *bool
+	// source is the one release this run checks and installs; a test supplies the
+	// checkout's own, and a run leaves it nil for the registry.
+	source release.ChartSource
 }
 
 func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
@@ -239,7 +242,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		return fmt.Errorf("this box is locked from a rehearsal snapshot, and a final one never applies locked: a rehearsal box is disposable, so run this snapshot on a clean host (or one with no box)")
 	}
 	raw := opened.Plan
-	charts := &chartRelease{flags: o.chart, out: out}
+	charts := &chartRelease{flags: o.chart, out: out, source: o.source}
 	// installed means this run is the installer: it shows the run, asks once,
 	// then does it. agreed is that answer; nil on an existing box, where the
 	// question comes inside apply.Run after every check.

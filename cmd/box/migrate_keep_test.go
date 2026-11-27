@@ -15,8 +15,44 @@ import (
 	"testing"
 
 	"github.com/swizzin/s5n/internal/migrate/discover"
+	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/release/releasetest"
 	"github.com/swizzin/s5n/internal/say"
 )
+
+// checkoutChart is charts/s5n read the way a pull would: the files every command
+// checks a seedbox against, without a registry or a signature over one.
+func checkoutChart(t *testing.T) release.ChartSource {
+	t.Helper()
+	dir := filepath.Join("..", "..", "charts", "s5n")
+	read := func(name string) []byte {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return data
+	}
+	chart := release.Chart{
+		Ref:      "charts/s5n",
+		Name:     "s5n",
+		Version:  testChartVersion,
+		Values:   read("values.yaml"),
+		Schema:   read("values.schema.json"),
+		Catalog:  read("catalog.yaml"),
+		Variants: read("variants.yaml"),
+		Pins:     releasetest.Pins(t),
+	}
+	return chartSourceFunc(func(context.Context, release.ChartRef) (release.Chart, error) {
+		return chart, nil
+	})
+}
+
+// chartSourceFunc is a release.ChartSource a test writes out of one function.
+type chartSourceFunc func(context.Context, release.ChartRef) (release.Chart, error)
+
+func (f chartSourceFunc) Load(ctx context.Context, ref release.ChartRef) (release.Chart, error) {
+	return f(ctx, ref)
+}
 
 func TestCutoverStopsOnABlockerAfterTheFinalSnapshot(t *testing.T) {
 	manifests, root := discoverySource(t)
@@ -109,6 +145,9 @@ func TestCutoverKeepPathGoesOnWithoutABlocker(t *testing.T) {
 	*o.apply.valuesPath = filepath.Join(dir, "values.yaml")
 	*o.apply.grantPath = filepath.Join(dir, "grant.yaml")
 	*o.apply.install.record = filepath.Join(dir, "cluster.yaml")
+	// The install reads one release; this is the checkout's, so the test needs no
+	// registry and no signature over one.
+	o.apply.source = checkoutChart(t)
 	// Two buffers: the screen a person reads and the run log, which is the one
 	// that carries the file a run opened.
 	text := &bytes.Buffer{}

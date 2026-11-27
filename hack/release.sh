@@ -12,13 +12,17 @@
 #   stamp-digest <workdir>    (DIGEST) copy charts/s5n and stamp s5n.default.digest
 #   package-chart <workdir>   (VERSION, DIGEST, AUTOMATED, IMAGE) validate, package,
 #                             lint and render
+#   chart-digest <output>     (VERSION, CHART_REPO) the digest an already-published
+#                             chart's tag points at now
+#   sign-chart <dist-dir>     (BOX_SIGNING_KEY, VERSION, CHART_DIGEST) write the chart's
+#                             signature over that digest
 #   sign-sums <dist-dir>      (BOX_SIGNING_KEY, VERSION) sign sha256sums.txt
 #   notes <body>              (VERSION) write the release body and print it
 #
 # Inputs are the variables release.yaml's steps already set. Paths must be absolute. The
-# pushes -- helm registry login, helm push, docker push, gh release create, git tag --
-# stay in the workflow: a script that could publish is a script that can publish by
-# accident.
+# pushes -- helm registry login, helm push, docker push, gh release create, gh release
+# upload, git tag -- stay in the workflow: a script that could publish is a script that can
+# publish by accident.
 set -euo pipefail
 
 usage() {
@@ -27,6 +31,8 @@ usage: hack/release.sh route <output>
        hack/release.sh verify-version
        hack/release.sh stamp-digest <workdir>
        hack/release.sh package-chart <workdir>
+       hack/release.sh chart-digest <output>
+       hack/release.sh sign-chart <dist-dir>
        hack/release.sh sign-sums <dist-dir>
        hack/release.sh notes <body.md>
 USAGE
@@ -218,6 +224,54 @@ step_package_chart() {
   echo "packaged $(basename "$tgz") naming ${want}"
 }
 
+# step_chart_digest asks a registry what an already-published s5n-v<version> tag points
+# at now. It exists to sign a chart published before box checked signatures, so it reads
+# the digest from the registry: a manifest digest cannot be computed from a local archive.
+step_chart_digest() {
+  local out=${1:-}
+  need_path output "$out"
+  : "${VERSION:?VERSION is unset}"
+  local ref=${CHART_REPO:-oci://ghcr.io/swizzin/charts}
+  ref="${ref#oci://}"
+  local host=${ref%%/*}
+  local path="${ref#*/}/s5n"
+  # A loopback registry is the rehearsal's own and speaks plain HTTP; a remote one is
+  # never asked for a token without TLS, because that token can push.
+  local scheme=https
+  case "$host" in
+  localhost|localhost:*|127.*|'[::1]'|'[::1]':*) scheme=http ;;
+  esac
+  local token digest
+  # ghcr answers an unauthenticated pull token for a public package; an empty one is
+  # what a registry that needs no token returns.
+  token=$(curl -fsSL "${scheme}://${host}/token?scope=repository:${path}:pull" |
+    jq -r '.token // empty')
+  digest=$(curl -fsSL -o /dev/null -D - ${token:+-H "Authorization: Bearer ${token}"} \
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    "${scheme}://${host}/v2/${path}/manifests/${VERSION}" | tr -d '\r' |
+    sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' | head -1)
+  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "release: ${host}/${path}:${VERSION} answered no manifest digest (got '${digest}')" >&2
+    exit 1
+  fi
+  echo "digest=${digest}"
+  echo "digest=${digest}" >> "$out"
+}
+
+# step_sign_chart writes the signature a chart release publishes over its manifest digest.
+# box resolves the tag, checks this signature and pulls that digest, and refuses a chart it
+# cannot verify, so a chart release without this asset is one no box installs. It runs
+# here, not in the workflow, so the rehearsal signs with a throwaway key through the same
+# code.
+step_sign_chart() {
+  local dir=${1:-}
+  need_path dist-dir "$dir"
+  : "${VERSION:?VERSION is unset}"
+  : "${CHART_DIGEST:?CHART_DIGEST is unset}"
+  mkdir -p "$dir"
+  go run ./hack/sign sign-chart "$VERSION" "$CHART_DIGEST" "$dir"
+}
+
 # step_sign_sums signs the checksums the box release publishes. box refuses a release
 # whose signature it cannot verify and never trusts the checksums alone, so the step fails
 # here rather than publishing one nobody can install. It runs here, not in the workflow, so
@@ -268,6 +322,8 @@ case "${1:-}" in
   verify-version) step_verify_version ;;
   stamp-digest) step_stamp_digest "${2:-}" ;;
   package-chart) step_package_chart "${2:-}" ;;
+  chart-digest) step_chart_digest "${2:-}" ;;
+  sign-chart) step_sign_chart "${2:-}" ;;
   sign-sums) step_sign_sums "${2:-}" ;;
   notes) step_notes "${2:-}" ;;
   *) usage ;;

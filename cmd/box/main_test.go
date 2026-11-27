@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"flag"
 	"io"
 	"os"
@@ -197,6 +199,41 @@ func TestChartFlagsDefaultToTheNewestRelease(t *testing.T) {
 	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) })
 	if got, want := applyF.options().ChartRef(), (release.ChartRef{Repo: release.DefaultChartRepo}); got != want {
 		t.Fatalf("apply default = %+v, want %+v", got, want)
+	}
+}
+
+// Every chart box pulls is verified before it is read: the source must carry the key's
+// verifier and the page its signature is published on. A source built without them either
+// refuses everything (a box with no key) or reads an unsigned page (no business at all).
+func TestTheChartSourceVerifiesWhatItPulls(t *testing.T) {
+	previous := chartReleases
+	t.Cleanup(func() { chartReleases = previous })
+	chartReleases = "http://127.0.0.1:8080/releases"
+
+	for name, src := range map[string]release.ChartSource{
+		"apply, init and migrate": chartSource(&say.Plain{W: io.Discard}),
+		"update":                  updateChartSource(&say.Plain{W: io.Discard}),
+	} {
+		oci, ok := src.(*release.OCIChart)
+		if !ok {
+			t.Fatalf("%s: the chart source is %T, want the registry", name, src)
+		}
+		if oci.VerifyChart == nil {
+			t.Fatalf("%s: the chart source would install a chart it cannot verify", name)
+		}
+		if oci.ReleasesURL != chartReleases {
+			t.Fatalf("%s: the chart source reads signatures from %q, want %q", name, oci.ReleasesURL, chartReleases)
+		}
+		// The verifier is the key compiled into box, not a stub that says yes: a
+		// signature nobody made is refused.
+		bogus := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+		err := oci.VerifyChart(testChartVersion, "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", []byte(bogus))
+		if err == nil {
+			t.Fatalf("%s: the chart source verified a signature nobody made", name)
+		}
+		if !strings.Contains(err.Error(), "does not verify") {
+			t.Fatalf("%s: the refusal is %q, want the signature's refusal", name, err)
+		}
 	}
 }
 

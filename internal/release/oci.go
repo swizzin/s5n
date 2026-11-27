@@ -18,6 +18,7 @@ import (
 	helmregistry "helm.sh/helm/v4/pkg/registry"
 	"oras.land/oras-go/v2/errdef"
 	orasregistry "oras.land/oras-go/v2/registry"
+	"oras.land/oras-go/v2/registry/remote"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
 
@@ -37,8 +38,9 @@ const MaxChartArchive = 8 << 20
 // OCIChart pulls a chart with Helm's registry client, the same code that pushes
 // it, so the tag-to-version mapping (`_` for `+`) is not reimplemented.
 //
-// The artifact is untrusted: the archive is capped before unpacking, files are
-// capped individually, and schema $refs are refused (internal/seedbox.Validate).
+// The artifact is untrusted: its release's signature is checked over the digest the tag
+// resolves to before any archive is read, the archive is then capped before unpacking,
+// files are capped individually, and schema $refs are refused (internal/seedbox.Validate).
 type OCIChart struct {
 	// BoxVersion is this box's version; "dev" skips the min-box check once.
 	BoxVersion string
@@ -47,6 +49,13 @@ type OCIChart struct {
 	// Retry is bootstrap's download policy (internal/fetch): GET/HEAD, 5xx,
 	// 429, a refused, reset or timed-out connection, four attempts.
 	Retry fetch.Policy
+	// VerifyChart checks a release's published signature over its manifest digest.
+	// cmd/box sets it from internal/selfupdate, which holds the key box is built
+	// with; nil refuses every chart, because a box with no key can trust none.
+	VerifyChart func(version, digest string, signature []byte) error
+	// ReleasesURL is where the chart's GitHub releases are, where the signature is
+	// published; empty is DefaultReleasesURL.
+	ReleasesURL string
 
 	devOnce sync.Once
 
@@ -169,6 +178,9 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef, floor string) ([]
 // puller is one registry session and its private Helm home; Close removes it.
 type puller struct {
 	repo, base string
+	plain      bool
+	ctx        context.Context
+	http       *http.Client
 	client     *helmregistry.Client
 	env        *helmEnv
 }
@@ -197,7 +209,13 @@ func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 	if err != nil {
 		return nil, fmt.Errorf("chart registry for %s: %w", repo, err)
 	}
-	client, err := o.client(ctx, env, plain)
+	// One client for the manifest requests and the release page: the same retry
+	// policy, the same context, and the same cap on what a body may be.
+	httpClient := &http.Client{
+		Transport: o.transport(ctx, nil),
+		Timeout:   2 * time.Minute,
+	}
+	client, err := o.client(httpClient, env, plain)
 	if err != nil {
 		env.Close()
 		return nil, fmt.Errorf("chart registry for %s: %w", repo, err)
@@ -207,10 +225,11 @@ func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 			o.logf("box was built without a version (%s): skipping the chart's %s check", DevVersion, MinBoxAnnotation)
 		})
 	}
-	return &puller{repo: repo, base: base, client: client, env: env}, nil
+	return &puller{repo: repo, base: base, plain: plain, ctx: ctx, http: httpClient, client: client, env: env}, nil
 }
 
-// chart pulls a version at most once; a failure is not remembered.
+// chart resolves one version's tag to its digest, checks the signature over it, and
+// pulls by that digest. A pulled chart is cached; a failure is not.
 func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	o.mu.Lock()
 	chart, ok := o.pulled[version]
@@ -218,7 +237,14 @@ func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	if ok {
 		return chart, nil
 	}
-	chart, err := o.pull(p.client, p.repo, p.base, version)
+	digest, err := o.resolve(p, version)
+	if err != nil {
+		return Chart{}, err
+	}
+	if err := o.verifySignature(p, version, digest); err != nil {
+		return Chart{}, err
+	}
+	pulled, err := o.pull(p.client, p.repo, p.base, version, digest)
 	if err != nil {
 		return Chart{}, err
 	}
@@ -226,19 +252,37 @@ func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	if o.pulled == nil {
 		o.pulled = make(map[string]Chart)
 	}
-	o.pulled[version] = chart
+	o.pulled[version] = pulled
 	o.mu.Unlock()
-	return chart, nil
+	return pulled, nil
+}
+
+// resolve asks the registry which manifest a tag names now: the digest a signature
+// covers and the digest box pulls. An anonymous client, as every pull is.
+func (o *OCIChart) resolve(p *puller, version string) (string, error) {
+	repo, err := remote.NewRepository(p.base)
+	if err != nil {
+		return "", fmt.Errorf("chart registry for %s: %w", p.repo, err)
+	}
+	repo.PlainHTTP = p.plain
+	repo.Client = &orasauth.Client{Client: p.http}
+	desc, err := repo.Resolve(p.ctx, chartTag(version))
+	if err != nil {
+		return "", o.pullError(p.repo, version, err)
+	}
+	return desc.Digest.String(), nil
+}
+
+// chartTag is the tag a version is published under: an OCI tag cannot carry a plus, so
+// Helm replaces it with an underscore and box asks for the tag Helm pushed.
+func chartTag(version string) string {
+	return strings.ReplaceAll(version, "+", "_")
 }
 
 // client builds the registry client, discarding Helm's own output. The
 // authorizer carries no credential, so neither Helm's nor docker's config.json
 // is queried: every pull is anonymous.
-func (o *OCIChart) client(ctx context.Context, env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
-	httpClient := &http.Client{
-		Transport: o.transport(ctx, nil),
-		Timeout:   2 * time.Minute,
-	}
+func (o *OCIChart) client(httpClient *http.Client, env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
 	opts := []helmregistry.ClientOption{
 		helmregistry.ClientOptWriter(io.Discard),
 		helmregistry.ClientOptHTTPClient(httpClient),
@@ -285,12 +329,21 @@ func (t pullContext) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req.WithContext(ctx))
 }
 
-// pull downloads one version and loads it as Helm will.
-func (o *OCIChart) pull(client *helmregistry.Client, repo, base, version string) (Chart, error) {
-	ref := base + ":" + version
-	got, err := client.Pull(ref)
+// pull downloads the digest the signature covers and loads it as Helm will. The digest
+// is checked again: a registry answers a digest request from content-addressed storage, so
+// anything else is a registry that cannot be trusted with what box installs.
+func (o *OCIChart) pull(client *helmregistry.Client, repo, base, version, digest string) (Chart, error) {
+	got, err := client.Pull(base + "@" + digest)
 	if err != nil {
 		return Chart{}, o.pullError(repo, version, err)
+	}
+	if got.Manifest == nil || got.Manifest.Digest != digest {
+		answered := "nothing"
+		if got.Manifest != nil {
+			answered = got.Manifest.Digest
+		}
+		return Chart{}, fmt.Errorf("release %s: the registry answered with manifest %s, not the %s its signature covers: refusing to install it",
+			repo+":"+version, answered, digest)
 	}
 	if got.Chart == nil || len(got.Chart.Data) == 0 {
 		return Chart{}, fmt.Errorf("release %s: the registry returned no chart layer", repo+":"+version)
@@ -312,6 +365,7 @@ func (o *OCIChart) pull(client *helmregistry.Client, repo, base, version string)
 		return Chart{}, err
 	}
 	chart.Archive = got.Chart.Data
+	chart.Digest = digest
 	return chart, nil
 }
 

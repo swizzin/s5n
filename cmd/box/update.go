@@ -108,7 +108,7 @@ func (foldedReceipt) Receipt(string, []say.ReceiptRow) {}
 // updateChartSource is one OCIChart, so the settled release is each step's
 // install, from one cache.
 func updateChartSource(out say.Reporter) *release.OCIChart {
-	return &release.OCIChart{BoxVersion: version, Say: out}
+	return &release.OCIChart{BoxVersion: version, Say: out, VerifyChart: selfupdate.VerifyChartSignature, ReleasesURL: chartReleases}
 }
 
 // runUpdate replaces box when a newer release verifies, then moves the chart

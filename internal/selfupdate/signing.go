@@ -100,17 +100,81 @@ func VerifySums(key ed25519.PublicKey, version string, sums, signature []byte) e
 	if len(key) != ed25519.PublicKeySize {
 		return errNoKey
 	}
-	// A stray CR from a proxy's rewrite is not a different signature.
-	text := strings.TrimSpace(string(signature))
-	sig, err := base64.StdEncoding.DecodeString(text)
+	sig, err := signatureBytes("sha256sums.txt.sig", signature)
 	if err != nil {
-		return fmt.Errorf("sha256sums.txt.sig is not base64 (%v): refusing to install a release whose signature cannot be read", err)
-	}
-	if len(sig) != ed25519.SignatureSize {
-		return fmt.Errorf("sha256sums.txt.sig is %d bytes, want %d: refusing to install a release whose signature cannot be read", len(sig), ed25519.SignatureSize)
+		return err
 	}
 	if !ed25519.Verify(key, signedMessage(version, sums), sig) {
 		return fmt.Errorf("sha256sums.txt for %s%s does not verify against the signing key compiled into this box (the signature covers the release's tag as well as its checksums): refusing to install a release this box cannot trust", tagPrefix, version)
+	}
+	return nil
+}
+
+// VerifyChartSignature checks a chart's signature against the key box was built with.
+// cmd/box fills release's verification seam with it, so every pulled chart is checked the
+// way a box release is, before anything of it is read. A box built without a key refuses
+// in its own words: there is no path that installs an unverified chart.
+func VerifyChartSignature(version, digest string, signature []byte) error {
+	key, err := ParsePublicKey(signingKey)
+	if err != nil {
+		if errors.Is(err, errNoKey) {
+			return errors.New("this box was built without a signing key, so it cannot verify a chart and will not install one: replace box by hand")
+		}
+		return fmt.Errorf("the signing key is not a key (%v), so box cannot verify a chart: replace box by hand", err)
+	}
+	return VerifyChart(key, version, digest, signature)
+}
+
+// signatureBytes decodes one .sig asset: base64 of the 64 signature bytes, on one line.
+// A stray CR from a proxy's rewrite is not a different signature.
+func signatureBytes(name string, signature []byte) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signature)))
+	if err != nil {
+		return nil, fmt.Errorf("%s is not base64 (%v): refusing to install a release whose signature cannot be read", name, err)
+	}
+	if len(raw) != ed25519.SignatureSize {
+		return nil, fmt.Errorf("%s is %d bytes, want %d: refusing to install a release whose signature cannot be read", name, len(raw), ed25519.SignatureSize)
+	}
+	return raw, nil
+}
+
+// chartLine separates a chart's signature from a box release's and names its tag
+// family, so no signature of one kind can be read as the other.
+const chartLine = "s5n chart s5n-v"
+
+// ChartMessage is what a chart's signature covers: the line naming its release,
+// then the chart's manifest digest. The version is in the message because a tag
+// can be moved: a signature over a digest alone would still be this chart's, and
+// one over a version alone would sign whatever the tag pointed at.
+func ChartMessage(version, digest string) []byte {
+	message := make([]byte, 0, len(chartLine)+len(version)+len(digest)+2)
+	message = append(message, chartLine...)
+	message = append(message, version...)
+	message = append(message, '\n')
+	message = append(message, digest...)
+	return append(message, '\n')
+}
+
+// SignChart returns the chart release's signature, the asset published on its
+// s5n-v<version> GitHub release. It covers the digest, so box installs the bytes
+// the signer saw and not whatever a tag points at later.
+func SignChart(seed ed25519.PrivateKey, version, digest string) []byte {
+	return []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(seed, ChartMessage(version, digest))) + "\n")
+}
+
+// VerifyChart checks a chart's manifest digest against the signature its release
+// publishes. A chart installs as root, so a missing or unverifiable signature is
+// a refusal; box has no flag that skips it.
+func VerifyChart(key ed25519.PublicKey, version, digest string, signature []byte) error {
+	if len(key) != ed25519.PublicKeySize {
+		return errNoKey
+	}
+	sig, err := signatureBytes("chart.sig", signature)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(key, ChartMessage(version, digest), sig) {
+		return fmt.Errorf("the chart's signature does not verify against the signing key compiled into this box (it covers s5n-v%s and the chart's digest): refusing to install a chart this box cannot trust", version)
 	}
 	return nil
 }

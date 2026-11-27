@@ -301,6 +301,7 @@ git clone --no-local --quiet . "$sclone"
 cp -p "$release" "$sclone/hack/release.sh"
 cp -p hack/sign/main.go "$sclone/hack/sign/main.go"
 cp -p internal/selfupdate/*.go "$sclone/internal/selfupdate/"
+cp -p internal/release/signature.go "$sclone/internal/release/"
 
 # signcmd runs hack/sign where the release runs it: from the replica's root, so the
 # signing.pub it reads is the one a box built there would embed. Built once rather than run
@@ -390,6 +391,97 @@ if [ "$rc" -eq 0 ]; then
   ok "release.yaml gives the signing step the version it signs for"
 else
   bad "release.yaml does not give the signing step needs.route.outputs.version: sign-sums refuses without one"
+fi
+
+# ---- f. the chart's signature ------------------------------------------------
+# box resolves a chart's tag to a digest, checks the signature the chart's s5n-v<version>
+# release publishes over that digest, and pulls by it: a spec naming only a tag installs
+# whatever the tag points at when the pull runs.
+echo "== f. the chart's signature"
+signed="$tmp/signed"
+chart_digest="sha256:$(printf 'c%.0s' {1..64})"
+expect_ok "sign-chart signs the chart's digest for its release" "signed chart.sig for s5n-v${chart_version}" \
+  env BOX_SIGNING_KEY="$seed" VERSION="$chart_version" CHART_DIGEST="$chart_digest" \
+  "$sclone/hack/release.sh" sign-chart "$signed"
+expect_ok "the chart's signature is one box accepts" "chart.sig: signature ok for s5n-v${chart_version}" \
+  signcmd verify-chart "$chart_version" "$chart_digest" "$signed/chart.sig" "$published"
+expect_fail "the chart's signature does not verify as another release's" "does not verify" \
+  signcmd verify-chart "$auto_version" "$chart_digest" "$signed/chart.sig" "$published"
+expect_fail "sign-chart refuses something that is not a digest instead of signing it" \
+  "not a chart's manifest digest" \
+  env BOX_SIGNING_KEY="$seed" VERSION="$chart_version" CHART_DIGEST="$chart_version" \
+  "$sclone/hack/release.sh" sign-chart "$tmp/signed-bad"
+
+# Signing a chart that is already published reads its digest from the registry: a manifest
+# digest cannot be computed from a local archive, and the tag is the only thing that says
+# which bytes a host would pull now.
+portfile="$tmp/registry.port"
+python3 - "$portfile" "$chart_digest" <<'PY' &
+import http.server
+import json
+import sys
+
+portfile, digest = sys.argv[1], sys.argv[2]
+
+
+class Registry(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"{}"
+        if self.path.startswith("/token"):
+            body = json.dumps({"token": "rehearsal"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        elif self.path.startswith("/v2/") and "/manifests/" in self.path:
+            self.send_response(200)
+            self.send_header("Docker-Content-Digest", digest)
+        else:
+            body = b""
+            self.send_response(404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Registry)
+open(portfile, "w").write(str(server.server_address[1]))
+server.serve_forever()
+PY
+fake_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$portfile" ] && break
+  sleep 0.05
+done
+if [ ! -s "$portfile" ]; then
+  bad "the rehearsal's registry never started"
+fi
+digest_out="$tmp/digest.txt"
+expect_ok "chart-digest reads the digest a published tag points at now" "digest=${chart_digest}" \
+  env VERSION="$chart_version" CHART_REPO="oci://127.0.0.1:$(cat "$portfile")/charts" \
+  "$release" chart-digest "$digest_out"
+has "chart-digest writes the line the workflow reads back" "$digest_out" "digest=${chart_digest}"
+kill "$fake_pid" 2>/dev/null || true
+
+# The release has to sign the chart and upload the asset, or every box refuses the chart it
+# publishes: the asset's name is box's, so it is read out of the code box is built from.
+chart_asset=$(sed -n 's/^const ChartSignatureAsset = "\(.*\)"$/\1/p' internal/release/signature.go)
+has "release.yaml uploads the chart's signature the release job signs" \
+  .github/workflows/release.yaml "hack/release.sh sign-chart"
+has "release.yaml uploads the asset name box fetches" \
+  .github/workflows/release.yaml "${chart_asset}"
+has "release.yaml gives the chart's signing step the release's secret" \
+  .github/workflows/release.yaml "secrets.BOX_SIGNING_KEY"
+run python3 -c 'import sys
+text = open(sys.argv[1]).read()
+at = text.index("hack/release.sh sign-chart")
+window = text[max(0, at - 1500):at]
+sys.exit(0 if "CHART_DIGEST" in window else 1)' .github/workflows/release.yaml
+if [ "$rc" -eq 0 ]; then
+  ok "release.yaml gives the chart's signing step the digest to sign"
+else
+  bad "release.yaml does not give the chart's signing step a CHART_DIGEST: sign-chart refuses without one"
 fi
 
 if [ "$fail" -ne 0 ]; then

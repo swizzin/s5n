@@ -127,11 +127,11 @@ func packageChart(t *testing.T, dir string) []byte {
 }
 
 func TestOCIRoundTrip(t *testing.T) {
-	host := registry(t)
-	want := pushChart(t, host)
+	c := newCharts(t)
+	want := c.chart(t)
 	// The box is the chart's own version, so it meets min-box.
-	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want)}).Load(context.Background(), ChartRef{
-		Repo:    "oci://" + host + "/charts/s5n",
+	pulled, err := c.source(chartVersion(t, want)).Load(context.Background(), ChartRef{
+		Repo:    c.ref().Repo,
 		Version: chartVersion(t, want),
 	})
 	if err != nil {
@@ -178,25 +178,25 @@ func TestOCIRoundTrip(t *testing.T) {
 }
 
 func TestOCINoPublishedRelease(t *testing.T) {
-	host := registry(t)
-	pushChart(t, host)
-	_, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
-		Repo:    "oci://" + host + "/charts/s5n",
+	c := newCharts(t)
+	c.chart(t)
+	_, err := c.source("0.0.0").Load(context.Background(), ChartRef{
+		Repo:    c.ref().Repo,
 		Version: "9.9.9",
 	})
 	if err == nil {
 		t.Fatal("pull of a version nobody published succeeded")
 	}
-	want := "no published release 9.9.9 at oci://" + host + "/charts/s5n: nothing with that version has been published"
+	want := "no published release 9.9.9 at " + c.ref().Repo + ": nothing with that version has been published"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err, want)
 	}
 }
 
 func TestOCIEmptyRepository(t *testing.T) {
-	host := registry(t)
-	repo := "oci://" + host + "/charts/s5n"
-	_, err := (&OCIChart{BoxVersion: "0.1.0"}).Load(context.Background(), ChartRef{Repo: repo})
+	c := newCharts(t)
+	repo := c.ref().Repo
+	_, err := c.source("0.1.0").Load(context.Background(), ChartRef{Repo: repo})
 	if err == nil {
 		t.Fatal("pull from an empty repository succeeded")
 	}
@@ -207,9 +207,9 @@ func TestOCIEmptyRepository(t *testing.T) {
 }
 
 func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
-	host := registry(t)
+	c := newCharts(t)
 	// This box matches the shipped chart, the newest it can use.
-	box := chartVersion(t, pushChart(t, host))
+	box := chartVersion(t, c.chart(t))
 
 	// A second release, 0.9.0, whose floor is above this box.
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -218,13 +218,12 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	setChartVersion(t, ch, "0.9.0", "9.9.9")
-	if err := pushData(t, host+"/charts/s5n:0.9.0", archiveChart(t, ch)); err != nil {
-		t.Fatalf("push 0.9.0: %v", err)
-	}
+	c.push(t, "0.9.0", archiveChart(t, ch))
 
 	var log bytes.Buffer
-	src := &OCIChart{BoxVersion: box, Say: &say.Plain{W: &log}}
-	got, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
+	src := c.source(box)
+	src.Say = &say.Plain{W: &log}
+	got, err := src.Load(context.Background(), ChartRef{Repo: c.ref().Repo})
 	if err != nil {
 		t.Fatalf("pull: %v\n%s", err, log.String())
 	}
@@ -237,22 +236,20 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 }
 
 func TestOCIRefusesAFloorAboveBox(t *testing.T) {
-	host := registry(t)
-	pushChart(t, host)
+	c := newCharts(t)
+	c.chart(t)
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
 	ch, err := loader.LoadArchive(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
 	setChartVersion(t, ch, "0.4.0", "0.5.0")
-	if err := pushData(t, host+"/charts/s5n:0.4.0", archiveChart(t, ch)); err != nil {
-		t.Fatalf("push 0.4.0: %v", err)
-	}
+	c.push(t, "0.4.0", archiveChart(t, ch))
 
 	f := newFakes(t)
-	f.app.Charts = &OCIChart{BoxVersion: "0.4.0"}
+	f.app.Charts = c.source("0.4.0")
 	_, err = f.app.Apply(context.Background(), Options{
-		ChartRepo:    "oci://" + host + "/charts/s5n",
+		ChartRepo:    c.ref().Repo,
 		ChartVersion: "0.4.0",
 		GrantPath:    f.grantPath,
 		ValuesPath:   f.values,
@@ -270,12 +267,13 @@ func TestOCIRefusesAFloorAboveBox(t *testing.T) {
 }
 
 func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
-	host := registry(t)
-	pushChart(t, host)
+	c := newCharts(t)
+	c.chart(t)
 	var log bytes.Buffer
-	src := &OCIChart{BoxVersion: DevVersion, Say: &say.Plain{W: &log}}
+	src := c.source(DevVersion)
+	src.Say = &say.Plain{W: &log}
 	for i := 0; i < 2; i++ {
-		if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}); err != nil {
+		if _, err := src.Load(context.Background(), ChartRef{Repo: c.ref().Repo}); err != nil {
 			t.Fatalf("pull %d: %v", i, err)
 		}
 	}
@@ -285,7 +283,7 @@ func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 }
 
 func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
-	host := registry(t)
+	c := newCharts(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
 	for _, rel := range []struct{ version, minBox, upgradeFrom string }{
 		{"0.7.0", "0.4.0", "0.4.0"},
@@ -297,13 +295,11 @@ func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
 			t.Fatal(err)
 		}
 		setChartFloors(t, ch, rel.version, rel.minBox, rel.upgradeFrom)
-		if err := pushData(t, host+"/charts/s5n:"+rel.version, archiveChart(t, ch)); err != nil {
-			t.Fatalf("push %s: %v", rel.version, err)
-		}
+		c.push(t, rel.version, archiveChart(t, ch))
 	}
 
-	src := &OCIChart{BoxVersion: "0.4.0"}
-	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "")
+	src := c.source("0.4.0")
+	got, err := src.Releases(context.Background(), ChartRef{Repo: c.ref().Repo}, "")
 	if err != nil {
 		t.Fatalf("Releases: %v", err)
 	}
@@ -336,7 +332,7 @@ func vintageChart(t *testing.T, base []byte, version string) []byte {
 }
 
 func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
-	host := registry(t)
+	c := newCharts(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
 	for _, rel := range []struct{ version, minBox, upgradeFrom string }{
 		{"0.5.0", "0.4.0", "0.4.0"},
@@ -347,16 +343,12 @@ func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
 			t.Fatal(err)
 		}
 		setChartFloors(t, ch, rel.version, rel.minBox, rel.upgradeFrom)
-		if err := pushData(t, host+"/charts/s5n:"+rel.version, archiveChart(t, ch)); err != nil {
-			t.Fatalf("push %s: %v", rel.version, err)
-		}
+		c.push(t, rel.version, archiveChart(t, ch))
 	}
-	if err := pushData(t, host+"/charts/s5n:0.0.9", vintageChart(t, base, "0.0.9")); err != nil {
-		t.Fatalf("push a release from before the platform layer: %v", err)
-	}
+	c.push(t, "0.0.9", vintageChart(t, base, "0.0.9"))
 
-	src := &OCIChart{BoxVersion: "0.4.0"}
-	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "0.5.0")
+	src := c.source("0.4.0")
+	got, err := src.Releases(context.Background(), ChartRef{Repo: c.ref().Repo}, "0.5.0")
 	if err != nil {
 		t.Fatalf("Releases from 0.5.0 up: %v", err)
 	}
@@ -373,10 +365,10 @@ func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
 }
 
 func TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty(t *testing.T) {
-	host := registry(t)
-	pushChart(t, host)
-	src := &OCIChart{BoxVersion: "0.4.0"}
-	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "9.0.0")
+	c := newCharts(t)
+	c.chart(t)
+	src := c.source("0.4.0")
+	got, err := src.Releases(context.Background(), ChartRef{Repo: c.ref().Repo}, "9.0.0")
 	if err != nil {
 		t.Fatalf("Releases with a floor above every published release: %v", err)
 	}
@@ -389,13 +381,11 @@ func TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty(t *testing.T) {
 }
 
 func TestOCIReleasesFailsOnAnUnreadableReleaseAtOrAboveTheFloor(t *testing.T) {
-	host := registry(t)
+	c := newCharts(t)
 	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
-	if err := pushData(t, host+"/charts/s5n:0.5.0", vintageChart(t, base, "0.5.0")); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-	src := &OCIChart{BoxVersion: "0.4.0"}
-	_, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "0.4.0")
+	c.push(t, "0.5.0", vintageChart(t, base, "0.5.0"))
+	src := c.source("0.4.0")
+	_, err := src.Releases(context.Background(), ChartRef{Repo: c.ref().Repo}, "0.4.0")
 	if err == nil {
 		t.Fatal("a release with no platform.yaml was listed as readable")
 	}
@@ -606,14 +596,14 @@ func treeSnapshot(t *testing.T, root string) string {
 }
 
 func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
-	host := registry(t)
-	want := pushChart(t, host)
+	c := newCharts(t)
+	want := c.chart(t)
 
 	poison := poisonRegistryHome(t)
 	before := treeSnapshot(t, poison)
 
-	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want)}).Load(context.Background(), ChartRef{
-		Repo:    "oci://" + host + "/charts/s5n",
+	pulled, err := c.source(chartVersion(t, want)).Load(context.Background(), ChartRef{
+		Repo:    c.ref().Repo,
 		Version: chartVersion(t, want),
 	})
 	if err != nil {
@@ -628,8 +618,8 @@ func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 }
 
 func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
-	host := registry(t)
-	want := pushChart(t, host)
+	c := newCharts(t)
+	want := c.chart(t)
 	version := chartVersion(t, want)
 
 	root := t.TempDir()
@@ -639,15 +629,15 @@ func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", sandbox)
 
-	src := &OCIChart{BoxVersion: version}
-	if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n", Version: version}); err != nil {
+	src := c.source(version)
+	if _, err := src.Load(context.Background(), ChartRef{Repo: c.ref().Repo, Version: version}); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	if left := tempEntries(t, sandbox); len(left) != 0 {
 		t.Fatalf("a successful pull left %v behind in its temporary directory", left)
 	}
 
-	if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n", Version: "9.9.9"}); err == nil {
+	if _, err := src.Load(context.Background(), ChartRef{Repo: c.ref().Repo, Version: "9.9.9"}); err == nil {
 		t.Fatal("a version nobody published must fail the pull")
 	}
 	if left := tempEntries(t, sandbox); len(left) != 0 {
@@ -718,11 +708,14 @@ func chartRequest(t *testing.T) *http.Request {
 
 func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
 	host, failures, served := unhealthyRegistry(t)
-	want := pushChart(t, host)
+	c := chartsAt(t, host)
+	want := c.chart(t)
 	failures.Store(1)
 
-	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want), Retry: instantRetry(4)}).Load(context.Background(), ChartRef{
-		Repo:    "oci://" + host + "/charts/s5n",
+	src := c.source(chartVersion(t, want))
+	src.Retry = instantRetry(4)
+	pulled, err := src.Load(context.Background(), ChartRef{
+		Repo:    c.ref().Repo,
 		Version: chartVersion(t, want),
 	})
 	if err != nil {

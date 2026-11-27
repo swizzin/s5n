@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/selfupdate"
 )
 
@@ -278,6 +279,86 @@ func TestSignRefusesAnUncommittedPublicKey(t *testing.T) {
 	}
 	if _, statErr := os.Stat(sums + ".sig"); statErr == nil {
 		t.Fatal("sign wrote a signature with no committed public key")
+	}
+}
+
+// chartDigest is one chart release's manifest digest, as a registry reports it.
+const chartDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestSignChartWritesASignatureBoxVerifies(t *testing.T) {
+	dir := t.TempDir()
+	_, seed, public := newKey(t, dir)
+	keyFile := usePublicKey(t, dir, public)
+	t.Setenv("BOX_SIGNING_KEY", seed)
+
+	var out bytes.Buffer
+	if err := signChart([]string{"0.6.3", chartDigest, dir}, &out); err != nil {
+		t.Fatalf("sign-chart: %v", err)
+	}
+	if !strings.Contains(out.String(), "signed chart.sig for s5n-v0.6.3") {
+		t.Fatalf("sign-chart printed %q", out.String())
+	}
+	// The asset is where a chart release publishes it, and box's own verifier
+	// accepts it: a signature this command makes is one box accepts.
+	path := filepath.Join(dir, release.ChartSignatureAsset)
+	signature, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	key, err := selfupdate.ParsePublicKey(public)
+	if err != nil {
+		t.Fatalf("reading the public key: %v", err)
+	}
+	if err := selfupdate.VerifyChart(key, "0.6.3", chartDigest, signature); err != nil {
+		t.Fatalf("VerifyChart on the signature sign-chart made: %v", err)
+	}
+	// The chart a signature is not for, and another chart's digest: both refused.
+	if err := selfupdate.VerifyChart(key, "0.6.4", chartDigest, signature); err == nil {
+		t.Fatal("the signature verified as another release's")
+	}
+	other := strings.Replace(chartDigest, "0123", "0124", 1)
+	if err := selfupdate.VerifyChart(key, "0.6.3", other, signature); err == nil {
+		t.Fatal("the signature verified over another digest")
+	}
+	// verify-chart is the release's own check that the asset is one box accepts.
+	if err := verifyChart([]string{"0.6.3", chartDigest, path, keyFile}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("verify-chart on the signature sign-chart made: %v", err)
+	}
+	if err := verifyChart([]string{"0.6.4", chartDigest, path, keyFile}, &bytes.Buffer{}); err == nil {
+		t.Fatal("verify-chart accepted the release's signature as another's")
+	}
+}
+
+func TestSignChartRefusesADigestThatIsNotOne(t *testing.T) {
+	// A chart is named by its manifest digest, and box compares what it pulled
+	// against it: a signature over a tag, a length or a typo signs nothing.
+	dir := t.TempDir()
+	_, seed, public := newKey(t, dir)
+	usePublicKey(t, dir, public)
+	t.Setenv("BOX_SIGNING_KEY", seed)
+
+	err := signChart([]string{"0.6.3", "0.6.3", dir}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("sign-chart signed something that is not a digest")
+	}
+	if !strings.Contains(err.Error(), "sha256:") {
+		t.Fatalf("sign-chart refused with %q, want the digest's shape named", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, release.ChartSignatureAsset)); statErr == nil {
+		t.Fatal("sign-chart wrote a signature over a non-digest")
+	}
+}
+
+func TestSignChartRefusesAnEmptyKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOX_SIGNING_KEY", " ")
+
+	err := signChart([]string{"0.6.3", chartDigest, dir}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("sign-chart signed without a key")
+	}
+	if !strings.Contains(err.Error(), "BOX_SIGNING_KEY is empty") {
+		t.Fatalf("sign-chart refused with %q, want the empty-key refusal", err)
 	}
 }
 

@@ -1,14 +1,15 @@
-// Command sign signs a box release's checksums, generates the key pair that signs them, and
-// checks a signature.
+// Command sign signs a box release's checksums and a chart release's digest, generates
+// the key pair that signs them, and checks a signature.
 //
-// box verifies a release's signature before it replaces itself as root, so the signing key
-// is the one thing between a substituted release and a host. The private half is the
-// release's secret (BOX_SIGNING_KEY) and the public half is compiled into box
-// (internal/selfupdate/signing.pub). It uses internal/selfupdate's signing functions, so a
-// signature made here is one box accepts by construction.
+// box verifies a release's signature before it replaces itself as root or installs a
+// chart, so the signing key is the one thing between a substituted release and a host.
+// The private half is the release's secret (BOX_SIGNING_KEY) and the public half is
+// compiled into box (internal/selfupdate/signing.pub). It uses internal/selfupdate's
+// signing functions, so a signature made here is one box accepts by construction.
 //
-// A release is named in its signature as well as by its tag, so both signing and verifying
-// take the version: one release's assets copied under another's tag are refused.
+// A release is named in its signature as well as by its tag, so both signing and
+// verifying take the version: one release's assets copied under another's tag are
+// refused.
 //
 // Signing refuses a seed whose public half is not the committed key -- a release would
 // publish and every box built from it would stop being able to update itself, discovered
@@ -21,8 +22,13 @@
 //	                              print the public key for signing.pub
 //	sign public <private-file>    print the public key of a seed already kept
 //	sign sign <version> <file>    sign <file> for <version>, writing <file>.sig
+//	sign sign-chart <version> <digest> <dir>
+//	                              write <dir>/chart.sig, the signature over that chart
+//	                              digest, for the release's s5n-v<version> page
 //	sign verify <version> <file> <key-file>
 //	                              check <file>.sig against a public key
+//	sign verify-chart <version> <digest> <sig-file> <key-file>
+//	                              check a chart's signature against a public key
 package main
 
 import (
@@ -35,8 +41,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/selfupdate"
 )
 
@@ -52,8 +60,12 @@ func main() {
 		err = publicKey(os.Args[2:], os.Stdout)
 	case "sign":
 		err = sign(os.Args[2:], os.Stdout)
+	case "sign-chart":
+		err = signChart(os.Args[2:], os.Stdout)
 	case "verify":
 		err = verify(os.Args[2:], os.Stdout)
+	case "verify-chart":
+		err = verifyChart(os.Args[2:], os.Stdout)
 	default:
 		usage()
 	}
@@ -64,7 +76,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sign keygen <private-file> | sign public <private-file> | sign sign <version> <file> | sign verify <version> <file> <public-key-file>")
+	fmt.Fprintln(os.Stderr, "usage: sign keygen <private-file> | sign public <private-file> | sign sign <version> <file> | sign sign-chart <version> <digest> <dir> | sign verify <version> <file> <public-key-file> | sign verify-chart <version> <digest> <sig-file> <public-key-file>")
 	os.Exit(2)
 }
 
@@ -151,6 +163,22 @@ func checkSigningKey(seed ed25519.PrivateKey) error {
 	return nil
 }
 
+// signingSeed is BOX_SIGNING_KEY as a seed whose public half is the committed key.
+func signingSeed() (ed25519.PrivateKey, error) {
+	seedText := os.Getenv("BOX_SIGNING_KEY")
+	if strings.TrimSpace(seedText) == "" {
+		return nil, errors.New("BOX_SIGNING_KEY is empty: box verifies every release's signature, so a release must not publish without one")
+	}
+	seed, err := selfupdate.ParseSeed(seedText)
+	if err != nil {
+		return nil, fmt.Errorf("BOX_SIGNING_KEY: %w", err)
+	}
+	if err := checkSigningKey(seed); err != nil {
+		return nil, err
+	}
+	return seed, nil
+}
+
 // sign writes <file>.sig: the base64 signature over the release's tag and the file's bytes.
 // The seed comes from the environment so it never appears in a process list.
 func sign(args []string, out io.Writer) error {
@@ -158,15 +186,8 @@ func sign(args []string, out io.Writer) error {
 		return errors.New("sign needs two arguments: the release version and the file to sign, whose signature is written to <file>.sig")
 	}
 	version, path := args[0], args[1]
-	seedText := os.Getenv("BOX_SIGNING_KEY")
-	if strings.TrimSpace(seedText) == "" {
-		return errors.New("BOX_SIGNING_KEY is empty: box verifies every release's signature, so a release must not publish without one")
-	}
-	seed, err := selfupdate.ParseSeed(seedText)
+	seed, err := signingSeed()
 	if err != nil {
-		return fmt.Errorf("BOX_SIGNING_KEY: %w", err)
-	}
-	if err := checkSigningKey(seed); err != nil {
 		return err
 	}
 	sums, err := os.ReadFile(path)
@@ -181,19 +202,42 @@ func sign(args []string, out io.Writer) error {
 	return nil
 }
 
+// digestPattern is what a registry's manifest digest is: box compares the digest it
+// pulled against the signed one, so anything else signs nothing.
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// signChart writes a chart release's signature: the asset box fetches and checks before
+// it pulls the chart. It covers the manifest digest, not the archive, so box installs the
+// exact bytes the signer saw, whatever the tag points at when it pulls.
+func signChart(args []string, out io.Writer) error {
+	if len(args) != 3 {
+		return errors.New("sign-chart needs three arguments: the release version, the chart's manifest digest, and the directory to write the signature into")
+	}
+	version, digest, dir := args[0], args[1], args[2]
+	if !digestPattern.MatchString(digest) {
+		return fmt.Errorf("%q is not a chart's manifest digest (want sha256: and 64 hex digits): refusing to sign something box cannot check the pull against", digest)
+	}
+	seed, err := signingSeed()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, release.ChartSignatureAsset)
+	if err := os.WriteFile(path, selfupdate.SignChart(seed, version, digest), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	fmt.Fprintf(out, "signed %s for s5n-v%s\n", release.ChartSignatureAsset, version)
+	return nil
+}
+
 // verify checks a signature the way box will, for the version it will check it as.
 func verify(args []string, out io.Writer) error {
 	if len(args) != 3 {
 		return errors.New("verify needs three arguments: the release version, the signed file and the public key")
 	}
 	version, file, keyFile := args[0], args[1], args[2]
-	keyText, err := os.ReadFile(keyFile)
+	key, err := readKey(keyFile)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", keyFile, err)
-	}
-	key, err := selfupdate.ParsePublicKey(string(keyText))
-	if err != nil {
-		return fmt.Errorf("%s: %w", keyFile, err)
+		return err
 	}
 	signed, err := os.ReadFile(file)
 	if err != nil {
@@ -208,4 +252,39 @@ func verify(args []string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "%s: signature ok for box-v%s\n", filepath.Base(file), version)
 	return nil
+}
+
+// verifyChart checks a chart release's signature the way box will, for the digest box
+// pulls by.
+func verifyChart(args []string, out io.Writer) error {
+	if len(args) != 4 {
+		return errors.New("verify-chart needs four arguments: the release version, the chart's manifest digest, the signature file and the public key")
+	}
+	version, digest, file, keyFile := args[0], args[1], args[2], args[3]
+	key, err := readKey(keyFile)
+	if err != nil {
+		return err
+	}
+	signature, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", file, err)
+	}
+	if err := selfupdate.VerifyChart(key, version, digest, signature); err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(file), err)
+	}
+	fmt.Fprintf(out, "%s: signature ok for s5n-v%s\n", filepath.Base(file), version)
+	return nil
+}
+
+// readKey is the public key a signature is checked against.
+func readKey(keyFile string) (ed25519.PublicKey, error) {
+	keyText, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", keyFile, err)
+	}
+	key, err := selfupdate.ParsePublicKey(string(keyText))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", keyFile, err)
+	}
+	return key, nil
 }
