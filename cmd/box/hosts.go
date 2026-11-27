@@ -127,6 +127,53 @@ func (a applyHosts) Ensure(ctx context.Context, plan release.HostPlan) error {
 	return step.Ensure(ctx, names)
 }
 
+// Prune removes every host box wrote and this run does not serve. A hosted instance whose
+// name changed, or whose app was switched off, would otherwise keep its listener and
+// Certificate: the old name would answer and renew forever, and a redirect from it is not
+// written.
+//
+// It is a Pruner rather than part of Ensure because a run with nothing to add still has
+// this to do.
+func (a applyHosts) Prune(ctx context.Context, plan release.HostPlan) error {
+	if plan.Domain == "" {
+		return nil
+	}
+	cl, err := a.cluster()
+	if err != nil {
+		return err
+	}
+	wrote, err := platform.BoxHosts(ctx, cl)
+	if err != nil {
+		return fmt.Errorf("read the hosts box serves: %w", err)
+	}
+	drop := platform.Unserved(wrote, plan.Served)
+	if len(drop) == 0 {
+		return nil
+	}
+	for _, host := range drop {
+		if err := platform.DropHost(ctx, cl, host); err != nil {
+			return err
+		}
+	}
+	a.out.Rows([]say.Row{{Mark: say.MarkDone, Name: "hosts", State: "removed", Facts: []string{strings.Join(drop, ", ")}}})
+	// Seerr's own Application URL is a setting inside it, written by whoever set it up:
+	// box can serve the new name but not retarget the instance.
+	for _, host := range drop {
+		if seerrName(host) {
+			a.out.Warn("Seerr's Application URL setting is yours to update: it names the address its own links are built from")
+			break
+		}
+	}
+	return nil
+}
+
+// seerrName reports whether a name looks like a Seerr instance's: box names one `seerr`,
+// or `seerr-<suffix>` before the domain.
+func seerrName(host string) bool {
+	first, _, _ := strings.Cut(host, ".")
+	return first == "seerr" || strings.HasPrefix(first, "seerr-")
+}
+
 // rules writes every served name's access_control rule: without it a host
 // answers 403 whatever its listener and Certificate say.
 func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFunc {
@@ -233,8 +280,10 @@ func (a applyHosts) ClientRegistered(ctx context.Context, namespace, app string)
 }
 
 // The two answers above are the release's, beside Login: a user's step still
-// gets them, and answers "no" to MayWrite.
+// gets them, and answers "no" to MayWrite. Prune is the third: a user cannot write a
+// listener, so their run neither adds nor removes one.
 var _ release.LoginAccess = applyHosts{}
+var _ release.HostPruner = applyHosts{}
 
 // loginRules is what internal/login needs for both halves: the box's domain,
 // the account, the image the Deployment runs and the document the rules come

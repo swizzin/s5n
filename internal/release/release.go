@@ -90,6 +90,9 @@ type HostPlan struct {
 	// All is every name this run decided; `box init` sets it so a host that
 	// answers can still be re-issued. Hosts stays the names nothing answers on.
 	All []string
+	// Served is every name this run serves, always: what a removal of names a
+	// previous run wrote is compared against.
+	Served []string
 	// Rule is the login's half: a host is not served without its access_control
 	// rule, rendered from init's inputs. Ensure only.
 	Rule HostRule
@@ -125,6 +128,13 @@ type Hosts interface {
 // whose Certificate is not the one this run would issue. `box init` asks.
 type StaleHosts interface {
 	Stale(ctx context.Context, plan HostPlan) ([]string, error)
+}
+
+// HostPruner is the optional half that removes what a previous run wrote and this one
+// does not serve: a renamed or switched-off hosted app would otherwise keep its listener
+// and Certificate for good. Only names box's own managers wrote are ever removed.
+type HostPruner interface {
+	Prune(ctx context.Context, plan HostPlan) error
 }
 
 // union is a's names then b's, deduplicated in first-named order.
@@ -682,6 +692,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 	}
+	// Then the other direction: a name a previous run served and this one does not keeps
+	// answering (and its Certificate renews) until it is removed. A run with nothing to
+	// add still has this to do, which is why it is not part of Ensure.
+	if pruner, ok := opts.Hosts.(HostPruner); ok {
+		if err := pruner.Prune(ctx, hostPlan); err != nil {
+			return res, err
+		}
+	}
 
 	// Write the anchor at the first point its namespace exists and before the
 	// release: a pod that starts without it crash-loops through Helm's wait. The
@@ -906,6 +924,7 @@ func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *s
 	if plan.Domain != "" {
 		hosts = append([]string{plan.Domain}, apps...)
 	}
+	plan.Served = hosts
 	// Build the login's inputs even with no hosts: the reconcile still runs.
 	if plan.Domain != "" && len(chart.Catalog) > 0 {
 		rule, err := loginRule(sb, chart, values, apps, plan.Domain)

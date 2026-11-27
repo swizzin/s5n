@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,8 @@ type CertificateCluster interface {
 	// UpdateStatus writes one object's status: how box asks cert-manager for a new
 	// certificate, since the Issuing condition is status.
 	UpdateStatus(ctx context.Context, group, version, kind, namespace string, obj map[string]any) error
+	// Delete removes one object; a missing one is not an error.
+	Delete(ctx context.Context, group, version, kind, namespace, name string) error
 }
 
 // CertificateDecision is root's TLS half for one host: a Certificate in
@@ -784,6 +788,134 @@ func certificateAccess() []Access {
 		{Verb: kube.VerbApply, Group: "gateway.envoyproxy.io", Resource: "securitypolicies", Namespace: GatewayNamespace, What: "SecurityPolicies in " + GatewayNamespace},
 	}
 }
+
+// BoxHosts is every host box's own TLS managers put a listener on: the names this box
+// served, read off the Gateway's managedFields rather than a record, so an operator's own
+// listener is never one of them.
+func BoxHosts(ctx context.Context, cl CertificateCluster) ([]string, error) {
+	gw, ok, err := cl.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
+	if err != nil || !ok {
+		return nil, err
+	}
+	byListener := map[string]string{}
+	listeners, _ := gw["spec"].(map[string]any)["listeners"].([]any)
+	for _, raw := range listeners {
+		l, _ := raw.(map[string]any)
+		name, _ := l["name"].(string)
+		host, _ := l["hostname"].(string)
+		if name != "" && host != "" {
+			byListener[name] = host
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, manager := range boxManagers(gw) {
+		for _, name := range managedListeners(gw, manager) {
+			host := byListener[name]
+			if host == "" || seen[host] {
+				continue
+			}
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// boxManagers is the managers whose name is the TLS flow's: one per listener box wrote.
+func boxManagers(gw map[string]any) []string {
+	meta, _ := gw["metadata"].(map[string]any)
+	fields, _ := meta["managedFields"].([]any)
+	var out []string
+	for _, raw := range fields {
+		entry, _ := raw.(map[string]any)
+		manager, _ := entry["manager"].(string)
+		if strings.HasPrefix(manager, kube.TLSManagerPrefix) {
+			out = append(out, manager)
+		}
+	}
+	return out
+}
+
+// managedListeners is the listener names one manager owns: the keys under
+// spec.listeners in its fieldsV1 (the Gateway's listener list is merged by name, so each
+// listener is its own path).
+func managedListeners(gw map[string]any, manager string) []string {
+	meta, _ := gw["metadata"].(map[string]any)
+	fields, _ := meta["managedFields"].([]any)
+	for _, raw := range fields {
+		entry, _ := raw.(map[string]any)
+		if name, _ := entry["manager"].(string); name != manager {
+			continue
+		}
+		raw, _ := entry["fieldsV1"].(map[string]any)
+		if raw == nil {
+			// A fake or a hand-written object may carry it as JSON.
+			text, _ := entry["fieldsV1Raw"].(string)
+			if text == "" {
+				return nil
+			}
+			var parsed map[string]any
+			if json.Unmarshal([]byte(text), &parsed) != nil {
+				return nil
+			}
+			raw = parsed
+		}
+		out := []string{}
+		spec, _ := raw["f:spec"].(map[string]any)
+		listeners, _ := spec["f:listeners"].(map[string]any)
+		for key := range listeners {
+			out = append(out, strings.TrimPrefix(key, "f:"))
+		}
+		sort.Strings(out)
+		return out
+	}
+	return nil
+}
+
+// Unserved is the names box wrote and this run does not serve.
+func Unserved(wrote, served []string) []string {
+	keep := make(map[string]bool, len(served))
+	for _, host := range served {
+		keep[host] = true
+	}
+	var out []string
+	for _, host := range wrote {
+		if !keep[host] {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+// DropHost removes one host box wrote: both of its listeners (each is that manager's
+// alone, so dropping one leaves every other host's), then the objects named for the host.
+// Port 80 first: a name with no 443 must not keep answering a redirect to it.
+func DropHost(ctx context.Context, cl CertificateCluster, host string) error {
+	name := CertificateName(host)
+	for _, manager := range []string{httpListenerManager(host), httpsListenerManager(host)} {
+		if err := cl.ApplyWith(ctx, manager, []map[string]any{gatewayPartial(map[string]any{})}); err != nil {
+			return fmt.Errorf("drop the listener for %s: %w", host, err)
+		}
+	}
+	for _, obj := range []struct{ group, version, kind, name string }{
+		{"gateway.networking.k8s.io", "v1", "HTTPRoute", name + "-redirect"},
+		{"gateway.envoyproxy.io", "v1alpha1", "SecurityPolicy", ListenerPolicyName(host)},
+		{certManagerGroup, "v1", certManagerCertificateKind, name},
+	} {
+		if err := cl.Delete(ctx, obj.group, obj.version, obj.kind, GatewayNamespace, obj.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// The Certificate kind's own names, for the removal path.
+const (
+	certManagerGroup           = "cert-manager.io"
+	certManagerCertificateKind = "Certificate"
+)
 
 // CertificateName is the Certificate and Secret name for a host: stable across runs,
 // so re-applying is a no-op.

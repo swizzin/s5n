@@ -34,6 +34,8 @@ type fakeHosts struct {
 	pendingErr   error
 	reconErr     error
 
+	prunes     []HostPlan
+	pruneErr   error
 	pendings   []HostPlan
 	reconciled []HostPlan
 	stales     []HostPlan
@@ -72,8 +74,9 @@ func (f *fakeHosts) ClientRegistered(_ context.Context, _, app string) (bool, er
 	return f.registered[app], nil
 }
 
-// Root's step answers both of the release's questions.
+// Root's step answers both of the release's questions, and prunes what this run leaves.
 var _ LoginAccess = (*fakeHosts)(nil)
+var _ HostPruner = (*fakeHosts)(nil)
 
 // hostsForUser serves its names and has no login half: a user cannot write it.
 type hostsForUser struct{ missing []string }
@@ -105,6 +108,18 @@ func (f *fakeHosts) Stale(_ context.Context, plan HostPlan) ([]string, error) {
 		return f.staleFor(plan), nil
 	}
 	return f.stale, nil
+}
+
+// Prune records what a run asks to remove, with the plan it was given.
+func (f *fakeHosts) Prune(_ context.Context, plan HostPlan) error {
+	f.prunes = append(f.prunes, plan)
+	if f.pruneErr != nil {
+		return f.pruneErr
+	}
+	if f.events != nil {
+		*f.events = append(*f.events, "prune")
+	}
+	return nil
 }
 
 func (f *fakeHosts) Ensure(_ context.Context, plan HostPlan) error {
@@ -658,4 +673,44 @@ func TestAHostIsTheInstancesName(t *testing.T) {
 		t.Fatalf("hosts = %v, want %v", hosts, want)
 	}
 
+}
+
+// A run with nothing to add still removes what a previous one wrote and this one does not
+// serve: the plan carries every name this run serves, so the pruning half knows what to
+// keep.
+func TestAPrunerIsToldWhatThisRunServes(t *testing.T) {
+	f := newFakes(t)
+	// The fixture runs radarr, the one hosted app: its name is what this run serves beside
+	// the box's own.
+	enableRadarrInGrant(t, f.grantPath)
+	f.hosts = &fakeHosts{} // nothing missing, nothing stale
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.prunes) != 1 {
+		t.Fatalf("the pruning step ran %d times, want once", len(f.hosts.prunes))
+	}
+	got := f.hosts.prunes[0].Served
+	if len(got) == 0 || got[0] != "box.example.com" {
+		t.Fatalf("served = %v, want the box's own name first", got)
+	}
+	if len(got) < 2 || got[1] != "radarr.box.example.com" {
+		t.Fatalf("served = %v, want every name this run serves", got)
+	}
+	// It runs after the write, so a name this run adds is never removed in the same run.
+	if f.events != nil {
+		if a, b := eventIndex(f.events, "prune"), eventIndex(f.events, "helm"); a > -1 && b > -1 && a > b {
+			t.Fatalf("events = %v, want pruning before the release", f.events)
+		}
+	}
+}
+
+// A step that cannot read or drop a name stops the run: a half-pruned box serves a name
+// nobody asked for.
+func TestAFailedPruneStopsTheRun(t *testing.T) {
+	f := newFakes(t)
+	f.hosts = &fakeHosts{pruneErr: errors.New("the API server refused the write")}
+	if _, err := f.apply(t); err == nil {
+		t.Fatalf("apply succeeded after a failed prune\n%s", f.out)
+	}
 }

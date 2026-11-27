@@ -31,6 +31,8 @@ type fakeCertCluster struct {
 	reads    int
 	// objects are what Get answers, by "kind namespace/name".
 	objects map[string]map[string]any
+	// deleted records every object removed, by "kind namespace/name".
+	deleted []string
 	// statusWrites records every status update; onStatus answers one as cert-manager
 	// would.
 	statusWrites []map[string]any
@@ -98,6 +100,12 @@ func (f *fakeCertCluster) Serves(context.Context, string, string, string) (bool,
 func (f *fakeCertCluster) Get(_ context.Context, _, _, kind, namespace, name string) (map[string]any, bool, error) {
 	obj, ok := f.objects[objectKey(kind, namespace, name)]
 	return obj, ok, nil
+}
+
+func (f *fakeCertCluster) Delete(_ context.Context, _, _, kind, namespace, name string) error {
+	f.deleted = append(f.deleted, objectKey(kind, namespace, name))
+	delete(f.objects, objectKey(kind, namespace, name))
+	return nil
 }
 
 func (f *fakeCertCluster) UpdateStatus(_ context.Context, _, _, kind, namespace string, obj map[string]any) error {
@@ -1120,5 +1128,103 @@ func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
 			t.Fatalf("the host rows are out of host order:\n%s", log)
 		}
 		at = j
+	}
+}
+
+// gatewayWith is a Gateway carrying the listeners a run wrote and the managers that own
+// them, as the API server records them.
+func gatewayWith(listeners map[string]string, managers map[string][]string) map[string]any {
+	spec := make([]any, 0, len(listeners))
+	for name, host := range listeners {
+		spec = append(spec, map[string]any{"name": name, "hostname": host, "port": int64(443)})
+	}
+	fields := make([]any, 0, len(managers))
+	for manager, owned := range managers {
+		paths := map[string]any{}
+		for _, name := range owned {
+			paths["f:"+name] = map[string]any{}
+		}
+		fields = append(fields, map[string]any{
+			"manager":  manager,
+			"fieldsV1": map[string]any{"f:spec": map[string]any{"f:listeners": paths}},
+		})
+	}
+	return map[string]any{
+		"kind":     "Gateway",
+		"metadata": map[string]any{"name": GatewayName, "namespace": GatewayNamespace, "managedFields": fields},
+		"spec":     map[string]any{"listeners": spec},
+	}
+}
+
+// boxHosts lists the hosts box wrote, and nothing else: a listener an operator applied
+// is not one of them, however it is named.
+func TestBoxHostsAreTheOnesBoxWrote(t *testing.T) {
+	cl := &fakeCertCluster{}
+	cl.put("Gateway", GatewayNamespace, GatewayName, gatewayWith(
+		map[string]string{
+			"https-seerr-box-example-com": "seerr.box.example.com",
+			"https-plex-box-example-com":  "plex.box.example.com",
+			"https-mine":                  "mine.example.com",
+		},
+		map[string][]string{
+			httpsListenerManager("seerr.box.example.com"): {"https-seerr-box-example-com"},
+			httpsListenerManager("plex.box.example.com"):  {"https-plex-box-example-com"},
+			"kubectl": {"https-mine"},
+		}))
+	got, err := BoxHosts(context.Background(), cl)
+	if err != nil {
+		t.Fatalf("BoxHosts: %v", err)
+	}
+	want := "plex.box.example.com,seerr.box.example.com"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("hosts = %v, want %s", got, want)
+	}
+	// A box with no Gateway yet is no hosts, not an error.
+	empty := &fakeCertCluster{}
+	if got, err := BoxHosts(context.Background(), empty); err != nil || got != nil {
+		t.Fatalf("no Gateway: hosts = %v, err = %v", got, err)
+	}
+}
+
+// A name box served and this run does not is the one removed; the box's own name and every
+// name it still serves stay.
+func TestUnservedIsWhatThisRunLeavesOut(t *testing.T) {
+	wrote := []string{"box.example.com", "plex.box.example.com", "seerr.box.example.com"}
+	served := []string{"box.example.com", "plex.box.example.com", "requests.box.example.com"}
+	if got := strings.Join(Unserved(wrote, served), ","); got != "seerr.box.example.com" {
+		t.Fatalf("unserved = %q, want the one name this run dropped", got)
+	}
+	if got := Unserved(wrote, served[:2]); len(got) != 1 || got[0] != "seerr.box.example.com" {
+		t.Fatalf("unserved = %v", got)
+	}
+	if got := Unserved(nil, served); len(got) != 0 {
+		t.Fatalf("a box that wrote nothing has %v to remove", got)
+	}
+}
+
+// DropHost removes both of the host's listeners under their own managers -- so no other
+// host's listener can go with them -- and then the objects named for it.
+func TestDropHostRemovesOneHostsPair(t *testing.T) {
+	cl := &fakeCertCluster{}
+	host := "seerr.box.example.com"
+	if err := DropHost(context.Background(), cl, host); err != nil {
+		t.Fatalf("DropHost: %v", err)
+	}
+	if got := strings.Join(cl.managers, ","); got != httpListenerManager(host)+","+httpsListenerManager(host) {
+		t.Fatalf("managers = %s, want this host's two", got)
+	}
+	for _, write := range cl.writes {
+		spec, _ := write[0]["spec"].(map[string]any)
+		if len(spec) != 0 {
+			t.Fatalf("a removal applied %v, want an empty spec so only that manager's fields go", spec)
+		}
+	}
+	want := []string{
+		objectKey("HTTPRoute", GatewayNamespace, CertificateName(host)+"-redirect"),
+		objectKey("SecurityPolicy", GatewayNamespace, ListenerPolicyName(host)),
+		objectKey("Certificate", GatewayNamespace, CertificateName(host)),
+	}
+	if strings.Join(cl.deleted, ",") != strings.Join(want, ",") {
+		t.Fatalf("deleted = %v, want %v", cl.deleted, want)
 	}
 }
