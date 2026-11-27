@@ -19,6 +19,9 @@ import (
 type scripted struct {
 	// exit is the container's exit code, when it ends.
 	exit int32
+	// message is the terminated container's message, which a probe that exits
+	// non-zero fills from its log.
+	message string
 	// listens makes the pod a target: running, never ending. addrAfter is how
 	// many status reads it takes to report an address (0: the create answer has one).
 	listens   bool
@@ -84,8 +87,11 @@ func (f *fakePods) Create(_ context.Context, pod *corev1.Pod) (*corev1.Pod, erro
 	default:
 		p.Status.Phase = corev1.PodSucceeded
 		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  "probe",
-			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: s.exit}},
+			Name: "probe",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: s.exit,
+				Message:  s.message,
+			}},
 		}}
 	}
 	f.created = append(f.created, p)
@@ -302,6 +308,11 @@ func assertRestricted(t *testing.T, pod *corev1.Pod) {
 	}
 	if !strings.HasPrefix(c.Command[0], "/") {
 		t.Errorf("%s command = %v, want the probe's own", pod.Name, c.Command)
+	}
+	// An image older than `probe listen` prints its usage and exits; the usage
+	// line is only in the log, which is what tells it from a real failure.
+	if c.TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Errorf("%s termination message = %q, want the container's log", pod.Name, c.TerminationMessagePolicy)
 	}
 }
 

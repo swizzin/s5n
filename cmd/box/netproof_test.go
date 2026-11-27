@@ -5,12 +5,20 @@ package main
 // cluster a record already says was proved.
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/netproof"
+	"github.com/swizzin/s5n/internal/say"
 )
+
+// unheard is the reporter a test that does not read the screen hands the decision.
+func unheard() *say.Plain { return &say.Plain{W: io.Discard} }
 
 // fakeRecord is a record store in memory; a nil rec is no record at all.
 type fakeRecord struct {
@@ -49,12 +57,37 @@ func managedRecord() *bootstrap.Record {
 	return rec
 }
 
+// TestAnOlderChartsImageWarnsAndProvesNothing: the chart's image has no `probe
+// listen`, so nothing was proved and nothing is written: the next chart's image
+// proves the cluster, and this apply goes on.
+func TestAnOlderChartsImageWarnsAndProvesNothing(t *testing.T) {
+	rec := &fakeRecord{rec: externalRecord()}
+	var screen bytes.Buffer
+	ran := 0
+	err := proveOnceNetworkPolicy(rec, &say.Plain{W: &screen}, func() error {
+		ran++
+		return fmt.Errorf("%w: `s5n probe listen` printed its usage and exited 4", netproof.ErrNoProbe)
+	})
+	if err != nil {
+		t.Fatalf("proveOnceNetworkPolicy: %v", err)
+	}
+	if ran != 1 {
+		t.Errorf("the proof ran %d times, want the one attempt", ran)
+	}
+	if len(rec.saved) != 0 || rec.rec.NetworkPolicyProved {
+		t.Errorf("saved %+v, want nothing: no cluster was proved", rec.saved)
+	}
+	if !strings.Contains(screen.String(), "predates the network policy proof") {
+		t.Errorf("transcript = %q, want one line saying the chart's image is older than the proof", screen.String())
+	}
+}
+
 // TestTheProofRunsOnAClusterBoxDidNotInstall: an external cluster is proved, and
 // the record keeps the answer so the next apply does not prove it again.
 func TestTheProofRunsOnAClusterBoxDidNotInstall(t *testing.T) {
 	rec := &fakeRecord{rec: externalRecord()}
 	ran := 0
-	if err := proveOnceNetworkPolicy(rec, func() error { ran++; return nil }); err != nil {
+	if err := proveOnceNetworkPolicy(rec, unheard(), func() error { ran++; return nil }); err != nil {
 		t.Fatalf("proveOnceNetworkPolicy: %v", err)
 	}
 	if ran != 1 {
@@ -68,7 +101,7 @@ func TestTheProofRunsOnAClusterBoxDidNotInstall(t *testing.T) {
 	}
 
 	// The next apply reads the record and proves nothing.
-	if err := proveOnceNetworkPolicy(rec, func() error { ran++; return nil }); err != nil {
+	if err := proveOnceNetworkPolicy(rec, unheard(), func() error { ran++; return nil }); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if ran != 1 {
@@ -81,7 +114,7 @@ func TestTheProofRunsOnAClusterBoxDidNotInstall(t *testing.T) {
 func TestTheProofSkipsTheK0sClusterBoxInstalled(t *testing.T) {
 	rec := &fakeRecord{rec: managedRecord()}
 	ran := false
-	if err := proveOnceNetworkPolicy(rec, func() error { ran = true; return nil }); err != nil {
+	if err := proveOnceNetworkPolicy(rec, unheard(), func() error { ran = true; return nil }); err != nil {
 		t.Fatalf("proveOnceNetworkPolicy: %v", err)
 	}
 	if ran {
@@ -98,7 +131,7 @@ func TestTheProofSkipsTheK0sClusterBoxInstalled(t *testing.T) {
 func TestTheProofRunsWithNoRecordAndWritesNone(t *testing.T) {
 	rec := &fakeRecord{}
 	ran := false
-	if err := proveOnceNetworkPolicy(rec, func() error { ran = true; return nil }); err != nil {
+	if err := proveOnceNetworkPolicy(rec, unheard(), func() error { ran = true; return nil }); err != nil {
 		t.Fatalf("proveOnceNetworkPolicy: %v", err)
 	}
 	if !ran {
@@ -113,7 +146,7 @@ func TestTheProofRunsWithNoRecordAndWritesNone(t *testing.T) {
 // ignored policy must not be recorded as one that enforced it.
 func TestAFailedProofWritesNoRecord(t *testing.T) {
 	rec := &fakeRecord{rec: externalRecord()}
-	err := proveOnceNetworkPolicy(rec, func() error { return errors.New("does not enforce NetworkPolicy") })
+	err := proveOnceNetworkPolicy(rec, unheard(), func() error { return errors.New("does not enforce NetworkPolicy") })
 	if err == nil || err.Error() != "does not enforce NetworkPolicy" {
 		t.Fatalf("err = %v, want the proof's own", err)
 	}
@@ -127,7 +160,7 @@ func TestAFailedProofWritesNoRecord(t *testing.T) {
 func TestTheProofStopsOnARecordItCannotRead(t *testing.T) {
 	rec := &fakeRecord{loadErr: errors.New("cluster.yaml: unknown key \"bogus\"")}
 	ran := false
-	err := proveOnceNetworkPolicy(rec, func() error { ran = true; return nil })
+	err := proveOnceNetworkPolicy(rec, unheard(), func() error { ran = true; return nil })
 	if err == nil || !strings.Contains(err.Error(), "unknown key") {
 		t.Fatalf("err = %v, want the read failure", err)
 	}
@@ -140,7 +173,7 @@ func TestTheProofStopsOnARecordItCannotRead(t *testing.T) {
 // every apply proves the same cluster again in silence.
 func TestAFailedSaveIsAnError(t *testing.T) {
 	rec := &fakeRecord{rec: externalRecord(), saveErr: errors.New("read-only file system")}
-	if err := proveOnceNetworkPolicy(rec, func() error { return nil }); err == nil {
+	if err := proveOnceNetworkPolicy(rec, unheard(), func() error { return nil }); err == nil {
 		t.Fatal("proveOnceNetworkPolicy swallowed a failed save")
 	}
 }

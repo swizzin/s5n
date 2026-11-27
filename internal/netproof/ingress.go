@@ -6,6 +6,7 @@ package netproof
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -89,14 +90,14 @@ func ProveIngress(ctx context.Context, client objects, o IngressOptions) (Ingres
 		pods = append(pods, control.name)
 	}
 	if err != nil {
-		return rep, fmt.Errorf("the network policy proof could not run: %w", err)
+		return rep, unrunnable(err)
 	}
 	denied, err := startPod(ctx, client, o.Timeout, o.Poll, listenerPod(o, roleDeniedTarget))
 	if denied.name != "" {
 		pods = append(pods, denied.name)
 	}
 	if err != nil {
-		return rep, fmt.Errorf("the network policy proof could not run: %w", err)
+		return rep, unrunnable(err)
 	}
 	np, err := client.CreateNetworkPolicy(ctx, denyPolicy(o.Namespace))
 	if err != nil {
@@ -141,6 +142,15 @@ func ProveIngress(ctx context.Context, client objects, o IngressOptions) (Ingres
 		return rep, fmt.Errorf("the network policy proof could not run: the probe pod exited %d (%s), so box cannot tell whether the policy denied the connection", closed.exit, resultDetail(closed))
 	}
 	return rep, nil
+}
+
+// unrunnable says the proof could not run, unless the image predates the proof:
+// that is the chart's age, and saying the proof failed would blame the cluster.
+func unrunnable(err error) error {
+	if errors.Is(err, ErrNoProbe) {
+		return err
+	}
+	return fmt.Errorf("the network policy proof could not run: %w", err)
 }
 
 // check refuses options that cannot describe a proof, before any pod exists.

@@ -647,6 +647,11 @@ made once per cluster: a cluster box installed itself (k0s, which brings kube-ro
 never needs it, and a passed proof is recorded in `/etc/s5n/cluster.yaml`, so no apply
 repeats it. A cluster with no record is proved by every apply, because apply doesn't
 choose a cluster and so writes no record that would let the next run skip the proof.
+A chart whose s5n image predates the proof's listener cannot be asked at all: its
+`probe listen` prints the usage and exits, which box reads from the container's log and
+reports as the chart being older than box, not as the cluster ignoring policy. That
+apply warns, records nothing and installs, and the first chart whose image has the
+listener proves the cluster.
 This is the ingress half of the same check `migrate` makes for a rehearsal's egress
 lock; kind enforces policies, so the e2e exercises the passing path and the refusals are
 unit tests.

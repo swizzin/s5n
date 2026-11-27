@@ -9,6 +9,7 @@ package netproof
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -30,6 +31,11 @@ const (
 	exitOpposite = 3
 	exitBroken   = 4
 )
+
+// ErrNoProbe means the release's image predates `s5n probe listen`: a newer box
+// running an older chart. Nothing about the cluster was learned, so a caller
+// warns and installs rather than refusing it.
+var ErrNoProbe = errors.New("this chart's image predates the network policy proof")
 
 // probeArg is the subcommand every probe pod runs, and the name of the container
 // that runs it.
@@ -134,6 +140,9 @@ func newPod(namespace, image, prefix string, labels map[string]string, command [
 				Image:           image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Command:         command,
+				// The usage line an image older than `probe listen` prints reaches
+				// box only through the log.
+				TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsNonRoot:             ptr.To(true),
 					AllowPrivilegeEscalation: ptr.To(false),
@@ -233,8 +242,14 @@ func startPod(ctx context.Context, client objects, timeout, poll time.Duration, 
 		if ip, ok := listening(out); ok {
 			return target{name: out.Name, ip: ip}, nil
 		}
-		if exit, done := finished(out); done {
-			return target{name: out.Name}, fmt.Errorf("the %s probe pod ended (%d, %s) before it listened", out.Name, exit.code, resultDetail(result{exit: exit.code, message: exit.message}))
+		if ended, done := finished(out); done {
+			// A binary with no `listen` prints its usage and exits 4, which is also
+			// what a target that could not bind exits with: only the message tells
+			// the chart's age from a failure.
+			if noProbe(ended) {
+				return target{name: out.Name}, fmt.Errorf("%w (`s5n probe listen` printed its usage and exited %d)", ErrNoProbe, ended.code)
+			}
+			return target{name: out.Name}, fmt.Errorf("the %s probe pod ended (%d, %s) before it listened", out.Name, ended.code, resultDetail(result{exit: ended.code, message: ended.message}))
 		}
 		select {
 		case <-ctx.Done():
@@ -306,6 +321,12 @@ func permanent(reason string) bool {
 		return true
 	}
 	return false
+}
+
+// noProbe reports a probe pod whose image has no `s5n probe listen`: it printed
+// the probe's usage, or the binary's when it predates the probe itself.
+func noProbe(e exit) bool {
+	return strings.Contains(e.message, "usage: s5n probe") || strings.Contains(e.message, "usage: s5n <command>")
 }
 
 // instanceSelector is the label pair the chart selects a release's pods by.

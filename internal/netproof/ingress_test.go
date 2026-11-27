@@ -222,6 +222,40 @@ func TestIngressPodsListenAndDialTheTargets(t *testing.T) {
 	}
 }
 
+// TestIngressSaysAnOlderImageIsNotAClusterProblem: a target that ends with the
+// probe's usage line is a chart whose image predates this proof, not a cluster
+// that failed; any other reason a target ended stays a refusal.
+func TestIngressSaysAnOlderImageIsNotAClusterProblem(t *testing.T) {
+	for _, usage := range []string{
+		"usage: s5n probe tcp --address <host:port> --want open|closed [--timeout 5s] [--settle 30s]",
+		"usage: s5n <command> [flags]",
+	} {
+		f := &fakePods{script: []scripted{{exit: exitBroken, message: usage}}}
+		_, err := ProveIngress(context.Background(), f, ingressOptions())
+		if !errors.Is(err, ErrNoProbe) {
+			t.Fatalf("with %q, refusal = %v, want the older image named", usage, err)
+		}
+		if strings.Contains(err.Error(), "could not run") {
+			t.Errorf("with %q, refusal = %v: a chart older than the proof is not the cluster's fault", usage, err)
+		}
+		if len(f.deleted) != 1 {
+			t.Errorf("with %q, deleted %v, want the target removed", usage, f.deleted)
+		}
+	}
+
+	// The same exit code for a real reason is still the cluster's answer.
+	f := &fakePods{script: []scripted{{exit: exitBroken, message: "s5n probe: listen on 18080: bind: address already in use"}}}
+	_, err := ProveIngress(context.Background(), f, ingressOptions())
+	if err == nil || errors.Is(err, ErrNoProbe) {
+		t.Fatalf("refusal = %v, want a target that could not listen, not an older image", err)
+	}
+	for _, want := range []string{"could not run", "before it listened", "address already in use"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
 // TestIngressRefusesOptionsItCannotUse: no namespace or no image is refused
 // before any pod exists.
 func TestIngressRefusesOptionsItCannotUse(t *testing.T) {

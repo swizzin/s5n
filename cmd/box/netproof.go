@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 func networkPolicyProof(kc, recordPath string, out say.Reporter) release.NetworkProof {
 	records := bootstrap.FilesystemRecords{Path: recordPath}
 	return func(ctx context.Context, namespace string, chart release.Chart, values map[string]any) error {
-		return proveOnceNetworkPolicy(records, func() error {
+		return proveOnceNetworkPolicy(records, out, func() error {
 			return proveNetworkPolicy(ctx, kc, namespace, chart, values, out)
 		})
 	}
@@ -33,7 +34,7 @@ func networkPolicyProof(kc, recordPath string, out say.Reporter) release.Network
 
 // proveOnceNetworkPolicy decides from the record, proves, and keeps the answer.
 // proof is a parameter so every path is tested without a cluster.
-func proveOnceNetworkPolicy(records bootstrap.RecordStore, proof func() error) error {
+func proveOnceNetworkPolicy(records bootstrap.RecordStore, out say.Reporter, proof func() error) error {
 	rec, err := records.Load()
 	if err != nil {
 		return err
@@ -43,7 +44,14 @@ func proveOnceNetworkPolicy(records bootstrap.RecordStore, proof func() error) e
 		// proved is not proved again by every apply.
 		return nil
 	}
-	if err := proof(); err != nil {
+	switch err := proof(); {
+	case errors.Is(err, netproof.ErrNoProbe):
+		// Nothing was asked of the cluster, so nothing is recorded: a later chart's
+		// image proves it, and a record saying otherwise would be a proof box never
+		// made.
+		out.Warn("network policy: not proved: " + err.Error() + "; a later chart's image proves this cluster")
+		return nil
+	case err != nil:
 		return err
 	}
 	if rec == nil {
@@ -83,6 +91,11 @@ func proveNetworkPolicy(ctx context.Context, kc, namespace string, chart release
 		Timeout: 90 * time.Second,
 		Poll:    time.Second,
 	})
+	if errors.Is(err, netproof.ErrNoProbe) {
+		// The decision warns; the step ended without a finding either way.
+		h.Done("")
+		return err
+	}
 	if err != nil {
 		h.Failed(err)
 		return err
