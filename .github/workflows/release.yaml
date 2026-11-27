@@ -5,7 +5,9 @@
 #                   appVersion both <version>, the image named by digest. Its
 #                   GitHub release lists the app images and the platform pins
 #                   that moved since the last s5n-v* tag, and is never marked
-#                   latest.
+#                   latest. It also carries chart.sig: the signature over the
+#                   chart manifest digest box pulls, which box checks before it
+#                   installs a chart.
 #   box-v<version>  publishes box's binaries, sha256sums.txt and the signature
 #                   over it as the assets of a GitHub release marked latest, so
 #                   releases/latest always means box. Only a maintainer's tag
@@ -27,6 +29,12 @@
 # the one signal that survives, and it is also what makes the s5n steps
 # automatic (the version is one patch above the last s5n-v* tag and the chart
 # is packaged --version/--app-version).
+#
+# A chart published before box checked signatures has no chart.sig, and box
+# refuses it. Dispatching this workflow by hand with `sign` set to that version
+# reads the digest its tag points at now, signs it and uploads the asset: a
+# one-time step per release, never part of a release. With no `sign` input a
+# dispatch does nothing, because a release is a tag or a call from ci.yaml.
 #
 # There is no off switch in the repo. If releases have to stop, disable this
 # workflow (or ci) in GitHub's Actions tab: a disabled workflow runs nothing, so
@@ -54,6 +62,13 @@ name: release
 on:
   push:
     tags: ["s5n-v*", "box-v*"]
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "an s5n-v<version> chart to sign at the digest it points at now, for one published before box checked signatures; cuts no release"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       version:
@@ -81,6 +96,9 @@ env:
 
 jobs:
   route:
+    # A dispatch with `sign` is the one-time signing, not a release: the branches here
+    # are a tag push or a call, and it is neither.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       family: ${{ steps.route.outputs.family }}
@@ -172,6 +190,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      chart-digest: ${{ steps.push.outputs.chart-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -198,6 +218,7 @@ jobs:
       # the previous patch, because the workflow never commits to main); a
       # maintainer's tag already matches Chart.yaml, so helm reads it there.
       - name: package, lint and push the chart
+        id: push
         env:
           VERSION: ${{ needs.route.outputs.version }}
           DIGEST: ${{ needs.s5n-image.outputs.digest }}
@@ -207,7 +228,16 @@ jobs:
           set -euo pipefail
           hack/release.sh package-chart "${RUNNER_TEMP}/chart"
           echo "${GITHUB_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          helm push "${RUNNER_TEMP}/chart/dist/s5n-${VERSION}.tgz" "${CHART_REPO}"
+          # The digest of the manifest this run pushed, which the chart's signature
+          # covers: box installs that digest, not whatever the tag names later.
+          helm push "${RUNNER_TEMP}/chart/dist/s5n-${VERSION}.tgz" "${CHART_REPO}" |
+            tee "${RUNNER_TEMP}/push.txt"
+          chart_digest=$(sed -n 's/^Digest: //p' "${RUNNER_TEMP}/push.txt")
+          if [[ ! "$chart_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "helm push named no chart digest (got '${chart_digest}')" >&2
+            exit 1
+          fi
+          echo "chart-digest=${chart_digest}" >> "$GITHUB_OUTPUT"
 
   s5n-release:
     # The release is the last thing that exists: a chart push that failed must
@@ -228,6 +258,17 @@ jobs:
         env:
           VERSION: ${{ needs.route.outputs.version }}
         run: hack/release.sh notes "${RUNNER_TEMP}/body.md"
+      - name: sign the chart's digest
+        env:
+          BOX_SIGNING_KEY: ${{ secrets.BOX_SIGNING_KEY }}
+          VERSION: ${{ needs.route.outputs.version }}
+          CHART_DIGEST: ${{ needs.s5n-chart.outputs.chart-digest }}
+        run: |
+          set -euo pipefail
+          # box resolves the tag, checks this signature and pulls the digest it names, so
+          # a chart release without the asset is one no box installs: a missing secret or
+          # digest stops the run here, before the release exists.
+          hack/release.sh sign-chart "${RUNNER_TEMP}/signed"
       - name: publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -240,7 +281,8 @@ jobs:
             --title "s5n ${VERSION}" \
             --notes-file "${RUNNER_TEMP}/body.md" \
             --latest=false \
-            --verify-tag
+            --verify-tag \
+            "${RUNNER_TEMP}/signed/chart.sig"
 
   # ---- box: the binaries ------------------------------------------------------
   box-release:
@@ -299,3 +341,41 @@ jobs:
             --latest=true \
             --verify-tag \
             dist/box-linux-amd64 dist/box-linux-arm64 dist/sha256sums.txt dist/sha256sums.txt.sig
+
+  # ---- signing a chart published before box checked signatures -----------------
+  #
+  # One step per release that predates the check: box refuses a chart whose digest
+  # nothing signed, so a release without the asset is one no box installs. The digest is
+  # read from the registry, because it cannot be computed from the archive; a tag moved
+  # since is a different chart, and this signs what the tag names now.
+  sign-published-chart:
+    if: github.event_name == 'workflow_dispatch' && inputs.sign != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload the asset onto the release that exists
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: read the digest the published tag points at now
+        env:
+          VERSION: ${{ inputs.sign }}
+        run: hack/release.sh chart-digest "${RUNNER_TEMP}/digest.txt"
+      - name: sign it
+        env:
+          BOX_SIGNING_KEY: ${{ secrets.BOX_SIGNING_KEY }}
+          VERSION: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          export CHART_DIGEST
+          CHART_DIGEST=$(sed -n 's/^digest=//p' "${RUNNER_TEMP}/digest.txt")
+          hack/release.sh sign-chart "${RUNNER_TEMP}/signed"
+      - name: upload the signature to its release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          # --clobber: signing a release again is signing the digest it points at now.
+          gh release upload "s5n-v${VERSION}" "${RUNNER_TEMP}/signed/chart.sig" --clobber

@@ -974,6 +974,23 @@ republishes the chart.
 Because the platform pins ship in the chart (see "The platform layer"), a platform patch
 is a chart release too, and a `box-v*` release only ever carries box's own code.
 
+**A chart is signed like box (decided).** box applies a chart with cluster-admin, so a
+chart release carries `chart.sig` as an asset of its GitHub release: the release key's
+ed25519 signature, over a line naming the release (`s5n chart s5n-v<version>`) and then
+the chart's manifest digest. Every command that pulls a chart resolves the tag to a
+digest, checks that signature and pulls the digest it names, so a tag moved after the
+release is not what box installs, and a chart nothing signed is refused by name. The
+version is in the signed message, so neither another release's signature nor a box
+release's verifies here. It is a release asset and not an OCI referrer: the registry that
+serves the chart is the thing a signature exists to distrust.
+
+**A release published before that signature is signed once, by hand (decided).** Such a
+release has no `chart.sig` and box refuses it, so the maintainer dispatches the release
+workflow with `sign` set to the version: it reads the digest the tag points at now, signs
+it and uploads the asset, and cuts no release (with `sign` empty a dispatch does nothing).
+Do them oldest first. box reads every release at or above the installed one, so an
+unsigned release in that range stops an update there until it is signed.
+
 **Branches (decided).** `main` is what has been released; work lands on `develop`. Both
 move by ordinary pull-request merges, not fast-forward only: CI runs on every push to
 `main`, and a release is built from its tagged commit, so a straight line adds nothing.
@@ -1022,6 +1039,12 @@ together with the image the app had.
 
 **What update does with it:**
 
+- **A chart is verified before it is installed (decided).** `update`, `init`, `apply` and
+  `migrate` resolve the release's tag to a manifest digest, check the signature its GitHub
+  release publishes over it, and then pull that digest (docs above, "Where a release
+  lives"). A missing, unreadable or wrong-version signature refuses by name before the
+  archive is read, and there is no flag that skips the check; the digest a step installed
+  is in `update.json` beside the cluster record.
 - **box updates itself first, then re-runs as the new binary (decided).**
   `box update` checks for a newer box before it looks at charts, replaces itself, and
   execs the new binary with the same arguments, so the chart update always runs under
