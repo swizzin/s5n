@@ -76,3 +76,33 @@ func TestOwnsAnchorIsTheSeedboxUserOrRoot(t *testing.T) {
 		t.Error("a third user's directory was accepted as the root for 4311")
 	}
 }
+
+// A root-owned directory is only a root box can trust when the user could not have
+// chosen it: reached through a directory that user owns, a link swapped in above it
+// leads box to any root-owned directory of that name.
+func TestOpenOwnedRefusesARootOwnedDirectoryTheUserCouldHaveChosen(t *testing.T) {
+	me := os.Geteuid()
+	if me == 0 {
+		t.Skip("as root every directory is the user's own")
+	}
+	if info, err := os.Stat("/usr"); err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Skip("this host has no root-owned /usr to stand in for a system directory")
+	}
+	base := t.TempDir()
+	if err := os.Symlink("/", filepath.Join(base, "up")); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "up", "usr")
+	if anchor, err := OpenOwned(dir, me); err == nil {
+		anchor.Close()
+		t.Fatalf("%s, root's /usr reached through %s, which uid %d owns, was taken as a root to work in", dir, base, me)
+	} else if !strings.Contains(err.Error(), base) {
+		t.Errorf("the refusal does not name the directory the user owns: %v", err)
+	}
+	// The same directory by a path only root can change is a root box trusts.
+	anchor, err := OpenOwned("/usr", me)
+	if err != nil {
+		t.Fatalf("/usr, under root-owned directories only, was refused: %v", err)
+	}
+	anchor.Close()
+}

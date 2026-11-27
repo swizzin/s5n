@@ -81,12 +81,61 @@ func OpenOwned(dir string, uid int) (*Anchor, error) {
 		}
 		return nil, fmt.Errorf("%s is owned by %s, and box works only in a root it can trust: one the seedbox's user %d or root owns", dir, owner, uid)
 	}
+	if int(st.Uid) != uid {
+		// Root's directory is only trusted when the user could not have led box to
+		// it: a link that user swapped in above it names any root-owned directory.
+		if err := rootsAlone(dir); err != nil {
+			anchor.Close()
+			return nil, err
+		}
+	}
 	return anchor, nil
 }
 
-// ownsAnchor is the rule for the directory root's work is anchored on. It is the
-// seedbox's user's or root's, so the run's work stays inside a tree that user could
-// already write, whatever a swapped parent led box to.
+// rootsAlone checks that only root can change what dir names: every directory on
+// the way to it, as written and as its links resolve, is root's and writable by
+// nobody else (a sticky one, like /tmp, only by an entry's own owner, which the next
+// step checks). A check by path is sound here because nothing it passes can change
+// without root.
+func rootsAlone(dir string) error {
+	resolved, err := filepath.EvalSymlinks(filepath.Dir(dir))
+	if err != nil {
+		return named(dir, err)
+	}
+	for _, path := range [][]string{ancestors(filepath.Dir(dir)), ancestors(resolved)} {
+		for _, at := range path {
+			info, err := os.Lstat(at)
+			if err != nil {
+				return named(dir, err)
+			}
+			if info.Mode()&fs.ModeSymlink != 0 {
+				// Its directory, checked just before, is what keeps it fixed.
+				continue
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			writable := info.Mode().Perm()&0o022 != 0 && info.Mode()&fs.ModeSticky == 0
+			if !ok || st.Uid != 0 || writable {
+				return fmt.Errorf("%s is root's, and box reaches it through %s, which someone other than root can change: a link there could have named any directory of root's", dir, at)
+			}
+		}
+	}
+	return nil
+}
+
+// ancestors is dir and every directory above it, from / down.
+func ancestors(dir string) []string {
+	var out []string
+	for at := filepath.Clean(dir); ; at = filepath.Dir(at) {
+		out = append([]string{at}, out...)
+		if at == filepath.Dir(at) {
+			return out
+		}
+	}
+}
+
+// ownsAnchor is the rule for the directory root's work is anchored on: the seedbox's
+// user's, so a swapped parent can only have led box into that user's own files, or
+// root's, which OpenOwned then holds to rootsAlone.
 func ownsAnchor(st *syscall.Stat_t, uid int) bool { return int(st.Uid) == uid || st.Uid == 0 }
 
 // Root is the handle every name under the anchor is resolved against.
