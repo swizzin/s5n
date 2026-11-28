@@ -35,10 +35,12 @@ type statusFacts struct {
 	Timer          bool
 	TimerInstalled bool
 	Interval       time.Duration
-	// HoldBox, Holds and Pins are the three things kept where they are.
-	HoldBox bool
-	Holds   []snapshot.Hold
-	Pins    map[string]string
+	// HoldBox and Holds are what is kept where it is; Pins are the values'
+	// image pins, with the digest box recorded for each.
+	HoldBox    bool
+	Holds      []snapshot.Hold
+	Pins       map[string]valuePin
+	PinRecords []snapshot.Pin
 	// Now is the clock the next check is judged against.
 	Now time.Time
 }
@@ -112,14 +114,6 @@ func statusHeld(f statusFacts) string {
 	for _, h := range f.Holds {
 		parts = append(parts, fmt.Sprintf("%s (rolled back from %s)", h.App, h.Avoiding.Label()))
 	}
-	apps := make([]string, 0, len(f.Pins))
-	for app := range f.Pins {
-		apps = append(apps, app)
-	}
-	sort.Strings(apps)
-	for _, app := range apps {
-		parts = append(parts, app+" (pinned)")
-	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -175,6 +169,37 @@ func runStatus(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 	out.Line(statusLine(facts))
+	// What a pin is on is a line of its own: a held list cannot say whether a
+	// digest follows a tag or is frozen.
+	for _, line := range statusPins(facts) {
+		out.Line(line)
+	}
+}
+
+// statusPins is one line per pinned app: what it is on, and when box last checked
+// the tag. It reads the values and pins.json, never a registry.
+func statusPins(f statusFacts) []string {
+	apps := make([]string, 0, len(f.Pins))
+	for app := range f.Pins {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+	out := make([]string, 0, len(apps))
+	for _, app := range apps {
+		p := f.Pins[app]
+		if p.Digest != "" {
+			out = append(out, fmt.Sprintf("%s: frozen at %s", app, shortDigest(p.Digest)))
+			continue
+		}
+		record, ok := snapshot.PinFor(f.PinRecords, app)
+		if !ok || record.Tag != p.Tag {
+			out = append(out, fmt.Sprintf("%s: follows %s (no digest yet)", app, p.Tag))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: follows %s (%s, checked %s)",
+			app, p.Tag, shortDigest(record.Digest), record.Resolved.Local().Format("Jan 2")))
+	}
+	return out
 }
 
 // readStatus reads files and Helm's deployed release, never a registry.
@@ -204,13 +229,18 @@ func readStatus(ctx context.Context, o *statusFlags, unitDir string) (statusFact
 	}
 	facts.State = state
 
-	// Holds live beside the config root; no grant holds nothing.
+	// Holds and pin records live beside the config root; no grant holds nothing.
 	if root, err := update.ConfigRoot(sb); err == nil {
 		holds, err := snapshot.LoadHolds(root)
 		if err != nil {
 			return facts, err
 		}
 		facts.Holds = holds
+		records, err := snapshot.LoadPins(root)
+		if err != nil {
+			return facts, err
+		}
+		facts.PinRecords = records
 	}
 
 	// A failed cluster read is an answer; the other segments still print.
@@ -262,24 +292,29 @@ func readDeployed(ctx context.Context, timeout time.Duration, read statusState) 
 	}
 }
 
-// valuePins is the apps the user's values file pins an image for, and the label
-// each pin is: the tag when it pins one, else the digest. It is read from the
-// values document itself, not from a chart's effective values, because status
+// valuePin is one app's image pin as the values file writes it: a tag to follow, or
+// a digest to freeze.
+type valuePin struct {
+	Tag    string
+	Digest string
+}
+
+// valuePins is the apps the user's values file pins an image for. It is read from
+// the values document itself, not from a chart's effective values, because status
 // asks no registry.
-func valuePins(sb *seedbox.Seedbox) map[string]string {
-	pins := map[string]string{}
+func valuePins(sb *seedbox.Seedbox) map[string]valuePin {
+	pins := map[string]valuePin{}
 	apps, _ := sb.Values.Map()["apps"].(map[string]any)
 	for app, entry := range apps {
 		fields, _ := entry.(map[string]any)
 		image, _ := fields["image"].(map[string]any)
 		tag, _ := image["tag"].(string)
 		digest, _ := image["digest"].(string)
-		switch {
-		case strings.TrimSpace(tag) != "":
-			pins[app] = strings.TrimSpace(tag)
-		case strings.TrimSpace(digest) != "":
-			pins[app] = strings.TrimSpace(digest)
+		tag, digest = strings.TrimSpace(tag), strings.TrimSpace(digest)
+		if tag == "" && digest == "" {
+			continue
 		}
+		pins[app] = valuePin{Tag: tag, Digest: digest}
 	}
 	return pins
 }
