@@ -65,12 +65,31 @@ func (r Registry) Resolve(ctx context.Context, repository, reference string) (st
 func registryError(repository, reference string, err error) error {
 	switch {
 	case isNotFound(err):
-		return fmt.Errorf("%s has no %s: %w", repository, reference, pin.ErrNotFound)
+		kind := "tag"
+		if strings.HasPrefix(reference, "sha256:") {
+			kind = "digest"
+		}
+		return &NotFound{Repository: repository, Kind: kind, Reference: reference}
 	case statusOf(err) == http.StatusUnauthorized:
 		return fmt.Errorf("%s/%s: the registry wants credentials, and box has none for it", repository, reference)
 	}
 	return fmt.Errorf("cannot resolve %s:%s: %w", repository, reference, err)
 }
+
+// NotFound is a registry's answer that a reference is not in a repository.
+// errors.Is matches pin.ErrNotFound, which is what a caller that only needs to
+// know whether it is missing asks.
+type NotFound struct {
+	Repository string
+	Kind       string
+	Reference  string
+}
+
+func (e *NotFound) Error() string {
+	return fmt.Sprintf("%s has no %s %s", e.Repository, e.Kind, e.Reference)
+}
+
+func (e *NotFound) Unwrap() error { return pin.ErrNotFound }
 
 // isNotFound is a registry's "not there": 403 and 404, or oras's own answer.
 func isNotFound(err error) bool {

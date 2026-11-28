@@ -98,6 +98,10 @@ func main() {
 		runStatus(ctx, args)
 	case "rollback":
 		runRollback(ctx, args)
+	case "pin":
+		runPin(ctx, args)
+	case "unpin":
+		runUnpin(ctx, args)
 	case "migrate":
 		runMigrate(ctx, args)
 	default:
@@ -141,6 +145,8 @@ commands:
   update      replace box when a newer one verifies, then move the seedbox to a newer release
   status      one line: what is running, what the last update did, when box checks again
   rollback    put one app back on the image it ran before an update moved it
+  pin         follow one app's tag, or freeze it at a digest, and apply
+  unpin       let one app follow the chart again, and apply
   migrate     adopt an install box did not make: discover writes the plan, apply runs it
   version     print the version box was built from
 `)
@@ -632,40 +638,55 @@ func runApply(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// The cluster decision is bootstrap's; apply reuses it.
-	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *recordPath})
+	res, err := applyRoot(ctx, o, *recordPath, resolver, *o.yes, out, nil)
 	if err != nil {
-		out.Error(err)
+		if errors.Is(err, release.ErrCancelled) {
+			os.Exit(1)
+		}
+		out.Error(portRangeHint(err))
 		os.Exit(1)
 	}
+	if res.Host != "" {
+		out.Banner("seedbox ready", res.Host)
+	}
+	showJellyfinPassword(out, res)
+}
 
+// applyRoot is the one apply over the record's cluster: `box apply`, and the one a
+// pin, unpin or rollback finishes its edit with. A caller that already loaded the
+// release hands it in, so it is never pulled twice.
+func applyRoot(ctx context.Context, o *applyFlags, recordPath string, resolver setup.Resolver, yes bool, out say.Reporter, chart *release.Chart) (release.Result, error) {
+	var res release.Result
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: recordPath})
+	if err != nil {
+		return res, err
+	}
 	// Read the installed release before saying what is installed; the apply
 	// below loads the files again and is the one place that refuses them.
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
-		out.Error(err)
-		os.Exit(1)
+		return res, err
 	}
 	namespace, err := sb.Namespace()
 	if err != nil {
-		out.Error(err)
-		os.Exit(1)
+		return res, err
 	}
-	installed, err := release.NewHelm(kc, namespace, release.ReleaseName)
-	if err != nil {
-		out.Error(err)
-		os.Exit(1)
-	}
-	opts, err := applyRelease(ctx, o.options(), installed.State)
-	if err != nil {
-		out.Error(err)
-		os.Exit(1)
+	opts := o.options()
+	if chart != nil {
+		opts.Chart = chart
+	} else {
+		installed, err := release.NewHelm(kc, namespace, release.ReleaseName)
+		if err != nil {
+			return res, err
+		}
+		if opts, err = applyRelease(ctx, opts, installed.State); err != nil {
+			return res, err
+		}
 	}
 
-	confirm := confirmer(out, *o.yes)
 	app := &release.Applier{
 		Charts:  chartSource(out),
-		Confirm: confirm,
+		Confirm: confirmer(out, yes),
 		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
@@ -681,30 +702,22 @@ func runApply(ctx context.Context, args []string) {
 	opts.BoxValues = boxValues(kc)
 	// A cluster box did not install is proved to enforce NetworkPolicy once, here:
 	// no app is installed behind a policy the CNI ignores.
-	opts.NetworkProof = networkPolicyProof(kc, *recordPath, out)
+	opts.NetworkProof = networkPolicyProof(kc, recordPath, out)
 	// Per-host TLS writes a listener before the release moves, so no apply
 	// leaves an app host unreachable (docs/box.md).
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
 	// Render the hold that keeps a rolled-back app on its image.
 	holds := newBoxHolds(out)
 	opts.Holds = holds.values
+	// Render the digest each tag pin follows; a tag alone is never installed.
+	pins := newBoxPins(out, release.Registry{})
+	opts.Pins = pins.values
 	// Copy a pin-moved app before the release, as a step does: `box rollback`
 	// restores it, and apply has no automatic rollback.
 	opts.Snapshots = applySnapshots(kc)
 	// No host-CA step: this run writes no Certificate and must not read
 	// cert-manager's namespace. init keeps the anchor right.
-	res, err := applyThenSettle(ctx, app.Apply, opts, holds)
-	if err != nil {
-		if errors.Is(err, release.ErrCancelled) {
-			os.Exit(1)
-		}
-		out.Error(portRangeHint(err))
-		os.Exit(1)
-	}
-	if res.Host != "" {
-		out.Banner("seedbox ready", res.Host)
-	}
-	showJellyfinPassword(out, res)
+	return applyThenSettle(ctx, app.Apply, opts, holds, pins)
 }
 
 func runInit(ctx context.Context, args []string) {
@@ -895,6 +908,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				},
 			}
 			holds := newBoxHolds(out)
+			pins := newBoxPins(out, release.Registry{})
 			applied, err = applyThenSettle(ctx, app.Apply, release.Options{
 				Chart:         &chart,
 				GrantPath:     req.GrantPath,
@@ -909,6 +923,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				// Without the hold, a re-run would move a rolled-back app onto
 				// the image it avoided.
 				Holds:  holds.values,
+				Pins:   pins.values,
 				Anchor: hostCA(kc, out, o.caFile),
 				// The per-host step runs inside the apply: after the confirm and
 				// before the release, because Helm's wait would otherwise hold an
@@ -924,7 +939,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				// Each name's own issuer, not tls.issuer, which is empty when DNS
 				// decided.
 				HostIssuers: req.HostIssuers,
-			}, holds)
+			}, holds, pins)
 			return portRangeHint(err)
 		},
 	}
