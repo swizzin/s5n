@@ -312,9 +312,12 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 		Apply: func(ctx context.Context, opts release.Options) (release.Result, error) {
 			return applyThenSettle(ctx, applierFor(opts.SkipHooks).Apply, opts, holds)
 		},
-		Holds:   update.FileHolds{},
-		Confirm: confirmer(out, yes),
-		State:   update.FileState{Path: o.statePath()},
+		Holds: update.FileHolds{},
+		// A tag pin is re-resolved on every update: a rebuilt tag is a move.
+		Pins:     release.Registry{},
+		PinStore: update.FilePins{},
+		Confirm:  confirmer(out, yes),
+		State:    update.FileState{Path: o.statePath()},
 		Notify: func(ctx context.Context, n update.Notice) {
 			post(noticeFrom(noticeOpts, n))
 		},
