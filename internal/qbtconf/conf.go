@@ -372,3 +372,22 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 
 // FormatIterations exists so callers can log the cost; it is not configurable.
 func FormatIterations() string { return strconv.Itoa(Iterations) }
+
+// Seed writes the tuning a variant was measured with into qBittorrent.conf, only where
+// the file has no value of its own: one there is the person's, or an earlier seed's, so it
+// stays and a later variant change keeps it (docs/box.md, "qBittorrent's own builds").
+//
+// Today that is [BitTorrent] Session\DiskQueueSize, which qBittorrent passes to libtorrent
+// as max_queued_disk_bytes (src/base/bittorrent/sessionimpl.cpp:2120 at release-5.3.1), the
+// size of 2.1's write cache (src/pread_disk_io.cpp:497 at v2.1.3). A size of 0 seeds nothing.
+func Seed(existing []byte, diskQueueSize int64) (out []byte, changed bool) {
+	if diskQueueSize <= 0 {
+		return existing, false
+	}
+	doc := Parse(existing)
+	if _, ok := doc.Get("BitTorrent", `Session\DiskQueueSize`); ok {
+		return existing, false
+	}
+	doc.Set("BitTorrent", `Session\DiskQueueSize`, strconv.FormatInt(diskQueueSize, 10))
+	return doc.Render(), true
+}

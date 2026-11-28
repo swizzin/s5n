@@ -55,6 +55,15 @@ app.kubernetes.io/name: {{ .inst.name }}
 {{- if $digest -}}{{ $v.repository }}:{{ $tag }}@{{ $digest }}{{- else -}}{{ $v.repository }}:{{ $tag }}{{- end -}}
 {{- end -}}
 
+{{- /* s5n.qbtDiskQueueSize: the disk write queue the 10 Gbit libtorrent 2.1 builds are
+       seeded with, in bytes, and empty for every other variant, which keeps qBittorrent's
+       own 100 MiB default (src/base/bittorrent/sessionimpl.cpp:502 at release-5.3.1). */}}
+{{- define "s5n.qbtDiskQueueSize" -}}
+{{- if has (toString (default "default" .image.variant)) (list "lt2.1-10g" "lt2.1-10g-znver3") -}}
+536870912
+{{- end -}}
+{{- end -}}
+
 {{- /* The claims every pod mounts. The chart creates no storage: box creates them from the
        grant's host paths, and a plain `helm install` expects the operator to have. So no host
        path is in a pod spec, and Pod Security "restricted" admits every pod. */}}

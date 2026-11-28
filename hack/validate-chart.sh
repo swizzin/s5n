@@ -74,6 +74,24 @@ helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
   { echo "the home-operations variant names no home-operations image: a box already on it cannot keep that builder"; exit 1; }
 echo "== default qBittorrent: the project's own build, with home-operations still selectable"
 
+# The two 10 Gbit libtorrent 2.1 builds are seeded with the disk queue they were measured
+# at; every other variant keeps qBittorrent's own default, because there is no measurement
+# behind a 1.2 number. The seed is internal/qbtconf's, and only where the file has none.
+qbt_seed() { # qbt_seed <variant>: how many disk queue seeds that variant's init container carries
+  helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+    --set apps.qbittorrent.image.variant="$1" |
+    awk '/name: webui-credentials/,/securityContext/' | grep -c -- '--disk-queue-size=536870912' || true
+}
+for variant in lt2.1-10g lt2.1-10g-znver3; do
+  [ "$(qbt_seed "$variant")" = 1 ] ||
+    { echo "the ${variant} render does not seed a 512 MiB disk queue"; exit 1; }
+done
+for variant in default lt1.2 lt1.2-10g lt2.1 lt1.2-10g-znver3; do
+  [ "$(qbt_seed "$variant")" = 0 ] ||
+    { echo "the ${variant} render seeds a disk queue, and its build runs qBittorrent's own"; exit 1; }
+done
+echo "== qBittorrent: the 10 Gbit libtorrent 2.1 variants seed a 512 MiB disk queue, no other does"
+
 # A rehearsal box keeps DNS and its own pods as its only egress: the public-internet
 # ipBlocks go, and the policies render even when the grant switched networkPolicy.enabled
 # off. A lock that renders nothing is a box with no policy at all.

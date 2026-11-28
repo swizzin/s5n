@@ -112,13 +112,15 @@ func runWiring(args []string) error {
 }
 
 // runQbtConfig is the qBittorrent init container: it seals the WebUI credential
-// into the config file before the app starts. Re-running it is a no-op.
+// into the config file before the app starts, and seeds a variant's tuning where the
+// file has none. Re-running it is a no-op.
 func runQbtConfig(args []string) error {
 	fs := flag.NewFlagSet("qbt-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/qBittorrent/qBittorrent.conf", "path to qBittorrent.conf")
 	username := fs.String("username", "admin", "WebUI username")
 	passwordFile := fs.String("password-file", "", "file holding the WebUI password")
 	port := fs.Int("port", 8080, "WebUI port qBittorrent listens on")
+	diskQueueSize := fs.Int64("disk-queue-size", 0, "bytes of disk write queue to seed when the file has none (0: seed nothing)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -134,11 +136,12 @@ func runQbtConfig(args []string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", *conf, err)
 	}
-	out, changed, err := qbtconf.Seal(existing, *username, password, *port)
+	out, sealed, err := qbtconf.Seal(existing, *username, password, *port)
 	if err != nil {
 		return err
 	}
-	if !changed {
+	out, seeded := qbtconf.Seed(out, *diskQueueSize)
+	if !sealed && !seeded {
 		fmt.Printf("qbt-config: %s already holds the configured WebUI credential\n", *conf)
 		return nil
 	}
@@ -148,7 +151,14 @@ func runQbtConfig(args []string) error {
 	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("qbt-config: seeded WebUI credential into %s\n", *conf)
+	switch {
+	case sealed && seeded:
+		fmt.Printf("qbt-config: seeded the WebUI credential and Session\\DiskQueueSize=%d into %s\n", *diskQueueSize, *conf)
+	case seeded:
+		fmt.Printf("qbt-config: seeded Session\\DiskQueueSize=%d into %s\n", *diskQueueSize, *conf)
+	default:
+		fmt.Printf("qbt-config: seeded WebUI credential into %s\n", *conf)
+	}
 	return nil
 }
 

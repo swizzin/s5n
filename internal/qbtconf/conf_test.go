@@ -318,3 +318,67 @@ func TestSealWritesTheSessionKeysQbittorrentReads(t *testing.T) {
 		t.Errorf("Seal wrote [Preferences] Session\\TempPath, a key qBittorrent 5 never reads:\n%s", out)
 	}
 }
+
+// The 10 Gbit libtorrent 2.1 builds are seeded with a 512 MiB disk queue, and only
+// where the file has none: a value there is the person's, or an earlier seed's, and
+// box never replaces or removes one, not even when the variant changes.
+func TestSeedWritesTheDiskQueueSizeOnlyWhereTheFileHasNone(t *testing.T) {
+	const size = 536870912 // 512 MiB
+	out, changed := Seed([]byte(sampleConf), size)
+	if !changed {
+		t.Fatal("a file with no Session\\DiskQueueSize was not seeded")
+	}
+	if v, ok := Parse(out).Get("BitTorrent", `Session\DiskQueueSize`); !ok || v != "536870912" {
+		t.Fatalf("[BitTorrent] Session\\DiskQueueSize = %q (present %v), want 536870912:\n%s", v, ok, out)
+	}
+	if !strings.Contains(string(out), `Session\Port=31111`) || !strings.Contains(string(out), "MigrationVersion=12") {
+		t.Fatalf("seeding dropped a key the file had:\n%s", out)
+	}
+	if n := strings.Count(string(out), "[BitTorrent]"); n != 1 {
+		t.Fatalf("seeded config has %d [BitTorrent] sections", n)
+	}
+	if again, changed := Seed(out, size); changed || string(again) != string(out) {
+		t.Fatalf("a second run re-seeded a file that already holds the value:\n%s", again)
+	}
+
+	// Every value a file already holds is kept, byte for byte: one the person chose,
+	// one an earlier seed wrote, and one this tool cannot read.
+	for _, value := range []string{"1", "1048576", "536870912", "5368709120", "not a number", ""} {
+		held := "[BitTorrent]\nSession\\DiskQueueSize=" + value + "\n\n[WebUI]\nPort=8080\n"
+		got, changed := Seed([]byte(held), size)
+		if changed {
+			t.Errorf("a value of its own (%q) was seeded over:\n%s", value, got)
+		}
+		if string(got) != held {
+			t.Errorf("a value of its own (%q) was rewritten: %q", value, got)
+		}
+	}
+
+	// A variant that seeds nothing writes nothing, whatever the file holds.
+	for _, conf := range []string{"", sampleConf} {
+		got, changed := Seed([]byte(conf), 0)
+		if changed || string(got) != conf {
+			t.Errorf("a run with no seed rewrote the file: %q", got)
+		}
+	}
+}
+
+// Seal owns what the data contract needs on every start; the seed is a variant's tuning
+// and belongs to Seed, so a variant that seeds nothing keeps qBittorrent's own default.
+func TestSealLeavesTheDiskQueueSizeAlone(t *testing.T) {
+	held := "[BitTorrent]\nSession\\DiskQueueSize=1048576\n"
+	out, _, err := Seal([]byte(held), "admin", "pw", 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := Parse(out).Get("BitTorrent", `Session\DiskQueueSize`); !ok || v != "1048576" {
+		t.Fatalf("Seal replaced a disk queue size: %q (present %v)\n%s", v, ok, out)
+	}
+	fresh, _, err := Seal(nil, "admin", "pw", 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Parse(fresh).Get("BitTorrent", `Session\DiskQueueSize`); ok {
+		t.Fatalf("Seal wrote a disk queue size:\n%s", fresh)
+	}
+}

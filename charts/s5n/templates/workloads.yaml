@@ -261,6 +261,11 @@ spec:
             - --username={{ default "admin" $cfg.webuiUsername }}
             - --port={{ $cfg.port }}
             - --password-file=/etc/s5n/keys/qbittorrent-password
+            {{- /* A seed, not drift: the init container writes it only where the file has no
+                   value, and the wiring Job never reads the file. */}}
+            {{- with include "s5n.qbtDiskQueueSize" (dict "image" $cfg.image) }}
+            - --disk-queue-size={{ . }}
+            {{- end }}
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
           volumeMounts:
