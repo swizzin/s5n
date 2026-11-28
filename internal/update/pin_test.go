@@ -240,3 +240,89 @@ func TestABoxThatKeepsNoPinFileRefusesATagPin(t *testing.T) {
 		t.Fatalf("update = %v, want a refusal naming the missing record", err)
 	}
 }
+
+// TestARebuiltTagMovesABoxThatIsCurrent: a pin follows its publisher even when the
+// chart has not moved, or a frozen-in-place box would never see a rebuild.
+func TestARebuiltTagMovesABoxThatIsCurrent(t *testing.T) {
+	h := newHarness(t)
+	h.tagPinValues(t, "5.0")
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestC)
+	resolver := &fakeResolver{answers: map[string]string{"registry.example.com/seedbox/sonarr:5.0": digestB}}
+	store := h.withPins(resolver, []snapshot.Pin{{
+		App: "sonarr", Repository: "registry.example.com/seedbox/sonarr",
+		Tag: "5.0", Digest: digestA, Chart: "0.4.0", Resolved: h.now,
+	}})
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if res.Current {
+		t.Fatalf("update called a box with a rebuilt pin current:\n%s", h.out)
+	}
+	if len(res.Steps) != 1 || res.Steps[0].From != "0.4.0" || res.Steps[0].To != "0.4.0" {
+		t.Fatalf("steps = %+v, want one step on the same release", res.Steps)
+	}
+	if !strings.Contains(h.out.String(), "s5n 0.4.0 · 1 step · sonarr moves") {
+		t.Fatalf("the heading does not name the move:\n%s", h.out)
+	}
+	if !strings.Contains(h.out.String(), "sonarr: 5.0 was rebuilt") {
+		t.Fatalf("the plan does not name the rebuild:\n%s", h.out)
+	}
+	if len(h.snaps.takes) != 1 || len(h.app.calls) == 0 {
+		t.Fatalf("the step did not snapshot and apply: takes=%d applies=%d", len(h.snaps.takes), len(h.app.calls))
+	}
+	if store.pins[0].Digest != digestB {
+		t.Fatalf("pins = %+v, want the new digest recorded", store.pins)
+	}
+}
+
+// TestAnUnchangedTagPinOnACurrentBoxIsCurrent: a check with nothing moved writes
+// only its own time.
+func TestAnUnchangedTagPinOnACurrentBoxIsCurrent(t *testing.T) {
+	h := newHarness(t)
+	h.tagPinValues(t, "5.0")
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestC)
+	resolver := &fakeResolver{answers: map[string]string{"registry.example.com/seedbox/sonarr:5.0": digestA}}
+	h.withPins(resolver, []snapshot.Pin{{
+		App: "sonarr", Repository: "registry.example.com/seedbox/sonarr",
+		Tag: "5.0", Digest: digestA, Chart: "0.4.0", Resolved: h.now,
+	}})
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !res.Current || len(res.Steps) != 0 {
+		t.Fatalf("result = %+v, want current", res)
+	}
+	if len(h.app.calls) != 0 || h.confirm.asks != 0 || len(h.snaps.takes) != 0 {
+		t.Fatalf("a current box wrote: applies=%d asks=%d", len(h.app.calls), h.confirm.asks)
+	}
+	if !strings.HasPrefix(h.out.String(), "· s5n 0.4.0 is current") {
+		t.Fatalf("first line does not answer:\n%s", h.out)
+	}
+}
+
+// TestACurrentBoxWithAnUncheckedPinSaysSo: registry trouble keeps the record and
+// still answers "current", with the one warning.
+func TestACurrentBoxWithAnUncheckedPinSaysSo(t *testing.T) {
+	h := newHarness(t)
+	h.tagPinValues(t, "5.0")
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestC)
+	h.withPins(&fakeResolver{err: errors.New("dial tcp: connection refused")}, []snapshot.Pin{{
+		App: "sonarr", Repository: "registry.example.com/seedbox/sonarr",
+		Tag: "5.0", Digest: digestA, Chart: "0.4.0", Resolved: h.now,
+	}})
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !res.Current {
+		t.Fatalf("result = %+v, want current with the record kept", res)
+	}
+	if !strings.Contains(h.out.String(), "could not be checked") {
+		t.Fatalf("the run does not say the pin was not checked:\n%s", h.out)
+	}
+}

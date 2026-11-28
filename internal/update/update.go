@@ -287,7 +287,11 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if u.OpenCluster == nil {
 		return res, errors.New("update needs a workload client: it stops what it snapshots")
 	}
-	ok, err := u.Confirm.Ask(fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target), false)
+	question := fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target)
+	if res.Installed == res.Target {
+		question = fmt.Sprintf("move %s's pinned images?", res.Name)
+	}
+	ok, err := u.Confirm.Ask(question, false)
 	if err != nil {
 		return res, err
 	}
@@ -412,38 +416,33 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	if res.Name == "" {
 		res.Name = release.ReleaseName
 	}
-	// Nothing at or above installed: current. A named target is still read.
-	if len(releases) == 0 && strings.TrimSpace(opts.Apply.ChartVersion) == "" {
-		res.Target = installed.ChartVersion
-		res.Current = true
-		res.state.LastCheck = u.now()
-		if err := u.State.Save(res.state); err != nil {
+	// Nothing at or above installed means the release is current; a named target is
+	// still read. Pins are resolved either way, below: a rebuilt tag is work.
+	noNewer := len(releases) == 0 && strings.TrimSpace(opts.Apply.ChartVersion) == ""
+	target := installed.ChartVersion
+	if !noNewer {
+		skipped, skips, err := []string(nil), []release.VersionSkip(nil), error(nil)
+		if target, skipped, skips, err = u.target(ctx, opts, releases, state); err != nil {
 			return res, err
 		}
-		return res, nil
-	}
+		res.Skipped = skipped
+		res.Skips = skips
 
-	target, skipped, skips, err := u.target(ctx, opts, releases, state)
-	if err != nil {
-		return res, err
+		// A named target can be a prerelease the listing leaves out; its floors are
+		// the chart's own annotations.
+		if !published(releases, target) {
+			chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: target})
+			if err != nil {
+				return res, err
+			}
+			releases = append(releases, release.Published{
+				Version:     target,
+				MinBox:      strings.TrimSpace(chart.Annotations[release.MinBoxAnnotation]),
+				UpgradeFrom: strings.TrimSpace(chart.Annotations[release.UpgradeFromAnnotation]),
+			})
+		}
 	}
 	res.Target = target
-	res.Skipped = skipped
-	res.Skips = skips
-
-	// A named target can be a prerelease the listing leaves out; its floors are
-	// the chart's own annotations.
-	if !published(releases, target) {
-		chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: target})
-		if err != nil {
-			return res, err
-		}
-		releases = append(releases, release.Published{
-			Version:     target,
-			MinBox:      strings.TrimSpace(chart.Annotations[release.MinBoxAnnotation]),
-			UpgradeFrom: strings.TrimSpace(chart.Annotations[release.UpgradeFromAnnotation]),
-		})
-	}
 
 	cmp, err := compareVersions(installed.ChartVersion, target)
 	if err != nil {
@@ -455,18 +454,12 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, fmt.Errorf("%s is on %s and --chart-version names %s: box update never moves a release backwards",
 			release.ReleaseName, installed.ChartVersion, target)
 	}
-	if cmp >= 0 {
-		res.Current = true
-		res.state.LastCheck = u.now()
-		if err := u.State.Save(res.state); err != nil {
+
+	var steps []Step
+	if cmp < 0 {
+		if steps, err = planSteps(installed.ChartVersion, target, u.BoxVersion, releases); err != nil {
 			return res, err
 		}
-		return res, nil
-	}
-
-	steps, err := planSteps(installed.ChartVersion, target, u.BoxVersion, releases)
-	if err != nil {
-		return res, err
 	}
 	// The target's effective values are what apply installs and what this run
 	// is checked against.
@@ -500,6 +493,19 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	res.pinDigests = pin.Digests(answers)
 	res.pinWarnings = pin.Warnings(answers)
 	res.pinNotes = chartMovedPastPins(answers, toChart, values)
+	if cmp >= 0 {
+		// The release has nowhere to go; a rebuilt tag still moves its app, and a
+		// step that installs the same release is how apply moves a values pin.
+		if !anyPinMoved(answers) {
+			res.Current = true
+			res.state.LastCheck = u.now()
+			if err := u.State.Save(res.state); err != nil {
+				return res, err
+			}
+			return res, nil
+		}
+		steps = []Step{{From: installed.ChartVersion, To: installed.ChartVersion}}
+	}
 	res.Steps, res.pins, res.holds, err = u.stepsPlan(ctx, repo, fromChart, steps, values, holds, answersByApp(answers))
 	if err != nil {
 		return res, err
@@ -686,6 +692,16 @@ func (u *Updater) reportPlan(res Result, check bool) {
 	}
 }
 
+// anyPinMoved reports a tag that resolves to other bytes than the record's.
+func anyPinMoved(answers []pin.Answer) bool {
+	for _, answer := range answers {
+		if answer.Moved() {
+			return true
+		}
+	}
+	return false
+}
+
 // pinApps names the tag pins for a refusal.
 func pinApps(pins []pin.Tagged) []string {
 	out := make([]string, 0, len(pins))
@@ -746,6 +762,10 @@ func planHeading(res Result) string {
 		}
 		facts = append(facts, apps+" "+verb)
 	}
+	if res.Installed == res.Target {
+		// A step on the same release is a values pin that moved.
+		return fmt.Sprintf("%s %s · %s", res.Name, res.Installed, strings.Join(facts, " · "))
+	}
 	return fmt.Sprintf("%s %s → %s · %s", res.Name, res.Installed, res.Target, strings.Join(facts, " · "))
 }
 
@@ -783,7 +803,12 @@ func andList(items []string) string {
 func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, base release.Options) error {
 	r := u.report()
 	name := step.From + " → " + step.To
-	handle := r.Start(say.Op{Name: name, Label: fmt.Sprintf("updating %s to %s", res.Name, step.To)})
+	label := fmt.Sprintf("updating %s to %s", res.Name, step.To)
+	if step.From == step.To {
+		name = step.From
+		label = fmt.Sprintf("moving %s's pinned images", res.Name)
+	}
+	handle := r.Start(say.Op{Name: name, Label: label})
 
 	// Read the revision before the first write: a snapshot failure still knows
 	// what the box is on and that nothing moved.
