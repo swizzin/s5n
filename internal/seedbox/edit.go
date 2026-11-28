@@ -75,15 +75,8 @@ type Edit struct {
 // different images.
 func (s *Seedbox) SetValues(edits []Edit) error {
 	for _, edit := range edits {
-		p, err := ParsePath(edit.Path)
-		if err != nil {
+		if err := editRefusal(edit.Path); err != nil {
 			return err
-		}
-		if rule, ok := GrantRule(p.Keys()); ok {
-			if rule.BoxSets {
-				return fmt.Errorf("%s is set by box (%s); no file names it", p, rule.Why)
-			}
-			return fmt.Errorf("%s is set by the grant (%s); change it there, as root", p, rule.Why)
 		}
 	}
 	e := s.Values.Editor()
@@ -91,6 +84,85 @@ func (s *Seedbox) SetValues(edits []Edit) error {
 		return err
 	}
 	return e.Save()
+}
+
+// EditValues writes several keys and removes several from the user's values file in
+// one save, so a pin's two halves never name different images on disk. Each step
+// works on the bytes the one before produced, because an edit splices by the line
+// and column of the document it parsed.
+func (s *Seedbox) EditValues(edits []Edit, deletes []string) error {
+	for _, edit := range edits {
+		if err := editRefusal(edit.Path); err != nil {
+			return err
+		}
+	}
+	for _, path := range deletes {
+		if err := editRefusal(path); err != nil {
+			return err
+		}
+	}
+	if s.Values.Path == "" {
+		return errors.New("cannot save: the values document has no file")
+	}
+	src := s.Values.Src
+	for _, edit := range edits {
+		doc, err := parseDoc(s.Values.Path, src)
+		if err != nil {
+			return err
+		}
+		e := doc.Editor()
+		if err := e.Set(edit.Path, edit.Value); err != nil {
+			return err
+		}
+		src = e.Bytes()
+	}
+	for _, path := range deletes {
+		doc, err := parseDoc(s.Values.Path, src)
+		if err != nil {
+			return err
+		}
+		// A key the file does not name is already the state asked for: unpin
+		// removes both halves without knowing which one is there.
+		if _, ok, err := doc.lookup(path); err != nil {
+			return err
+		} else if !ok {
+			continue
+		}
+		e := doc.Editor()
+		if err := e.Delete(path); err != nil {
+			return err
+		}
+		src = e.Bytes()
+	}
+	if bytes.Equal(src, s.Values.Src) {
+		return nil
+	}
+	if err := atomicfile.Write(s.Values.Path, src, s.Values.mode); err != nil {
+		return err
+	}
+	d, err := parseDoc(s.Values.Path, src)
+	if err != nil {
+		return err
+	}
+	d.mode = s.Values.mode
+	*s.Values = *d
+	return nil
+}
+
+// editRefusal is the one refusal for a key neither file may name, or the values
+// file may not name because the grant wins.
+func editRefusal(path string) error {
+	p, err := ParsePath(path)
+	if err != nil {
+		return err
+	}
+	if rule, ok := GrantRule(p.Keys()); ok {
+		if rule.BoxSets {
+			return fmt.Errorf("%s is set by box (%s); no file names it", p, rule.Why)
+		}
+		return fmt.Errorf("%s is set by the grant (%s); change it there, as root", p, rule.Why)
+	}
+	return nil
 }
 
 // DeleteGrant removes one key from the grant.
