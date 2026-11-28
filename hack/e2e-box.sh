@@ -5932,8 +5932,9 @@ EOF
   docker pull -q "${sonarr_repo}@${sonarr_digest}" >/dev/null
   docker build -q -t "${sonarr_repo}:${APPLIED_TAG}" "$WORK/applied" >/dev/null
   $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${APPLIED_TAG}" >/dev/null
+  # awk reads every line: an early exit closes the pipe and kills the read with SIGPIPE.
   applied_digest=$(docker exec "${CLUSTER}-control-plane" ctr --namespace k8s.io images ls |
-    awk -v ref="${sonarr_repo}:${APPLIED_TAG}" '$1 == ref {print $3; exit}')
+    awk -v ref="${sonarr_repo}:${APPLIED_TAG}" '$1 == ref {print $3}')
   [ -n "$applied_digest" ] ||
     { echo "the node does not say which digest ${APPLIED_TAG} names"; fail=1; return 0; }
   python3 - "$WORK/values.yaml" "$APPLIED_TAG" "$applied_digest" <<'PY' || { fail=1; return 0; }
