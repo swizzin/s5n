@@ -5919,14 +5919,26 @@ PY
     { echo "the refused apply wrote revision ${revision_after} (was ${revision_before})"; fail=1; }
 
   # ---- box apply: a values pin moves sonarr, and apply copies it first ------
-  # A bare apply installs the release the box is on (C), not the newest (D). The tag
-  # is the bytes sonarr already runs under a new name, so the app comes back healthy;
-  # dropping the digest is still a move, and a move of a running app is copied first.
+  # A bare apply installs the release the box is on (C), not the newest (D). The image
+  # is sonarr's own bytes under a new manifest, so it comes back healthy: box renders a
+  # pinned tag with its digest, and a digest the app does not run is a move like any
+  # other, copied first.
   log "box apply: sonarr's pin moves to ${APPLIED_TAG}, so apply takes a copy first"
-  retag_pinned "$sonarr_repo" "$sonarr_digest" "$APPLIED_TAG" || { fail=1; return 0; }
-  python3 - "$WORK/values.yaml" "$APPLIED_TAG" <<'PY' || { fail=1; return 0; }
+  mkdir -p "$WORK/applied"
+  cat >"$WORK/applied/Dockerfile" <<EOF
+FROM ${sonarr_repo}@${sonarr_digest}
+LABEL s5n.io/e2e="applied"
+EOF
+  docker pull -q "${sonarr_repo}@${sonarr_digest}" >/dev/null
+  docker build -q -t "${sonarr_repo}:${APPLIED_TAG}" "$WORK/applied" >/dev/null
+  $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${APPLIED_TAG}" >/dev/null
+  applied_digest=$(docker exec "${CLUSTER}-control-plane" ctr --namespace k8s.io images ls |
+    awk -v ref="${sonarr_repo}:${APPLIED_TAG}" '$1 == ref {print $3; exit}')
+  [ -n "$applied_digest" ] ||
+    { echo "the node does not say which digest ${APPLIED_TAG} names"; fail=1; return 0; }
+  python3 - "$WORK/values.yaml" "$APPLIED_TAG" "$applied_digest" <<'PY' || { fail=1; return 0; }
 import re, sys
-path, tag = sys.argv[1:3]
+path, tag, digest = sys.argv[1:4]
 lines = open(path).read().splitlines(keepends=True)
 start = next((i for i, line in enumerate(lines) if line.strip() == "sonarr:"), None)
 if start is None:
@@ -5940,6 +5952,7 @@ for i in range(start + 1, len(lines)):
         break
     m = re.match(r'^(\s+)(tag|digest):', line)
     if m and m.group(2) == "digest":
+        out.append('%sdigest: "%s"\n' % (m.group(1), digest))
         continue
     if m:
         out.append('%stag: "%s"\n' % (m.group(1), tag))
@@ -5949,7 +5962,7 @@ for i in range(start + 1, len(lines)):
 if not moved:
     sys.exit(f"{path}: sonarr has no tag pin to move")
 open(path, "w").write("".join(out))
-print(f"  values: apps.sonarr.image.tag -> {tag}, digest dropped")
+print(f"  values: apps.sonarr.image.tag -> {tag}, digest -> {digest}")
 PY
   grep -qF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" ||
     { echo "sonarr's config lost the marker before the apply: the copy below would prove nothing"; fail=1; return 0; }
@@ -5967,8 +5980,8 @@ PY
   # The same box, a plain apply: the grant names no port, and the release keeps its own.
   grep -qF "torrent port: ${old_port} (already this box's; kept)" "$WORK/apply-pin.txt" ||
     { echo "a bare apply on a box whose grant names no port did not keep ${old_port}:"; grep -i "torrent" "$WORK/apply-pin.txt" | head -3; fail=1; }
-  wait_image_ready sonarr-0 "${sonarr_repo}:${APPLIED_TAG}" ||
-    { echo "sonarr-0 is not ready on ${sonarr_repo}:${APPLIED_TAG} (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+  wait_image_ready sonarr-0 "${sonarr_repo}:${APPLIED_TAG}@${applied_digest}" ||
+    { echo "sonarr-0 is not ready on ${sonarr_repo}:${APPLIED_TAG}@${applied_digest} (it runs $(pod_image sonarr-0 || true))"; fail=1; }
   release_chart=$(helm_chart_version) || true
   [ "$release_chart" = "$release_c" ] ||
     { echo "the release is on ${release_chart} after a bare apply, want ${release_c}: apply moved it"; fail=1; }
