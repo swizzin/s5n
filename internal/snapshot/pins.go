@@ -232,7 +232,7 @@ func CheckDigest(digest string) error {
 	case !ok:
 		return errors.New("is not sha256:<64 hex>")
 	case len(hex) != 64:
-		return errors.New("is not 64 hex characters")
+		return errors.New("is not sha256:<64 hex>: it has the wrong length")
 	}
 	for _, r := range hex {
 		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
