@@ -34,6 +34,9 @@ func newBoxPins(out say.Reporter, resolver pin.Resolver) *boxPins {
 // values reads the pins after apply loaded the files, asks the registry only for a
 // tag with no record, and returns the overlay that renders repo:tag@digest.
 func (b *boxPins) values(ctx context.Context, sb *seedbox.Seedbox, chart release.Chart, values map[string]any) (map[string]any, error) {
+	if !pin.AnyTagPin(values, release.EnabledApps(values)) {
+		return nil, nil
+	}
 	root, err := update.ConfigRoot(sb)
 	if err != nil {
 		return nil, err

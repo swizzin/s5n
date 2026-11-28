@@ -123,6 +123,18 @@ type Tagged struct {
 	Recorded   string
 }
 
+// AnyTagPin reports whether any of the apps the values hold names a tag and no
+// digest, so a caller can skip the record and the registry entirely.
+func AnyTagPin(values map[string]any, apps []string) bool {
+	for _, app := range apps {
+		tag, digest := valuesPin(values, app)
+		if tag != "" && digest == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // TaggedPins reads the values' tag-only pins for the given app keys: a pin that
 // names a digest is frozen, and a disabled app renders no image. A pin on an app
 // the chart does not ship, or on a variant it does not have, is refused here rather

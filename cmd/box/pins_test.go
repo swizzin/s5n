@@ -84,6 +84,29 @@ func pinTestValues(tag string) map[string]any {
 	}}
 }
 
+// TestBoxPinsAsksNothingForABoxWithNoTagPin: no pin means no record and no
+// registry, and a grant with no config volume is not a reason to refuse.
+func TestBoxPinsAsksNothingForABoxWithNoTagPin(t *testing.T) {
+	dir := t.TempDir()
+	grant := filepath.Join(dir, "grant.yaml")
+	values := filepath.Join(dir, "values.yaml")
+	if err := os.WriteFile(grant, []byte("namespace: testbox\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(values, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := seedbox.Load(grant, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBoxPins(&say.Plain{W: &bytes.Buffer{}}, &pinTestRegistry{err: errors.New("no registry")})
+	overlay, err := b.values(context.Background(), sb, release.Chart{Name: "s5n", Version: "0.6.3", Variants: []byte("qbittorrent:\n  default:\n    repository: " + pinQbtRepo + "\n    tag: \"5.3.1-lt2.1\"\n")}, map[string]any{})
+	if err != nil || overlay != nil {
+		t.Fatalf("values = %v, %v; want nothing and no error", overlay, err)
+	}
+}
+
 func TestBoxPinsRendersTheRecordedDigestWithoutAsking(t *testing.T) {
 	sb, config, chart := pinTestBox(t)
 	if err := snapshot.SavePins(config, []snapshot.Pin{{
