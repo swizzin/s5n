@@ -1195,8 +1195,9 @@ libtorrent line is a real choice, so its default is the project's own image,
 `ghcr.io/swizzin/qbittorrent` on libtorrent 2.1, and the list beside it is six
 more of those builds — `lt1.2`, `lt1.2-10g`, `lt2.1`, `lt2.1-10g`,
 `lt1.2-10g-znver3` and `lt2.1-10g-znver3` — plus `home-operations`, the image
-the default ran until the project built its own, kept as a name so a box already
-on it keeps that builder, and the one former name still listed beside them,
+the default ran until the project built its own (a box on `default` moves to the
+project's build; naming `home-operations` keeps that builder, and a migrated source
+running it is planned onto it), and the one former name still listed beside them,
 `lt1.2-10g-znver3-mimalloc` (see below).
 `lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
 armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the

@@ -18,9 +18,9 @@ qbittorrent:
     tag: "5.3.1-lt2.1"
     digest: sha256:81b22a6824d49944b716ef7b201220f10c9a624339c953e4a87f89c4ca67bdb9
   home-operations:
-    # The image the default variant named until the project built its own, kept as a real
-    # entry so a box already running it keeps that builder: an unknown variant fails the
-    # render, which stops a seedbox's apply. Nothing chooses it anew.
+    # The image the default variant named until the project built its own. A box on
+    # `default` moves to the project's build; this is the name that keeps home-operations'
+    # (apps.qbittorrent.image.variant), and the one a migrated source running it maps onto.
     repository: ghcr.io/home-operations/qbittorrent
     tag: "5.3.1"
     digest: sha256:fcdbc4ac4a66d8c205ac67e4fe1b578158aaee0a50369c3d04918977f4f359c4
