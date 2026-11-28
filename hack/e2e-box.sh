@@ -5937,6 +5937,10 @@ EOF
     awk -v ref="${sonarr_repo}:${APPLIED_TAG}" '$1 == ref {print $3}')
   [ -n "$applied_digest" ] ||
     { echo "the node does not say which digest ${APPLIED_TAG} names"; fail=1; return 0; }
+  # A loaded image is known by its tag only, and the kubelet asks for tag@digest:
+  # name the digest too, as a pull by digest would, or every pull goes to the registry.
+  docker exec "${CLUSTER}-control-plane" ctr --namespace k8s.io images tag --force \
+    "${sonarr_repo}:${APPLIED_TAG}" "${sonarr_repo}@${applied_digest}" >/dev/null
   python3 - "$WORK/values.yaml" "$APPLIED_TAG" "$applied_digest" <<'PY' || { fail=1; return 0; }
 import re, sys
 path, tag, digest = sys.argv[1:4]
