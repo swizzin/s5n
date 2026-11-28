@@ -66,13 +66,13 @@ qbittorrent:
     # the name no longer says mimalloc because every 10G build links it now.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
-    digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
+    digest: sha256:42a2cf01cc926061a895141c1272c3e2e3ea966e9cea4b833051052fe522006f
   lt2.1-10g-znver3:
     # The same Zen 3 exemption on libtorrent 2.1: see lt1.2-10g-znver3, which is
     # the build profile it shares. lt2.1-10g's layout and name otherwise.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1-10g-znver3"
-    digest: sha256:7777bdbe00ff96b8e56c85a62167bc0828a6d4acb010dca67f2bed2c111a2db6
+    digest: sha256:15fa1d5166ea00bd754396f02489ec99a9c823f98c9097f0932cf42d03e47555
   lt1.2-10g-znver3-mimalloc:
     # The former name of lt1.2-10g-znver3, kept as a real entry so a values file
     # that still names it keeps rendering and keeps updating: a variant name the
@@ -81,7 +81,7 @@ qbittorrent:
     # lt1.2-10g-znver3, tag and digest alike, and nothing chooses it anew.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
-    digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
+    digest: sha256:42a2cf01cc926061a895141c1272c3e2e3ea966e9cea4b833051052fe522006f
 
 sonarr:
   default:
