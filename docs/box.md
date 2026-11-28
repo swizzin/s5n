@@ -1191,11 +1191,13 @@ no extra step. Anything outside the catalog stays outside a user's namespace, wh
 the decided rule that root decides which apps a user has.
 
 **qBittorrent's own builds (decided).** qBittorrent is the one app where the
-libtorrent line is a real choice, so its list is the default (home-operations) plus
-six builds of `ghcr.io/swizzin/qbittorrent`, the project's own image — `lt1.2`,
-`lt1.2-10g`, `lt2.1`, `lt2.1-10g`, `lt1.2-10g-znver3` and `lt2.1-10g-znver3` —
-and the one former name still listed beside them, `lt1.2-10g-znver3-mimalloc`
-(see below).
+libtorrent line is a real choice, so its default is the project's own image,
+`ghcr.io/swizzin/qbittorrent` on libtorrent 2.1, and the list beside it is six
+more of those builds — `lt1.2`, `lt1.2-10g`, `lt2.1`, `lt2.1-10g`,
+`lt1.2-10g-znver3` and `lt2.1-10g-znver3` — plus `home-operations`, the image
+the default ran until the project built its own, kept as a name so a box already
+on it keeps that builder, and the one former name still listed beside them,
+`lt1.2-10g-znver3-mimalloc` (see below).
 `lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
 armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the
 conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
@@ -1207,18 +1209,23 @@ and libtorrent's own release is pinned by the digest alone, so a later 1.2.21 is
 new digest on the same tag and the variant keeps its name.
 
 `lt2.1` is the same build on libtorrent 2.1, which is the other axis a user can
-care about: 2.x keeps no disk cache of its own and maps files instead, and the
-chart sets no cache options, so the same pod spec runs it. `lt1.2-10g` and
+care about: 2.0 maps files instead of caching them, 2.1 reads and writes through
+pread/pwrite with a cache of its own (`src/session.cpp:492` and
+`src/pread_disk_io.cpp:329` at v2.1.3), and the same pod spec runs it. `lt1.2-10g` and
 `lt2.1-10g` are those two builds with two larger compiled-in peer buffers for 10
 Gbit links — `max_peer_recv_buffer_size` 4 MiB against the base build's 2 MiB, and
 `send_not_sent_low_watermark` 1 MiB against 512 KiB — and nothing else differs: the
 base builds already carry five tuned defaults of their own, so `-10g` is not stock
-libtorrent plus two values. Every 10G build links mimalloc for its allocator and the
-base builds keep musl's own, which is what the two profiles differ in besides the
-buffers. All four are built for both architectures, and `hack/e2e-kind.sh` switches
-through each one the way it runs `lt1.2`: the pod's own image and digest, and
-qBittorrent's `buildInfo` reporting the libtorrent line, which is what a tag alone
-cannot say.
+libtorrent plus two values. On the two `lt2.1-10g` builds the chart also seeds
+`Session\DiskQueueSize` at 512 MiB, the size a 10 Gbit link was measured with — the
+queue libtorrent 2.1's writer is sized from — and only where `qBittorrent.conf` has
+no value yet: a value there is the user's (or an earlier seed's), box never replaces
+or removes one, and it stays when the variant changes. Every 10G build links
+mimalloc for its allocator and the base builds keep musl's own, which is what the two
+profiles differ in besides the buffers. All four are built for both architectures, and
+`hack/e2e-kind.sh` switches through each one the way it runs `lt1.2`: the pod's own
+image and digest, and qBittorrent's `buildInfo` reporting the libtorrent line, which is
+what a tag alone cannot say.
 
 The two Zen 3 builds, `lt1.2-10g-znver3` and `lt2.1-10g-znver3`, are the exemption
 from "the e2e tests every variant". They are compiled for AMD Zen 3

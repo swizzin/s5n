@@ -60,6 +60,20 @@ if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host
 fi
 echo "== default render: no PLEX_NO_AUTH_NETWORKS"
 
+# The default qBittorrent is the project's own build, and the image it named is still a
+# variant a box can choose by name: a box already running it keeps that builder, and the
+# admission policy admits both repositories (generated from variants.yaml).
+qbt_default=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml)
+grep -q 'image: ghcr.io/swizzin/qbittorrent:' <<<"$qbt_default" ||
+  { echo "the default render's qBittorrent is not the project's own build"; exit 1; }
+grep -q 'ghcr.io/home-operations/qbittorrent' <<<"$qbt_default" &&
+  { echo "the default render names the home-operations qBittorrent image"; exit 1; }
+helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+  --set apps.qbittorrent.image.variant=home-operations |
+  grep -q 'image: ghcr.io/home-operations/qbittorrent:' ||
+  { echo "the home-operations variant names no home-operations image: a box already on it cannot keep that builder"; exit 1; }
+echo "== default qBittorrent: the project's own build, with home-operations still selectable"
+
 # A rehearsal box keeps DNS and its own pods as its only egress: the public-internet
 # ipBlocks go, and the policies render even when the grant switched networkPolicy.enabled
 # off. A lock that renders nothing is a box with no policy at all.

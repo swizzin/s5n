@@ -396,15 +396,17 @@ func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the plan does not read back: %v", err)
 	}
-	// Both fixture images are exactly what the chart ships, so both map onto
-	// the variant they already are.
+	// The source runs the builder the chart ships for each app: qBittorrent's is
+	// home-operations, which stays a variant of its own so the box keeps that builder, and
+	// Sonarr's is the chart's default.
+	want := map[string]string{"qbittorrent": "home-operations", "sonarr": "default"}
 	for _, name := range []string{"qbittorrent", "sonarr"} {
 		app := p.Apps[name]
 		if app.Image == "" {
 			t.Fatalf("the plan has no %s", name)
 		}
-		if app.Variant != "default" {
-			t.Errorf("%s's image %s mapped onto variant %q, want the one the chart ships it as", name, app.Image, app.Variant)
+		if app.Variant != want[name] {
+			t.Errorf("%s's image %s mapped onto variant %q, want %q", name, app.Image, app.Variant, want[name])
 		}
 	}
 	if strings.Contains(text, "no chart variants") {

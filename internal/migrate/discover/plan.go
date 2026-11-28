@@ -786,8 +786,9 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 	return ""
 }
 
-// named is the variant a picker answers among the chart's variants that share
-// as well, because both entries are that image, so the variant's own name wins
+// named is the variant a picker answers among the chart's variants that share a
+// repository: one name is the answer, and otherwise a build's name wins over "default"
+// (the chart's pick, not a build) and over a former name of the same image.
 func named(candidates []string, byVariant map[string]admission.Image, pick func(admission.Image) bool) string {
 	var matching []string
 	for _, name := range candidates {
@@ -797,6 +798,20 @@ func named(candidates []string, byVariant map[string]admission.Image, pick func(
 	}
 	if len(matching) == 1 {
 		return matching[0]
+	}
+	// The default is the same image as a named build (the chart's own default is lt2.1),
+	// so the digest and tag both name two variants: the build is what the plan says.
+	var builds []string
+	for _, name := range matching {
+		if name != "default" {
+			builds = append(builds, name)
+		}
+	}
+	if len(builds) == 1 {
+		return builds[0]
+	}
+	if len(builds) > 1 {
+		matching = builds
 	}
 	var own []string
 	for _, name := range matching {

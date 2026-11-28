@@ -12,6 +12,15 @@
 # are one list.
 qbittorrent:
   default:
+    # The project's own build on libtorrent 2.1, which is the line a box runs unless it has
+    # a reason to run another: the same image as lt2.1, whose block says what 2.1 is.
+    repository: ghcr.io/swizzin/qbittorrent
+    tag: "5.3.1-lt2.1"
+    digest: sha256:81b22a6824d49944b716ef7b201220f10c9a624339c953e4a87f89c4ca67bdb9
+  home-operations:
+    # The image the default variant named until the project built its own, kept as a real
+    # entry so a box already running it keeps that builder: an unknown variant fails the
+    # render, which stops a seedbox's apply. Nothing chooses it anew.
     repository: ghcr.io/home-operations/qbittorrent
     tag: "5.3.1"
     digest: sha256:fcdbc4ac4a66d8c205ac67e4fe1b578158aaee0a50369c3d04918977f4f359c4
@@ -24,7 +33,7 @@ qbittorrent:
     # qBittorrent's, and libtorrent's release is pinned by the digest alone.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2"
-    digest: sha256:26192c10bb90a0ec52efe0cc86f0da09473867749922bc673bb59f73dce4e37d
+    digest: sha256:c313f26c4bfef1c2bd8d8e9ce4a16b75f457392bfed05a4ecbef4c39593af698
   lt1.2-10g:
     # lt1.2 with two larger compiled-in network buffers for 10 Gbit links --
     # max_peer_recv_buffer_size 4 MiB and send_not_sent_low_watermark 1 MiB -- and nothing
@@ -33,19 +42,21 @@ qbittorrent:
     # keep musl's allocator.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g"
-    digest: sha256:4608611e03d887dd652d3d85dac14ed8e67023fa959a723f6d0b6ab7672843f7
+    digest: sha256:c1ee490bf240c1de3521a3496f700245c7c6b8d0d8abe76d81bd4cebd73fd714
   lt2.1:
-    # The same build on libtorrent 2.1. 2.x keeps no disk cache and maps files instead, and the
-    # chart sets no cache options, so the same pod spec runs it unchanged.
+    # The same build on libtorrent 2.1. 2.0 copied files through mmap; 2.1 reads and writes
+    # with pread/pwrite and a cache of its own (src/session.cpp:492, src/pread_disk_io.cpp:329
+    # at v2.1.3), sized from qBittorrent's Session\DiskQueueSize.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1"
-    digest: sha256:1d4f30b372db59dfb225f8f4eca3c8070307cd0afff434e6857ae0933ef35d02
+    digest: sha256:81b22a6824d49944b716ef7b201220f10c9a624339c953e4a87f89c4ca67bdb9
   lt2.1-10g:
     # lt2.1 with the same two buffers, and nothing else: the libtorrent line and the link
-    # profile are independent axes.
+    # profile are independent axes. The chart seeds a 512 MiB Session\DiskQueueSize on it
+    # (internal/qbtconf), the size a 10 Gbit link was measured with.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1-10g"
-    digest: sha256:1d6ab7ceac8c57a28cfec0d8dc388ea964e7b139d28b6e09302b5cd742ddcc14
+    digest: sha256:396502c5238633c853dcbcc38a1a1eaa15f9874bbce9584140a06f099bf0c521
   lt1.2-10g-znver3:
     # The one build profile the e2e does not run: compiled for AMD Zen 3 (-march=znver3), so it
     # dies with SIGILL on CI's runners and most hosts, and amd64 only. What tests it instead is
@@ -54,13 +65,13 @@ qbittorrent:
     # are the exemption.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
-    digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
+    digest: sha256:42a2cf01cc926061a895141c1272c3e2e3ea966e9cea4b833051052fe522006f
   lt2.1-10g-znver3:
     # The same Zen 3 exemption on libtorrent 2.1: see lt1.2-10g-znver3, the build profile it
-    # shares.
+    # shares, and lt2.1-10g, the disk queue it shares.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt2.1-10g-znver3"
-    digest: sha256:7777bdbe00ff96b8e56c85a62167bc0828a6d4acb010dca67f2bed2c111a2db6
+    digest: sha256:15fa1d5166ea00bd754396f02489ec99a9c823f98c9097f0932cf42d03e47555
   lt1.2-10g-znver3-mimalloc:
     # The former name of lt1.2-10g-znver3, kept as a real entry so a values file that still
     # names it keeps rendering and updating: an unknown variant fails the render
@@ -68,7 +79,7 @@ qbittorrent:
     # image, tag and digest alike, and nothing chooses it anew.
     repository: ghcr.io/swizzin/qbittorrent
     tag: "5.3.1-lt1.2-10g-znver3"
-    digest: sha256:631a88f90321aac65870f2d020e8156cfc65d77e5eeb0299f982b9fea5bba92c
+    digest: sha256:42a2cf01cc926061a895141c1272c3e2e3ea966e9cea4b833051052fe522006f
 
 sonarr:
   default:

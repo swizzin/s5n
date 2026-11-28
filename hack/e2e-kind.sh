@@ -756,14 +756,14 @@ port_forward_stop() {
 }
 
 # ---- the other blessed qBittorrent builds ------------------------------------
-# The chart blesses eight entries: the default image, six of the project's own builds and
-# the former name of one of those. lt1.2 is asserted above; the three below are switched
-# in one at a time, because a variant that is only blessed is a promise nobody keeps.
-# Each is proven three ways: the pod spec names variants.yaml's repository, tag and
-# digest, the runtime's imageID carries the digest, and qBittorrent's own buildInfo
-# reports the libtorrent line the variant's name promises. The two Zen 3 builds are the
-# exemption, explained in their block in variants.yaml.
-for spec in lt2.1:2.1. lt1.2-10g:1.2. lt2.1-10g:2.1.; do
+# The chart blesses nine variants: eight of the project's own builds and `home-operations`,
+# the image the default named until the project built its own. lt1.2 is asserted above; the
+# four below are switched in one at a time, `default` first, because a variant that is only
+# blessed is a promise nobody keeps. Each is proven three ways: the pod spec names
+# variants.yaml's repository, tag and digest, the runtime's imageID carries the digest, and
+# qBittorrent's own buildInfo reports the libtorrent line the variant's name promises. The
+# two Zen 3 builds are the exemption, explained in their block in variants.yaml.
+for spec in default:2.1. lt2.1:2.1. lt1.2-10g:1.2. lt2.1-10g:2.1.; do
   variant=${spec%%:*}; line=${spec##*:}
   v_repository=$(variant_field "$variant" repository)
   v_tag=$(variant_field "$variant" tag)

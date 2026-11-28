@@ -140,7 +140,7 @@ git -C "$clone" tag "s5n-v${chart_version}"
 body="$tmp/body-first.md"
 expect_ok "notes: the tag being released is the only s5n-v* tag" "The first s5n release:" \
   env VERSION="$chart_version" "$clone/hack/release.sh" notes "$body"
-has "notes: first tag -- the --all body, not an empty diff" "$body" "- qbittorrent: ghcr.io/home-operations/qbittorrent:"
+has "notes: first tag -- the --all body, not an empty diff" "$body" "- qbittorrent: ghcr.io/swizzin/qbittorrent:"
 has "notes: first tag -- the platform pins are listed too" "$body" "### Platform pins"
 
 # b.3: a previous tag present -- the diff body. One variant's digest moves in the clone, so
