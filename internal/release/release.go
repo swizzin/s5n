@@ -318,6 +318,14 @@ type Options struct {
 	// against the schema; the seedbox is passed so no file is loaded twice. nil
 	// keeps no holds.
 	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// Pins overlays the digest each tag pin renders, resolving a tag the box has
+	// no record for. A bare apply sets it; update sets PinDigests instead, because
+	// its plan already asked.
+	Pins func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// PinDigests is the digest this run renders for each app pinned to a tag. nil
+	// means Pins decides; an empty map means the caller resolved and there is
+	// nothing pinned.
+	PinDigests map[string]string
 	// Snapshots copies apps before their images move; only `box apply` sets it.
 	Snapshots Snapshotter
 	// NetworkProof proves the cluster's CNI enforces NetworkPolicy before any app
@@ -466,6 +474,26 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		overlayTree(values, box)
 		if err := seedbox.Validate(chart.Schema, values); err != nil {
 			return res, err
+		}
+	}
+	// A tag pin renders repo:tag@digest; box never installs a tag alone. A step
+	// carries the digests its plan resolved, so this apply asks no registry.
+	switch {
+	case opts.PinDigests != nil && len(opts.PinDigests) > 0:
+		overlayTree(values, pinDigests(opts.PinDigests))
+		if err := seedbox.Validate(chart.Schema, values); err != nil {
+			return res, err
+		}
+	case opts.PinDigests == nil && opts.Pins != nil:
+		pinned, err := opts.Pins(ctx, sb, chart, values)
+		if err != nil {
+			return res, err
+		}
+		if len(pinned) > 0 {
+			overlayTree(values, pinned)
+			if err := seedbox.Validate(chart.Schema, values); err != nil {
+				return res, err
+			}
 		}
 	}
 	// Holds keep a rolled-back app on its image; a hold the schema would not
@@ -908,6 +936,16 @@ func snapshotNotes(dirs SnapshotDirs) []string {
 		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
 	}
 	return notes
+}
+
+// pinDigests is the values fragment carrying one digest per pinned app: the tag
+// stays in the values, so the chart renders repo:tag@digest.
+func pinDigests(digests map[string]string) map[string]any {
+	apps := make(map[string]any, len(digests))
+	for app, digest := range digests {
+		apps[app] = map[string]any{"image": map[string]any{"digest": digest}}
+	}
+	return map[string]any{"apps": apps}
 }
 
 // configRoot is the grant's config path, where copies and holds live.
