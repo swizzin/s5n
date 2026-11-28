@@ -496,7 +496,7 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	if cmp >= 0 {
 		// The release has nowhere to go; a rebuilt tag still moves its app, and a
 		// step that installs the same release is how apply moves a values pin.
-		if !anyPinMoved(answers) {
+		if !anyPinMoves(answers) {
 			res.Current = true
 			res.state.LastCheck = u.now()
 			if err := u.State.Save(res.state); err != nil {
@@ -692,10 +692,12 @@ func (u *Updater) reportPlan(res Result, check bool) {
 	}
 }
 
-// anyPinMoved reports a tag that resolves to other bytes than the record's.
-func anyPinMoved(answers []pin.Answer) bool {
+// anyPinMoves reports a tag pin this run moves, by pinnedMove's rule: one that
+// resolves to other bytes than the record's, or one with no record at all, which
+// has never rendered with a digest.
+func anyPinMoves(answers []pin.Answer) bool {
 	for _, answer := range answers {
-		if answer.Moved() {
+		if answer.Digest != "" && (answer.Recorded == "" || answer.Moved()) {
 			return true
 		}
 	}

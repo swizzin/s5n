@@ -326,3 +326,28 @@ func TestACurrentBoxWithAnUncheckedPinSaysSo(t *testing.T) {
 		t.Fatalf("the run does not say the pin was not checked:\n%s", h.out)
 	}
 }
+
+// TestAnUnrecordedTagPinMovesABoxThatIsCurrent: a tag written into values by hand
+// has never rendered with a digest, so a current box still takes it as a step on
+// its own release, the way a newer release would, and records what it rendered.
+func TestAnUnrecordedTagPinMovesABoxThatIsCurrent(t *testing.T) {
+	h := newHarness(t)
+	h.tagPinValues(t, "5.0")
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestC)
+	resolver := &fakeResolver{answers: map[string]string{"registry.example.com/seedbox/sonarr:5.0": digestB}}
+	store := h.withPins(resolver, nil)
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if res.Current {
+		t.Fatalf("update called a box whose tag pin never rendered a digest current:\n%s", h.out)
+	}
+	if len(res.Steps) != 1 || res.Steps[0].From != "0.4.0" || res.Steps[0].To != "0.4.0" {
+		t.Fatalf("steps = %+v, want one step on the same release", res.Steps)
+	}
+	if len(store.pins) != 1 || store.pins[0].Digest != digestB {
+		t.Fatalf("pins = %+v, want the resolved digest recorded", store.pins)
+	}
+}
