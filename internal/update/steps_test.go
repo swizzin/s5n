@@ -357,7 +357,7 @@ func TestMovingApps(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			moving, held, heldBack, images, err := movingApps(tc.from, tc.to, tc.values, tc.holds)
+			moving, held, heldBack, images, err := movingApps(tc.from, tc.to, tc.values, tc.holds, nil)
 			if err != nil {
 				t.Fatalf("movingApps: %v", err)
 			}

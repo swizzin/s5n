@@ -41,6 +41,27 @@ type HoldStore interface {
 	Save(configRoot string, holds []snapshot.Hold) error
 }
 
+// PinStore is the record of the digest each app's tag pin resolved to:
+// `<config root>/.box/pins.json`. The path is an argument because the record lives
+// beside its config root, like a hold.
+type PinStore interface {
+	Load(configRoot string) ([]snapshot.Pin, error)
+	Save(configRoot string, pins []snapshot.Pin) error
+}
+
+// FilePins is PinStore over internal/snapshot's file.
+type FilePins struct{}
+
+// Load reads the records, in app order. A box that pins no tag has no file.
+func (FilePins) Load(configRoot string) ([]snapshot.Pin, error) {
+	return snapshot.LoadPins(configRoot)
+}
+
+// Save replaces the records, removing the file when the list is empty.
+func (FilePins) Save(configRoot string, pins []snapshot.Pin) error {
+	return snapshot.SavePins(configRoot, pins)
+}
+
 // FileHolds is HoldStore over internal/snapshot's file.
 type FileHolds struct{}
 

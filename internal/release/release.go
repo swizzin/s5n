@@ -249,6 +249,13 @@ const (
 // Row is the plan's line for one move. Only a copied app is said to be
 // stopped; an uncopied one says why, so the operator decides.
 func (m SnapshotMove) Row() string {
+	if m.Rebuilt() && m.Uncopied == UncopiedNone {
+		line := fmt.Sprintf("%s: %s was rebuilt, %s -> %s", m.App, m.Ran.Tag, shortDigest(m.Ran.Digest), shortDigest(m.MovedTo.Digest))
+		if !m.Copied {
+			line += " without a snapshot (nothing to copy)"
+		}
+		return line
+	}
 	switch m.Uncopied {
 	case UncopiedNoDigest:
 		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (no pod reports the bytes it runs under tag %s)",
@@ -266,6 +273,13 @@ func (m SnapshotMove) Row() string {
 	}
 	return fmt.Sprintf("%s: moves from %s to %s without a snapshot (nothing to copy)",
 		m.App, m.Ran.Label(), m.MovedTo.Label())
+}
+
+// Rebuilt reports one image republished under the tag it already had: the app moves
+// by digest alone, so a row naming both tags would read as no move at all.
+func (m SnapshotMove) Rebuilt() bool {
+	return m.Ran.Tag != "" && m.Ran.Tag == m.MovedTo.Tag &&
+		m.Ran.Digest != "" && m.Ran.Digest != m.MovedTo.Digest
 }
 
 // SnapshotWork is every app this apply moves; all share one copy.
@@ -936,6 +950,15 @@ func snapshotNotes(dirs SnapshotDirs) []string {
 		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
 	}
 	return notes
+}
+
+// shortDigest is the first eight hex characters, the handle a person reads.
+func shortDigest(digest string) string {
+	hex := strings.TrimPrefix(digest, "sha256:")
+	if len(hex) > 8 {
+		return "sha256:" + hex[:8] + "…"
+	}
+	return digest
 }
 
 // pinDigests is the values fragment carrying one digest per pinned app: the tag

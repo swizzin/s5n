@@ -8,6 +8,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 
 	"github.com/swizzin/s5n/internal/admission"
+	"github.com/swizzin/s5n/internal/pin"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/snapshot"
 )
@@ -164,7 +165,7 @@ type ImageChange struct {
 // Images compare by repository and digest, by tag when neither release pins one.
 // An app in only one release has nothing to migrate. A pin holds an app on one
 // image; it cannot hold one whose repository changes.
-func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.Hold) (moving, held, heldBack []string, images map[string]ImageChange, err error) {
+func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.Hold, answers map[string]pin.Answer) (moving, held, heldBack []string, images map[string]ImageChange, err error) {
 	if len(from.Variants) == 0 || len(to.Variants) == 0 {
 		return nil, nil, nil, nil, nil
 	}
@@ -178,7 +179,7 @@ func movingApps(from, to release.Chart, values map[string]any, holds []snapshot.
 	}
 	images = make(map[string]ImageChange)
 	for _, app := range release.EnabledApps(values) {
-		kind, change := appDecision(app, values, oldImages, newImages, holds)
+		kind, change := appDecision(app, values, oldImages, newImages, holds, answers)
 		switch kind {
 		case moveMoves:
 			moving = append(moving, app)
@@ -209,14 +210,14 @@ const (
 
 // appDecision decides one app's fate: selected variant, both releases' images,
 // values pins and holds.
-func appDecision(app string, values map[string]any, oldImages, newImages map[string]map[string]admission.Image, holds []snapshot.Hold) (appMove, ImageChange) {
+func appDecision(app string, values map[string]any, oldImages, newImages map[string]map[string]admission.Image, holds []snapshot.Hold, answers map[string]pin.Answer) (appMove, ImageChange) {
 	variant := variantOf(values, app)
 	oldImage, oldOK := oldImages[app][variant]
 	newImage, newOK := newImages[app][variant]
 	oldApp, newApp := hasApp(oldImages, app), hasApp(newImages, app)
 	switch {
 	case oldOK && newOK:
-		return shippedMove(app, values, oldImage, newImage, holds)
+		return shippedMove(app, values, oldImage, newImage, holds, answers)
 	case !oldApp && !newApp:
 		// Neither release ships it: there is no install to migrate.
 		return moveNone, ImageChange{}
@@ -234,7 +235,7 @@ func appDecision(app string, values map[string]any, oldImages, newImages map[str
 // shippedMove decides an app both releases ship: the digest is the image, so a
 // re-pushed tag reads as a move. A pin is applied first; a hold decides only
 // when no pin does.
-func shippedMove(app string, values map[string]any, oldImage, newImage admission.Image, holds []snapshot.Hold) (appMove, ImageChange) {
+func shippedMove(app string, values map[string]any, oldImage, newImage admission.Image, holds []snapshot.Hold, answers map[string]pin.Answer) (appMove, ImageChange) {
 	// What the chart did is remembered first, because the pin may hide it.
 	chartMoved := imageMoved(oldImage, newImage)
 	tag, digest := pinOf(values, app)
@@ -243,7 +244,11 @@ func shippedMove(app string, values map[string]any, oldImage, newImage admission
 	case digest != "":
 		oldImage.Digest, newImage.Digest = digest, digest
 	case tag != "":
-		// A tag pin drops the digest: box cannot see whether the tags match.
+		if answer, ok := answers[app]; ok {
+			return pinnedMove(answer, chartMoved)
+		}
+		// A tag pin with no registry answer drops the digest: box cannot see
+		// whether the tags match, and must not read a rebuild as no move.
 		oldImage.Digest, newImage.Digest = "", ""
 	}
 	if h, ok := holdFor(holds, app); ok && !pinned {
@@ -261,6 +266,23 @@ func shippedMove(app string, values map[string]any, oldImage, newImage admission
 		return moveMoves, ImageChange{Ran: imageRef(oldImage), MovedTo: imageRef(newImage)}
 	}
 	if chartMoved && pinned {
+		return moveHeld, ImageChange{}
+	}
+	return moveNone, ImageChange{}
+}
+
+// pinnedMove decides a tag-pinned app from what the tag resolved to: a rebuilt tag
+// is an image move, and the chart's own pins are not the app's image at all.
+func pinnedMove(answer pin.Answer, chartMoved bool) (appMove, ImageChange) {
+	ran := snapshot.ImageRef{Repository: answer.Repository, Tag: answer.Tag, Digest: answer.Recorded}
+	movedTo := snapshot.ImageRef{Repository: answer.Repository, Tag: answer.Tag, Digest: answer.Digest}
+	switch {
+	case answer.Digest == "":
+		// Nothing to render; Resolve refuses this pin before the plan.
+		return moveNone, ImageChange{}
+	case answer.Recorded == "" || answer.Moved():
+		return moveMoves, ImageChange{Ran: ran, MovedTo: movedTo}
+	case chartMoved:
 		return moveHeld, ImageChange{}
 	}
 	return moveNone, ImageChange{}
