@@ -1,18 +1,12 @@
 package snapshot
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // PinsName is the file beside the snapshots that records the digest box resolved
@@ -55,42 +49,13 @@ func PinsPath(configRoot string) string {
 // no file, which is not an error; anything else is an error naming the path, because
 // guessing here renders a tag without the digest box meant to run.
 func LoadPins(configRoot string) ([]Pin, error) {
-	path := PinsPath(configRoot)
-	t, err := openTree(configRoot)
-	if err != nil {
-		// A config root that is not there holds nothing, like a box with no pin
-		// file.
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("pins %s: %w", path, err)
-	}
-	defer t.Close()
-	name, err := t.rel(path)
-	if err != nil {
-		return nil, fmt.Errorf("pins %s: %w", path, err)
-	}
-	data, err := t.readFile(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("pins %s: %w", path, err)
-	}
-	var doc pinsFile
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("pins %s: %w", path, err)
-	}
-	// A second document after the first is trailing junk: only io.EOF means the
-	// file ended where the object did.
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("pins %s: holds more than the one document", path)
+	doc, ok, err := loadBoxFile[pinsFile](configRoot, pinsFileRecord)
+	if err != nil || !ok {
+		return nil, err
 	}
 	pins, err := checkedPins(doc.Pins)
 	if err != nil {
-		return nil, fmt.Errorf("pins %s: %w", path, err)
+		return nil, fmt.Errorf("pins %s: %w", PinsPath(configRoot), err)
 	}
 	for i := range pins {
 		pins[i].Resolved = pins[i].Resolved.UTC()
@@ -102,56 +67,14 @@ func LoadPins(configRoot string) ([]Pin, error) {
 // through internal/atomicfile so a crash leaves the file as it was or complete. An
 // empty list removes the file: its absence is what LoadPins reads as none.
 func SavePins(configRoot string, pins []Pin) error {
-	path := PinsPath(configRoot)
 	checked, err := checkedPins(pins)
 	if err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	t, err := openTree(configRoot)
-	if err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	defer t.Close()
-	name, err := t.rel(path)
-	if err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	if len(checked) == 0 {
-		if err := t.remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("pins %s: %w", path, err)
-		}
-		return nil
-	}
-	// A link where the pin file goes is a refusal: box writes this file itself, and
-	// the user can only have put a link there to point box somewhere.
-	info, err := t.lstat(name)
-	switch {
-	case err == nil && info.Mode()&fs.ModeSymlink != 0:
-		return fmt.Errorf("pins %s: it is a symlink, and box writes the pin file itself; remove it and box will write a new one", path)
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	own, err := treeOwnerOf(t)
-	if err != nil {
-		return err
-	}
-	if err := makeDirIn(t, filepath.Dir(name), own); err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
+		return fmt.Errorf("pins %s: %w", PinsPath(configRoot), err)
 	}
 	for i := range checked {
 		checked[i].Resolved = checked[i].Resolved.UTC()
 	}
-	data, err := json.MarshalIndent(pinsFile{Pins: checked}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	if err := atomicfile.WriteIn(t.root, name, append(data, '\n'), treeFileMode); err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	if err := own.ownIn(t, name); err != nil {
-		return fmt.Errorf("pins %s: %w", path, err)
-	}
-	return nil
+	return saveBoxFile(configRoot, pinsFileRecord, pinsFile{Pins: checked}, len(checked) == 0)
 }
 
 // WithPin puts one app's resolution in place of any it had, in app order: a tag

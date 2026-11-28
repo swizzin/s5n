@@ -492,22 +492,23 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	// A tag pin renders repo:tag@digest; box never installs a tag alone. A step
 	// carries the digests its plan resolved, so this apply asks no registry.
-	switch {
-	case opts.PinDigests != nil && len(opts.PinDigests) > 0:
+	if opts.PinDigests == nil {
+		if opts.Pins != nil {
+			pinned, err := opts.Pins(ctx, sb, chart, values)
+			if err != nil {
+				return res, err
+			}
+			if len(pinned) > 0 {
+				overlayTree(values, pinned)
+				if err := seedbox.Validate(chart.Schema, values); err != nil {
+					return res, err
+				}
+			}
+		}
+	} else if len(opts.PinDigests) > 0 {
 		overlayTree(values, pinDigests(opts.PinDigests))
 		if err := seedbox.Validate(chart.Schema, values); err != nil {
 			return res, err
-		}
-	case opts.PinDigests == nil && opts.Pins != nil:
-		pinned, err := opts.Pins(ctx, sb, chart, values)
-		if err != nil {
-			return res, err
-		}
-		if len(pinned) > 0 {
-			overlayTree(values, pinned)
-			if err := seedbox.Validate(chart.Schema, values); err != nil {
-				return res, err
-			}
 		}
 	}
 	// Holds keep a rolled-back app on its image; a hold the schema would not

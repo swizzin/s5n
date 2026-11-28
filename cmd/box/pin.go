@@ -20,6 +20,15 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
+// pinCommand and unpinCommand are the two spellings of one decision.
+const (
+	pinCommand   = "pin"
+	unpinCommand = "unpin"
+)
+
+// valuesAppsKey is the values key every app's pin lives under.
+const valuesAppsKey = "apps"
+
 // pinRequest is one `box pin` or `box unpin` over the two files.
 type pinRequest struct {
 	GrantPath  string
@@ -129,7 +138,7 @@ func (p *pinFiles) decide(ctx context.Context, req pinRequest, chart release.Cha
 // record a tag pin kept.
 func (p *pinFiles) unpin(sb *seedbox.Seedbox, root, app string) (pinOutcome, error) {
 	doc := sb.Values.Map()
-	apps, _ := doc["apps"].(map[string]any)
+	apps, _ := doc[valuesAppsKey].(map[string]any)
 	entry, _ := apps[app].(map[string]any)
 	image, _ := entry["image"].(map[string]any)
 	_, tag := image["tag"]
@@ -178,7 +187,7 @@ func unpinDeletes(doc map[string]any, app string, image, entry, apps map[string]
 		return []string{"apps." + app}
 	}
 	if len(doc) > 1 {
-		return []string{"apps"}
+		return []string{valuesAppsKey}
 	}
 	return nil
 }
@@ -272,17 +281,25 @@ func addPinFlags(fs *flag.FlagSet) *pinFlags {
 	return o
 }
 
-// pinArgs splits the app and the ref from the flags that may follow them.
-func pinArgs(fs *flag.FlagSet, want string) ([]string, error) {
+// pinArgs parses one command's arguments: the app and, for pin, the ref come
+// first, and flags may follow, which is why the parse is restarted after each.
+func pinArgs(fs *flag.FlagSet, command string, args []string, wantRef bool) ([]string, error) {
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
 	rest := fs.Args()
 	if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
-		return nil, fmt.Errorf("box %s takes an app: box %s <app>%s", want, want, map[string]string{"pin": " <ref>", "unpin": ""}[want])
+		more := ""
+		if wantRef {
+			more = " <ref>"
+		}
+		return nil, fmt.Errorf("box %s takes an app: box %s <app>%s", command, command, more)
 	}
 	positional := []string{rest[0]}
 	if err := fs.Parse(rest[1:]); err != nil {
 		return nil, err
 	}
-	if want == "pin" {
+	if wantRef {
 		if fs.NArg() < 1 {
 			return nil, errors.New("box pin takes a ref: box pin <app> <version|tag|digest|tag@digest>")
 		}
@@ -292,7 +309,7 @@ func pinArgs(fs *flag.FlagSet, want string) ([]string, error) {
 		}
 	}
 	if fs.NArg() != 0 {
-		return nil, fmt.Errorf("box %s takes no more arguments: %s", want, strings.Join(fs.Args(), " "))
+		return nil, fmt.Errorf("box %s takes no more arguments: %s", command, strings.Join(fs.Args(), " "))
 	}
 	return positional, nil
 }
@@ -306,7 +323,7 @@ func runPin(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("pin", flag.ExitOnError)
 	o := addPinFlags(fs)
-	positional, err := pinArgs(fs, "pin")
+	positional, err := pinArgs(fs, pinCommand, args, true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -324,7 +341,7 @@ func runUnpin(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("unpin", flag.ExitOnError)
 	o := addPinFlags(fs)
-	positional, err := pinArgs(fs, "unpin")
+	positional, err := pinArgs(fs, unpinCommand, args, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)

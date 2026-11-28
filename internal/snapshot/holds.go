@@ -1,18 +1,12 @@
 package snapshot
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // HoldsName is the file beside the snapshots that records which apps this box holds
@@ -68,42 +62,13 @@ func HoldsPath(configRoot string) string {
 // box cannot parse, an unknown field, two holds for one app. Guessing here drops a
 // hold, and a dropped hold moves an app onto the very image its rollback avoided.
 func LoadHolds(configRoot string) ([]Hold, error) {
-	path := HoldsPath(configRoot)
-	t, err := openTree(configRoot)
-	if err != nil {
-		// A config root that is not there holds nothing, like a box with no hold
-		// file.
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("holds %s: %w", path, err)
-	}
-	defer t.Close()
-	name, err := t.rel(path)
-	if err != nil {
-		return nil, fmt.Errorf("holds %s: %w", path, err)
-	}
-	data, err := t.readFile(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("holds %s: %w", path, err)
-	}
-	var doc holdsFile
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("holds %s: %w", path, err)
-	}
-	// A second document after the first is trailing junk: only io.EOF means the
-	// file ended where the object did.
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("holds %s: holds more than the one document", path)
+	doc, ok, err := loadBoxFile[holdsFile](configRoot, holdsFileRecord)
+	if err != nil || !ok {
+		return nil, err
 	}
 	holds, err := checkedHolds(doc.Holds)
 	if err != nil {
-		return nil, fmt.Errorf("holds %s: %w", path, err)
+		return nil, fmt.Errorf("holds %s: %w", HoldsPath(configRoot), err)
 	}
 	for i := range holds {
 		holds[i].Since = holds[i].Since.UTC()
@@ -115,57 +80,14 @@ func LoadHolds(configRoot string) ([]Hold, error) {
 // internal/atomicfile so a crash leaves the file as it was or complete. An empty
 // list removes the file: its absence is what LoadHolds reads as none.
 func SaveHolds(configRoot string, holds []Hold) error {
-	path := HoldsPath(configRoot)
 	checked, err := checkedHolds(holds)
 	if err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	t, err := openTree(configRoot)
-	if err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	defer t.Close()
-	name, err := t.rel(path)
-	if err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	if len(checked) == 0 {
-		if err := t.remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("holds %s: %w", path, err)
-		}
-		return nil
-	}
-	// A link where the hold file goes is a refusal: box writes this file itself, and
-	// the user can only have put a link there to point box somewhere. The rename would
-	// safely replace the link, which is still not what the operator asked for.
-	info, err := t.lstat(name)
-	switch {
-	case err == nil && info.Mode()&fs.ModeSymlink != 0:
-		return fmt.Errorf("holds %s: it is a symlink, and box writes the hold file itself; remove it and box will write a new one", path)
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	own, err := treeOwnerOf(t)
-	if err != nil {
-		return err
-	}
-	if err := makeDirIn(t, filepath.Dir(name), own); err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
+		return fmt.Errorf("holds %s: %w", HoldsPath(configRoot), err)
 	}
 	for i := range checked {
 		checked[i].Since = checked[i].Since.UTC()
 	}
-	data, err := json.MarshalIndent(holdsFile{Holds: checked}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	if err := atomicfile.WriteIn(t.root, name, append(data, '\n'), treeFileMode); err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	if err := own.ownIn(t, name); err != nil {
-		return fmt.Errorf("holds %s: %w", path, err)
-	}
-	return nil
+	return saveBoxFile(configRoot, holdsFileRecord, holdsFile{Holds: checked}, len(checked) == 0)
 }
 
 // WithHold puts one app's hold in place of any it had, in app order: a hold is never

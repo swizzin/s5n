@@ -18,7 +18,7 @@ const registryDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 // registryServer is a registry that answers one tag, on loopback and in the
 // clear, which is the only plain HTTP box speaks.
-func registryServer(t *testing.T, status func(ref string) int, digest string) (*httptest.Server, *int32) {
+func registryServer(t *testing.T, status func(ref string) int) (*httptest.Server, *int32) {
 	var asks int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v2/" {
@@ -38,7 +38,7 @@ func registryServer(t *testing.T, status func(ref string) int, digest string) (*
 			w.WriteHeader(code)
 			return
 		}
-		w.Header().Set("Docker-Content-Digest", digest)
+		w.Header().Set("Docker-Content-Digest", registryDigest)
 		w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusOK)
@@ -52,7 +52,7 @@ func loopbackRepository(srv *httptest.Server) string {
 }
 
 func TestRegistryResolvesATagToItsManifestDigest(t *testing.T) {
-	srv, asks := registryServer(t, nil, registryDigest)
+	srv, asks := registryServer(t, nil)
 	digest, err := Registry{Timeout: 5 * time.Second}.Resolve(context.Background(), loopbackRepository(srv), "5.3-lt2.1")
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestRegistryResolvesATagToItsManifestDigest(t *testing.T) {
 }
 
 func TestRegistrySaysNotFoundForATagThatIsNotThere(t *testing.T) {
-	srv, _ := registryServer(t, func(string) int { return http.StatusNotFound }, registryDigest)
+	srv, _ := registryServer(t, func(string) int { return http.StatusNotFound })
 	_, err := Registry{Timeout: 5 * time.Second}.Resolve(context.Background(), loopbackRepository(srv), "5.2-lt2.1")
 	if !errors.Is(err, pin.ErrNotFound) {
 		t.Fatalf("Resolve = %v, want pin.ErrNotFound", err)
@@ -83,7 +83,7 @@ func TestRegistryRetriesAServerError(t *testing.T) {
 			return http.StatusBadGateway
 		}
 		return http.StatusOK
-	}, registryDigest)
+	})
 	var waits []time.Duration
 	digest, err := Registry{
 		Timeout: 5 * time.Second,
@@ -147,7 +147,7 @@ func TestPlainRegistryIsOnlyLoopback(t *testing.T) {
 func TestRegistrySaysNotFoundForGhcrForbidden(t *testing.T) {
 	// ghcr answers 403 for a package that is missing or private, which is the
 	// same answer as 404.
-	srv, _ := registryServer(t, func(string) int { return http.StatusForbidden }, registryDigest)
+	srv, _ := registryServer(t, func(string) int { return http.StatusForbidden })
 	_, err := Registry{Timeout: 5 * time.Second}.Resolve(context.Background(), loopbackRepository(srv), "5.2-lt2.1")
 	if !errors.Is(err, pin.ErrNotFound) {
 		t.Fatalf("Resolve = %v, want pin.ErrNotFound", err)

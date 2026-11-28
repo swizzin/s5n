@@ -98,9 +98,9 @@ func main() {
 		runStatus(ctx, args)
 	case "rollback":
 		runRollback(ctx, args)
-	case "pin":
+	case pinCommand:
 		runPin(ctx, args)
-	case "unpin":
+	case unpinCommand:
 		runUnpin(ctx, args)
 	case "migrate":
 		runMigrate(ctx, args)
