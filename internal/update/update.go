@@ -18,6 +18,8 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/swizzin/s5n/internal/admission"
+	"github.com/swizzin/s5n/internal/pin"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -176,8 +178,17 @@ type Result struct {
 	pins map[string]string
 	// holds are the rollback holds the plan honoured, by app.
 	holds map[string]snapshot.Hold
-	// configRoot is where holds and snapshots live.
+	// configRoot is where holds, pins and snapshots live.
 	configRoot string
+	// pinWarnings are the pins the registry did not answer, said before the
+	// steps; pinNotes are the pins the chart has moved past.
+	pinWarnings []string
+	pinNotes    []string
+	// pinDigests is what every step's apply renders for a tag pin, and
+	// pinAnswers are this run's resolutions, whose records are written once
+	// every step has succeeded.
+	pinDigests map[string]string
+	pinAnswers []pin.Answer
 }
 
 // Updater is `box update`'s whole decision.
@@ -203,6 +214,12 @@ type Updater struct {
 	Notify func(context.Context, Notice)
 	// Holds is the record of apps held at an older image; nil keeps none.
 	Holds HoldStore
+	// Pins resolves a tag pin against the registry; nil refuses a tag pin, as a
+	// box that cannot ask has nothing to render it with.
+	Pins pin.Resolver
+	// PinStore is where a resolved tag pin is recorded; nil keeps none, and a tag
+	// pin then refuses before the plan.
+	PinStore PinStore
 	// BoxVersion is compared with every release's min-box; "dev" skips it.
 	BoxVersion string
 	// Say is every line update writes.
@@ -270,7 +287,11 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if u.OpenCluster == nil {
 		return res, errors.New("update needs a workload client: it stops what it snapshots")
 	}
-	ok, err := u.Confirm.Ask(fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target), false)
+	question := fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target)
+	if res.Installed == res.Target {
+		question = fmt.Sprintf("move %s's pinned images?", res.Name)
+	}
+	ok, err := u.Confirm.Ask(question, false)
 	if err != nil {
 		return res, err
 	}
@@ -303,7 +324,29 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		res.Taken = append(res.Taken, step.Step)
 	}
+	// The digests are what the tags resolved to before the steps; recording them
+	// now means a step that moved nothing cannot claim a check it did not make,
+	// and a failed run keeps the record it started with.
+	if err := u.settlePins(res); err != nil {
+		return res, fmt.Errorf("%s is on %s, but the pins could not be written: %w", res.Name, res.Target, err)
+	}
 	return res, nil
+}
+
+// settlePins writes this run's resolutions after the steps succeeded.
+func (u *Updater) settlePins(res Result) error {
+	added := pin.Records(res.pinAnswers, res.Target, u.now())
+	if len(added) == 0 {
+		return nil
+	}
+	records, err := u.PinStore.Load(res.configRoot)
+	if err != nil {
+		return err
+	}
+	for _, record := range added {
+		records = snapshot.WithPin(records, record)
+	}
+	return u.PinStore.Save(res.configRoot, records)
 }
 
 // plan is every read: files, deployed release, published releases, target and
@@ -373,38 +416,33 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	if res.Name == "" {
 		res.Name = release.ReleaseName
 	}
-	// Nothing at or above installed: current. A named target is still read.
-	if len(releases) == 0 && strings.TrimSpace(opts.Apply.ChartVersion) == "" {
-		res.Target = installed.ChartVersion
-		res.Current = true
-		res.state.LastCheck = u.now()
-		if err := u.State.Save(res.state); err != nil {
+	// Nothing at or above installed means the release is current; a named target is
+	// still read. Pins are resolved either way, below: a rebuilt tag is work.
+	noNewer := len(releases) == 0 && strings.TrimSpace(opts.Apply.ChartVersion) == ""
+	target := installed.ChartVersion
+	if !noNewer {
+		skipped, skips, err := []string(nil), []release.VersionSkip(nil), error(nil)
+		if target, skipped, skips, err = u.target(ctx, opts, releases, state); err != nil {
 			return res, err
 		}
-		return res, nil
-	}
+		res.Skipped = skipped
+		res.Skips = skips
 
-	target, skipped, skips, err := u.target(ctx, opts, releases, state)
-	if err != nil {
-		return res, err
+		// A named target can be a prerelease the listing leaves out; its floors are
+		// the chart's own annotations.
+		if !published(releases, target) {
+			chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: target})
+			if err != nil {
+				return res, err
+			}
+			releases = append(releases, release.Published{
+				Version:     target,
+				MinBox:      strings.TrimSpace(chart.Annotations[release.MinBoxAnnotation]),
+				UpgradeFrom: strings.TrimSpace(chart.Annotations[release.UpgradeFromAnnotation]),
+			})
+		}
 	}
 	res.Target = target
-	res.Skipped = skipped
-	res.Skips = skips
-
-	// A named target can be a prerelease the listing leaves out; its floors are
-	// the chart's own annotations.
-	if !published(releases, target) {
-		chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: target})
-		if err != nil {
-			return res, err
-		}
-		releases = append(releases, release.Published{
-			Version:     target,
-			MinBox:      strings.TrimSpace(chart.Annotations[release.MinBoxAnnotation]),
-			UpgradeFrom: strings.TrimSpace(chart.Annotations[release.UpgradeFromAnnotation]),
-		})
-	}
 
 	cmp, err := compareVersions(installed.ChartVersion, target)
 	if err != nil {
@@ -416,18 +454,12 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, fmt.Errorf("%s is on %s and --chart-version names %s: box update never moves a release backwards",
 			release.ReleaseName, installed.ChartVersion, target)
 	}
-	if cmp >= 0 {
-		res.Current = true
-		res.state.LastCheck = u.now()
-		if err := u.State.Save(res.state); err != nil {
+
+	var steps []Step
+	if cmp < 0 {
+		if steps, err = planSteps(installed.ChartVersion, target, u.BoxVersion, releases); err != nil {
 			return res, err
 		}
-		return res, nil
-	}
-
-	steps, err := planSteps(installed.ChartVersion, target, u.BoxVersion, releases)
-	if err != nil {
-		return res, err
 	}
 	// The target's effective values are what apply installs and what this run
 	// is checked against.
@@ -440,7 +472,41 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	res.values = values
-	res.Steps, res.pins, res.holds, err = u.stepsPlan(ctx, repo, fromChart, steps, values, holds)
+	var records []snapshot.Pin
+	if u.PinStore != nil {
+		if records, err = u.PinStore.Load(root); err != nil {
+			return res, err
+		}
+	}
+	tagPins, err := pin.TaggedPins(toChart.Variants, values, release.EnabledApps(values), records)
+	if err != nil {
+		return res, err
+	}
+	if len(tagPins) > 0 && u.PinStore == nil {
+		return res, fmt.Errorf("%s is pinned to a tag and this box keeps no pin file: `box pin` records the digest it renders", strings.Join(pinApps(tagPins), ", "))
+	}
+	answers, err := pin.Resolve(ctx, u.Pins, tagPins)
+	if err != nil {
+		return res, err
+	}
+	res.pinAnswers = answers
+	res.pinDigests = pin.Digests(answers)
+	res.pinWarnings = pin.Warnings(answers)
+	res.pinNotes = chartMovedPastPins(answers, toChart, values)
+	if cmp >= 0 {
+		// The release has nowhere to go; a rebuilt tag still moves its app, and a
+		// step that installs the same release is how apply moves a values pin.
+		if !anyPinMoves(answers) {
+			res.Current = true
+			res.state.LastCheck = u.now()
+			if err := u.State.Save(res.state); err != nil {
+				return res, err
+			}
+			return res, nil
+		}
+		steps = []Step{{From: installed.ChartVersion, To: installed.ChartVersion}}
+	}
+	res.Steps, res.pins, res.holds, err = u.stepsPlan(ctx, repo, fromChart, steps, values, holds, answersByApp(answers))
 	if err != nil {
 		return res, err
 	}
@@ -454,7 +520,7 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 
 // stepsPlan compares each step's images with the release before it, and
 // carries held pins and the catalog's copy globs for the report.
-func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart, steps []Step, values map[string]any, holds []snapshot.Hold) ([]StepPlan, map[string]string, map[string]snapshot.Hold, error) {
+func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart, steps []Step, values map[string]any, holds []snapshot.Hold, answers map[string]pin.Answer) ([]StepPlan, map[string]string, map[string]snapshot.Hold, error) {
 	var plans []StepPlan
 	pins := make(map[string]string)
 	heldByRollback := make(map[string]snapshot.Hold)
@@ -463,7 +529,7 @@ func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		moving, held, heldBack, images, err := movingApps(from, to, values, holds)
+		moving, held, heldBack, images, err := movingApps(from, to, values, holds, answers)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -565,7 +631,20 @@ func (u *Updater) reportPlan(res Result, check bool) {
 		// Say why an app the chart moved stays: a plan that looks forgetful is
 		// worse than one that names the pin.
 		var held []say.Row
+		pinned := make(map[string]bool, len(res.pinAnswers))
+		for _, answer := range res.pinAnswers {
+			pinned[answer.App] = true
+		}
 		for _, step := range res.Steps {
+			// A pin's rebuilt tag is a move the heading cannot show: both sides
+			// read as the same version. A chart bump's row would be noise.
+			for _, app := range step.Moving {
+				change := step.Images[app]
+				move := release.SnapshotMove{App: app, Ran: change.Ran, MovedTo: change.MovedTo, Copied: change.Snapshot}
+				if pinned[app] && move.Rebuilt() {
+					held = append(held, say.Row{Mark: say.MarkNote, Facts: []string{move.Row()}})
+				}
+			}
 			// An app with nothing to copy is never rolled back; say so before
 			// the step, because it changes what a failure costs.
 			for _, app := range step.Moving {
@@ -601,10 +680,75 @@ func (u *Updater) reportPlan(res Result, check bool) {
 		rows = append(rows, say.Row{Mark: say.MarkNeeds, Facts: []string{
 			fmt.Sprintf("%s %s failed to update on this box before; box takes it again when a newer release is out", res.Name, bad)}})
 	}
+	for _, warning := range res.pinWarnings {
+		rows = append(rows, say.Row{Mark: say.MarkNeeds, Facts: []string{warning}})
+	}
 	if check {
 		rows = append(rows, say.Row{Mark: say.MarkNote, Facts: []string{"--check: nothing was written but the check time"}})
 	}
 	r.Rows(rows)
+	for _, note := range res.pinNotes {
+		r.Muted(note)
+	}
+}
+
+// anyPinMoves reports a tag pin this run moves, by pinnedMove's rule: one that
+// resolves to other bytes than the record's, or one with no record at all, which
+// has never rendered with a digest.
+func anyPinMoves(answers []pin.Answer) bool {
+	for _, answer := range answers {
+		if answer.Digest != "" && (answer.Recorded == "" || answer.Moved()) {
+			return true
+		}
+	}
+	return false
+}
+
+// pinApps names the tag pins for a refusal.
+func pinApps(pins []pin.Tagged) []string {
+	out := make([]string, 0, len(pins))
+	for _, p := range pins {
+		out = append(out, p.App)
+	}
+	return out
+}
+
+// answersByApp is this run's resolutions by app, for the step that compares
+// images.
+func answersByApp(answers []pin.Answer) map[string]pin.Answer {
+	out := make(map[string]pin.Answer, len(answers))
+	for _, a := range answers {
+		out[a.App] = a
+	}
+	return out
+}
+
+// chartMovedPastPins says, for each pin the chart has moved past, that its tag
+// still gets rebuilds only while its publisher still builds that version. box
+// cannot know when someone else stops building it, so it never claims the pin has
+// stopped moving.
+func chartMovedPastPins(answers []pin.Answer, chart release.Chart, values map[string]any) []string {
+	if len(answers) == 0 || len(chart.Variants) == 0 {
+		return nil
+	}
+	images, err := admission.Images(chart.Variants)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, a := range answers {
+		image, ok := images[a.App][variantOf(values, a.App)]
+		if !ok || image.Tag == "" {
+			continue
+		}
+		version := pin.ShapeOf(a.Tag).Version(a.Tag)
+		if version == "" || strings.HasPrefix(image.Tag, version) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: the chart is on %s, and %s gets rebuilds only while its publisher still builds that version",
+			a.App, image.Tag, a.Tag))
+	}
+	return out
 }
 
 // planHeading is the update's first line: what moves, in how many steps.
@@ -619,6 +763,10 @@ func planHeading(res Result) string {
 			verb = "moves"
 		}
 		facts = append(facts, apps+" "+verb)
+	}
+	if res.Installed == res.Target {
+		// A step on the same release is a values pin that moved.
+		return fmt.Sprintf("%s %s · %s", res.Name, res.Installed, strings.Join(facts, " · "))
 	}
 	return fmt.Sprintf("%s %s → %s · %s", res.Name, res.Installed, res.Target, strings.Join(facts, " · "))
 }
@@ -657,7 +805,12 @@ func andList(items []string) string {
 func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, base release.Options) error {
 	r := u.report()
 	name := step.From + " → " + step.To
-	handle := r.Start(say.Op{Name: name, Label: fmt.Sprintf("updating %s to %s", res.Name, step.To)})
+	label := fmt.Sprintf("updating %s to %s", res.Name, step.To)
+	if step.From == step.To {
+		name = step.From
+		label = fmt.Sprintf("moving %s's pinned images", res.Name)
+	}
+	handle := r.Start(say.Op{Name: name, Label: label})
 
 	// Read the revision before the first write: a snapshot failure still knows
 	// what the box is on and that nothing moved.
@@ -717,6 +870,8 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	// budget and hide the crashloop from the gate. The release that stays is
 	// applied once more with hooks below.
 	applyOpts.SkipHooks = true
+	// The plan already resolved every tag pin; the apply renders that answer.
+	applyOpts.PinDigests = res.pinDigests
 	gate, outcome, err := u.applyAndGate(ctx, rel, cluster, step, applyOpts)
 	if err != nil {
 		handle.Failed(err)

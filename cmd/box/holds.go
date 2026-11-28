@@ -43,14 +43,20 @@ func (b *boxHolds) values(_ context.Context, sb *seedbox.Seedbox, chart release.
 	return overlay, nil
 }
 
+// settler is a record an apply keeps: holds that lapsed, and a pin's digest. Each
+// is written only after the apply succeeded.
+type settler interface{ applied() }
+
 // applyThenSettle forgets lapsed holds only after success: dropping one on a
 // failure would move the app onto the avoided image.
-func applyThenSettle(ctx context.Context, apply func(context.Context, release.Options) (release.Result, error), opts release.Options, holds *boxHolds) (release.Result, error) {
+func applyThenSettle(ctx context.Context, apply func(context.Context, release.Options) (release.Result, error), opts release.Options, records ...settler) (release.Result, error) {
 	res, err := apply(ctx, opts)
 	if err != nil {
 		return res, err
 	}
-	holds.applied()
+	for _, record := range records {
+		record.applied()
+	}
 	return res, nil
 }
 

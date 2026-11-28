@@ -762,7 +762,10 @@ func migrateRelease(ctx context.Context, o *migrateApplyFlags, chart release.Cha
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: setup.NetResolver{}}
 	holds := newBoxHolds(out)
 	opts.Holds = holds.values
-	return applyThenSettle(ctx, app.Apply, opts, holds)
+	// A tag pin renders with its digest here as in every apply.
+	pins := newBoxPins(out, release.Registry{})
+	opts.Pins = pins.values
+	return applyThenSettle(ctx, app.Apply, opts, holds, pins)
 }
 
 // releaseSecretName is `<release>-keys` or `secrets.existingSecret`.

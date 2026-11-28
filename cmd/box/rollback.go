@@ -115,6 +115,9 @@ func runRollback(ctx context.Context, args []string) {
 	// after a successful apply.
 	holds := newBoxHolds(out)
 	opts.Apply.Holds = holds.values
+	// A pin is the stronger claim and renders with its digest here too.
+	pins := newBoxPins(out, release.Registry{})
+	opts.Apply.Pins = pins.values
 
 	rb := &update.Rollback{
 		Charts: charts,
@@ -129,7 +132,7 @@ func runRollback(ctx context.Context, args []string) {
 			return &update.NewestSnapshots{ConfigRoot: configRoot, Values: values}, nil
 		},
 		Apply: func(ctx context.Context, opts release.Options) (release.Result, error) {
-			return applyThenSettle(ctx, applier.Apply, opts, holds)
+			return applyThenSettle(ctx, applier.Apply, opts, holds, pins)
 		},
 		Holds:   update.FileHolds{},
 		Confirm: confirmer(out, *o.yes),

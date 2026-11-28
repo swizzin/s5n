@@ -96,9 +96,8 @@ func TestStatusLine(t *testing.T) {
 				f.HoldBox = true
 				f.State.Failed = []string{"0.5.2"}
 				f.Holds = []snapshot.Hold{{App: "radarr", Avoiding: snapshot.ImageRef{Repository: "ghcr.io/example/radarr", Tag: "6.3"}}}
-				f.Pins = map[string]string{"sonarr": "4.0.14"}
 			},
-			want: "s5n 0.5.1 · last update 0.5.0 → 0.5.1 Nov 15 03:12 ok · next check ~04:12 · held: box, release 0.5.2 (failed), radarr (rolled back from 6.3), sonarr (pinned)",
+			want: "s5n 0.5.1 · last update 0.5.0 → 0.5.1 Nov 15 03:12 ok · next check ~04:12 · held: box, release 0.5.2 (failed), radarr (rolled back from 6.3)",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -108,6 +107,41 @@ func TestStatusLine(t *testing.T) {
 				t.Fatalf("statusLine:\n got %q\nwant %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestStatusPinsSayWhatEachAppIsOn: a tag follows, a digest is frozen, and status
+// asks no registry to say so.
+func TestStatusPinsSayWhatEachAppIsOn(t *testing.T) {
+	f := statusTest()
+	checked := time.Date(2026, 11, 27, 10, 0, 0, 0, time.Local)
+	f.Pins = map[string]valuePin{
+		"qbittorrent": {Tag: "5.3-lt2.1"},
+		"radarr":      {Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		"sonarr":      {Tag: "5.0"},
+	}
+	f.PinRecords = []snapshot.Pin{
+		{App: "qbittorrent", Repository: "ghcr.io/example/qbittorrent", Tag: "5.3-lt2.1",
+			Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Resolved: checked, Chart: "0.5.1"},
+		// A record for another tag is not this pin's: the tag was rewritten.
+		{App: "sonarr", Repository: "ghcr.io/example/sonarr", Tag: "4.0", Digest: "sha256:cccc", Resolved: checked},
+	}
+	got := statusPins(f)
+	want := []string{
+		"qbittorrent: follows 5.3-lt2.1 (sha256:aaaaaaaa…, checked Nov 27)",
+		"radarr: frozen at sha256:bbbbbbbb…",
+		"sonarr: follows 5.0 (no digest yet)",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("statusPins = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("statusPins[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if strings.Contains(statusLine(f), "pinned") {
+		t.Fatalf("the one line still folds pins into held:\n%s", statusLine(f))
 	}
 }
 
@@ -134,7 +168,7 @@ func TestValuePins(t *testing.T) {
   plex:
     enabled: true
 `))
-	if len(pins) != 2 || pins["sonarr"] != "4.0.14" || pins["radarr"] != "sha256:abc" {
+	if len(pins) != 2 || pins["sonarr"].Tag != "4.0.14" || pins["radarr"].Digest != "sha256:abc" {
 		t.Fatalf("pins = %v", pins)
 	}
 	if _, ok := pins["plex"]; ok {
@@ -167,14 +201,9 @@ func loadStatusSeedbox(t *testing.T, values string) *seedbox.Seedbox {
 func TestStatusHeldNamesItsReason(t *testing.T) {
 	f := statusTest()
 	f.Holds = []snapshot.Hold{{App: "radarr", Avoiding: snapshot.ImageRef{Tag: "6.3"}}}
-	f.Pins = map[string]string{"sonarr": "4.0.14", "autobrr": "1.2"}
 	got := statusHeld(f)
 	if !strings.Contains(got, "radarr (rolled back from 6.3)") {
 		t.Fatalf("held = %q", got)
-	}
-	// Pins are named in app order, so two runs read the same.
-	if strings.Index(got, "autobrr") > strings.Index(got, "sonarr") {
-		t.Fatalf("pins are not in app order: %q", got)
 	}
 }
 

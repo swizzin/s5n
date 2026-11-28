@@ -249,6 +249,13 @@ const (
 // Row is the plan's line for one move. Only a copied app is said to be
 // stopped; an uncopied one says why, so the operator decides.
 func (m SnapshotMove) Row() string {
+	if m.Rebuilt() && m.Uncopied == UncopiedNone {
+		line := fmt.Sprintf("%s: %s was rebuilt, %s -> %s", m.App, m.Ran.Tag, shortDigest(m.Ran.Digest), shortDigest(m.MovedTo.Digest))
+		if !m.Copied {
+			line += " without a snapshot (nothing to copy)"
+		}
+		return line
+	}
 	switch m.Uncopied {
 	case UncopiedNoDigest:
 		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (no pod reports the bytes it runs under tag %s)",
@@ -266,6 +273,13 @@ func (m SnapshotMove) Row() string {
 	}
 	return fmt.Sprintf("%s: moves from %s to %s without a snapshot (nothing to copy)",
 		m.App, m.Ran.Label(), m.MovedTo.Label())
+}
+
+// Rebuilt reports one image republished under the tag it already had: the app moves
+// by digest alone, so a row naming both tags would read as no move at all.
+func (m SnapshotMove) Rebuilt() bool {
+	return m.Ran.Tag != "" && m.Ran.Tag == m.MovedTo.Tag &&
+		m.Ran.Digest != "" && m.Ran.Digest != m.MovedTo.Digest
 }
 
 // SnapshotWork is every app this apply moves; all share one copy.
@@ -318,6 +332,14 @@ type Options struct {
 	// against the schema; the seedbox is passed so no file is loaded twice. nil
 	// keeps no holds.
 	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// Pins overlays the digest each tag pin renders, resolving a tag the box has
+	// no record for. A bare apply sets it; update sets PinDigests instead, because
+	// its plan already asked.
+	Pins func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// PinDigests is the digest this run renders for each app pinned to a tag. nil
+	// means Pins decides; an empty map means the caller resolved and there is
+	// nothing pinned.
+	PinDigests map[string]string
 	// Snapshots copies apps before their images move; only `box apply` sets it.
 	Snapshots Snapshotter
 	// NetworkProof proves the cluster's CNI enforces NetworkPolicy before any app
@@ -464,6 +486,27 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		overlayTree(values, box)
+		if err := seedbox.Validate(chart.Schema, values); err != nil {
+			return res, err
+		}
+	}
+	// A tag pin renders repo:tag@digest; box never installs a tag alone. A step
+	// carries the digests its plan resolved, so this apply asks no registry.
+	if opts.PinDigests == nil {
+		if opts.Pins != nil {
+			pinned, err := opts.Pins(ctx, sb, chart, values)
+			if err != nil {
+				return res, err
+			}
+			if len(pinned) > 0 {
+				overlayTree(values, pinned)
+				if err := seedbox.Validate(chart.Schema, values); err != nil {
+					return res, err
+				}
+			}
+		}
+	} else if len(opts.PinDigests) > 0 {
+		overlayTree(values, pinDigests(opts.PinDigests))
 		if err := seedbox.Validate(chart.Schema, values); err != nil {
 			return res, err
 		}
@@ -908,6 +951,25 @@ func snapshotNotes(dirs SnapshotDirs) []string {
 		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
 	}
 	return notes
+}
+
+// shortDigest is the first eight hex characters, the handle a person reads.
+func shortDigest(digest string) string {
+	hex := strings.TrimPrefix(digest, "sha256:")
+	if len(hex) > 8 {
+		return "sha256:" + hex[:8] + "…"
+	}
+	return digest
+}
+
+// pinDigests is the values fragment carrying one digest per pinned app: the tag
+// stays in the values, so the chart renders repo:tag@digest.
+func pinDigests(digests map[string]string) map[string]any {
+	apps := make(map[string]any, len(digests))
+	for app, digest := range digests {
+		apps[app] = map[string]any{"image": map[string]any{"digest": digest}}
+	}
+	return map[string]any{"apps": apps}
 }
 
 // configRoot is the grant's config path, where copies and holds live.

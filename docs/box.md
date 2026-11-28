@@ -535,6 +535,8 @@ Status per command: **D** decided, **P** proposed.
 | `box remove <app>` | root | removes an app, keeping its config; `--purge` deletes it | D |
 | `box apply` | root, user | makes the seedbox match the edited values: diff, confirm, apply | D |
 | `box update [app]` | root, user | moves to the next chart release; with an app, only that app | D |
+| `box pin <app> <ref>` | root, user | follows one app's tag, or freezes it at a digest (`5.3`, `5.3-lt2.1`, `sha256:…`, `tag@digest`), then applies | D |
+| `box unpin <app>` | root, user | lets one app follow the chart's pins again, then applies | D |
 | `box status` | root, user | the one-screen answer to "is my box okay?" | D |
 | `box doctor` | root, user | the slow probes behind status | D |
 | `box logs <app>` | root, user | the app's logs | D |
@@ -1152,15 +1154,15 @@ says so ("radarr: held at 6.1 by your values"). Removing the pin releases it.
 **Digests are box's promise; the chart accepts a tag (decided).** The chart's own pins
 are always a tag and a digest, so a release runs the bytes its e2e tested. A pin in
 values may be a tag alone, the way any chart takes one: the chart renders `repo:tag`
-and refuses nothing, because asking a Helm user for a sha to pin `6.1` is hostile. Such
-a pin is mutable. Each node runs whatever the tag pointed at when it first pulled, and a
-reschedule or an image GC can pull different bytes with no release behind them; that is
-the user's choice. Every pin box writes (`rollback --pin`, a hold) carries the tag and
-the digest together, so box never creates a mutable pin itself. Proposed, not built:
-`status` and `doctor` name a tag-only pin ("radarr: pinned to tag 6.1 without a
-digest; it can change under you"), reading the running digest from the pod's
-`imageID`, since box records none for it; and the chart's `NOTES.txt` names one on
-`helm install`/`upgrade`, without failing.
+and refuses nothing, because asking a Helm user for a sha to pin `6.1` is hostile, and a
+plain `helm install` keeps that behaviour. box does not: a tag pin follows its
+publisher, and what it follows is a digest box resolves and records in
+`<config root>/.box/pins.json`, never in the values. Each `box update` resolves every
+tag pin again, so a rebuilt tag arrives as an ordinary update with its snapshot; a
+`box apply` renders the digest the box recorded and resolves only a tag it has never
+seen; and every render is `repo:tag@digest`, so no node runs bytes no run chose.
+`box pin <app> <ref>` writes one and `box unpin <app>` removes it. Every pin box writes
+itself (`rollback --pin`, a hold) carries the tag and the digest together.
 
 **The s5n image is the chart's one tag-only pin (proposed).** `variants.yaml` ships
 `s5n` with an empty digest because the image and the chart share a tag and the digest
@@ -1911,7 +1913,12 @@ registry, so it is quick from a shell prompt. One line, segments joined by ` · 
 3. the next check: `timer off` (root's config), `timer not installed` (no unit on this
    host), `next check within 15m` (due or overdue), or `next check ~04:12`;
 4. what's held, left out when nothing is: `held: box, release 0.5.2 (failed), radarr
-   (rolled back from 6.3), sonarr (pinned)`.
+   (rolled back from 6.3)`.
+
+A pinned app is one line under that, because the line above cannot say whether a pin
+follows or is frozen: `qbittorrent: follows 5.3-lt2.1 (sha256:abcd1234…, checked Nov
+27)` from the record beside the snapshots, or `radarr: frozen at sha256:abcd1234…`. It
+reads the values and the record, never a registry.
 
 `box status` takes `--record`, `--grant`, `--values` and `--kubeconfig`. The rest of
 "status and doctor" stays proposed.

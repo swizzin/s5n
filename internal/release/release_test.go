@@ -238,6 +238,10 @@ type fakes struct {
 	secret SecretKeys
 	// netProof is the cluster's policy proof; nil means this cluster needs none.
 	netProof func(context.Context, string, Chart, map[string]any) error
+	// pins and pinDigests are the tag pins' two answers: resolved here, or by
+	// the step the caller ran.
+	pins       func(context.Context, *seedbox.Seedbox, Chart, map[string]any) (map[string]any, error)
+	pinDigests map[string]string
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -325,6 +329,8 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 		f.app.OpenSecret = func(string) (SecretKeys, error) { return f.secret, nil }
 	}
 	opts.NetworkProof = f.netProof
+	opts.Pins = f.pins
+	opts.PinDigests = f.pinDigests
 	return f.app.Apply(context.Background(), opts)
 }
 
